@@ -1,0 +1,2 @@
+ALTER TABLE chats
+ADD COLUMN IF NOT EXISTS auto_delete_seconds INTEGER;

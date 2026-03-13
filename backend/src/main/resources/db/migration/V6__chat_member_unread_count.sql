@@ -1,0 +1,2 @@
+ALTER TABLE chat_members
+    ADD COLUMN IF NOT EXISTS unread_count INTEGER NOT NULL DEFAULT 0;

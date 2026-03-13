@@ -1,0 +1,19 @@
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS username VARCHAR(64) UNIQUE,
+    ADD COLUMN IF NOT EXISTS about VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS phone_privacy VARCHAR(16) NOT NULL DEFAULT 'EVERYBODY',
+    ADD COLUMN IF NOT EXISTS last_seen_privacy VARCHAR(16) NOT NULL DEFAULT 'EVERYBODY',
+    ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMPTZ;
+
+ALTER TABLE chat_members
+    ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS contacts (
+    owner_user_id UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    contact_user_id UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    contact_name VARCHAR(120) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (owner_user_id, contact_user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_contacts_contact_user_id ON contacts (contact_user_id);

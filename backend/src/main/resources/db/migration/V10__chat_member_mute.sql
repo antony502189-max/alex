@@ -1,0 +1,2 @@
+ALTER TABLE chat_members
+    ADD COLUMN IF NOT EXISTS muted_until TIMESTAMPTZ;

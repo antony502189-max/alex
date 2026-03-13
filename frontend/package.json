@@ -1,0 +1,42 @@
+{
+  "name": "alex-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "prebuild": "expo prebuild",
+    "run:android": "expo run:android",
+    "run:ios": "expo run:ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stomp/stompjs": "^7.0.0",
+    "expo": "~55.0.5",
+    "expo-av": "^16.0.8",
+    "expo-device": "~55.0.9",
+    "expo-document-picker": "~14.0.7",
+    "expo-file-system": "~19.0.17",
+    "expo-notifications": "~55.0.11",
+    "expo-screen-capture": "~55.0.8",
+    "expo-secure-store": "~55.0.8",
+    "expo-sharing": "~14.0.7",
+    "expo-sqlite": "~55.0.10",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-native": "0.83.2",
+    "react-native-web": "~0.21.0",
+    "react-native-webrtc": "^124.0.7",
+    "react-native-webview": "13.16.0",
+    "tweetnacl": "^1.0.3",
+    "tweetnacl-util": "^0.15.1",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~5.9.2"
+  }
+}

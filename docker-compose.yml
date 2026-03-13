@@ -1,0 +1,131 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: alex-postgres
+    environment:
+      POSTGRES_DB: alex
+      POSTGRES_USER: alex
+      POSTGRES_PASSWORD: alex
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U alex -d alex"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  cassandra:
+    image: cassandra:5.0
+    container_name: alex-cassandra
+    environment:
+      CASSANDRA_CLUSTER_NAME: alex-cluster
+      CASSANDRA_DC: dc1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      HEAP_NEWSIZE: 256M
+      MAX_HEAP_SIZE: 1024M
+    ports:
+      - "9042:9042"
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 20
+
+  cassandra-init:
+    image: cassandra:5.0
+    container_name: alex-cassandra-init
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./infra/cassandra/init.cql:/init/init.cql:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - cqlsh cassandra 9042 -f /init/init.cql
+    restart: "no"
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
+    container_name: alex-minio
+    environment:
+      MINIO_ROOT_USER: alexminio
+      MINIO_ROOT_PASSWORD: alexminio-secret
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.1
+    container_name: alex-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.7.1
+    container_name: alex-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  backend:
+    build:
+      context: ./backend
+    container_name: alex-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_started
+      minio:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/alex
+      POSTGRES_USER: alex
+      POSTGRES_PASSWORD: alex
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_PORT: 9042
+      CASSANDRA_KEYSPACE: alex_messenger
+      CASSANDRA_DATACENTER: dc1
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      ALEX_S3_ENDPOINT: http://minio:9000
+      ALEX_S3_PUBLIC_ENDPOINT: http://localhost:9000
+      ALEX_S3_ACCESS_KEY: alexminio
+      ALEX_S3_SECRET_KEY: alexminio-secret
+      ALEX_S3_BUCKET: alex-media
+      ALEX_INTERNAL_SYSTEM_TOKEN: dev-li-token-change-me
+      ALEX_LAWFUL_SYSTEM_TOKEN: dev-li-token-change-me
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres-data:
+  cassandra-data:
+  minio-data:

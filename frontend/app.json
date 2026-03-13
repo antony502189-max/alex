@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Alex",
+    "slug": "alex-messenger",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "ios": {
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Voice messages and calls require microphone access.",
+        "NSCameraUsageDescription": "Video calls require camera access."
+      }
+    },
+    "android": {
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO",
+        "READ_MEDIA_IMAGES",
+        "POST_NOTIFICATIONS"
+      ]
+    },
+    "plugins": [
+      "expo-notifications",
+      "expo-sqlite",
+      "expo-secure-store"
+    ],
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "jsEngine": "hermes"
+  }
+}

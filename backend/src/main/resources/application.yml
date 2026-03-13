@@ -1,0 +1,199 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: alex-backend
+  profiles:
+    default: local
+  servlet:
+    multipart:
+      max-file-size: ${ALEX_MULTIPART_MAX_FILE_SIZE:30MB}
+      max-request-size: ${ALEX_MULTIPART_MAX_REQUEST_SIZE:35MB}
+  datasource:
+    url: ${POSTGRES_URL:jdbc:postgresql://localhost:5432/alex}
+    username: ${POSTGRES_USER:alex}
+    password: ${POSTGRES_PASSWORD:alex}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        format_sql: false
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  cassandra:
+    contact-points: ${CASSANDRA_CONTACT_POINTS:localhost}
+    port: ${CASSANDRA_PORT:9042}
+    keyspace-name: ${CASSANDRA_KEYSPACE:alex_messenger}
+    local-datacenter: ${CASSANDRA_DATACENTER:dc1}
+    schema-action: none
+    request:
+      timeout: 5s
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: ${KAFKA_GROUP_ID:alex-backend}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      max-poll-records: 200
+      properties:
+        spring.json.trusted.packages: com.alex.messenger.message,com.alex.messenger.chat.dto
+    producer:
+      acks: all
+      retries: 10
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 1
+        compression.type: lz4
+        linger.ms: 10
+        batch.size: 65536
+        spring.json.add.type.headers: false
+
+alex:
+  jwt:
+    secret: ${ALEX_JWT_SECRET:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+    ttl: ${ALEX_JWT_TTL:PT24H}
+  auth:
+    code:
+      length: ${ALEX_AUTH_CODE_LENGTH:6}
+      ttl: ${ALEX_AUTH_CODE_TTL:PT10M}
+      max-attempts: ${ALEX_AUTH_CODE_MAX_ATTEMPTS:5}
+      max-requests-per-window: ${ALEX_AUTH_CODE_MAX_REQUESTS_PER_WINDOW:3}
+      request-window: ${ALEX_AUTH_CODE_REQUEST_WINDOW:PT10M}
+      expose-debug-code: ${ALEX_AUTH_CODE_EXPOSE_DEBUG_CODE:true}
+    refresh:
+      ttl: ${ALEX_AUTH_REFRESH_TTL:P30D}
+    cleanup:
+      batch-size: ${ALEX_AUTH_CLEANUP_BATCH_SIZE:200}
+    two-factor:
+      challenge-ttl: ${ALEX_AUTH_2FA_CHALLENGE_TTL:PT10M}
+      max-attempts: ${ALEX_AUTH_2FA_MAX_ATTEMPTS:5}
+      salt-length-bytes: ${ALEX_AUTH_2FA_SALT_LENGTH_BYTES:16}
+      pbkdf2-iterations: ${ALEX_AUTH_2FA_PBKDF2_ITERATIONS:210000}
+      min-password-length: ${ALEX_AUTH_2FA_MIN_PASSWORD_LENGTH:8}
+    qr:
+      challenge-ttl: ${ALEX_AUTH_QR_CHALLENGE_TTL:PT10M}
+      token-bytes: ${ALEX_AUTH_QR_TOKEN_BYTES:32}
+  kafka:
+    chat-messages-topic: ${ALEX_CHAT_MESSAGES_TOPIC:chat-messages}
+    chat-messages-partitions: ${ALEX_CHAT_MESSAGES_PARTITIONS:12}
+    chat-messages-replication-factor: ${ALEX_CHAT_MESSAGES_REPLICATION_FACTOR:1}
+    chat-typing-events-topic: ${ALEX_CHAT_TYPING_EVENTS_TOPIC:chat-typing-events}
+    chat-typing-events-partitions: ${ALEX_CHAT_TYPING_EVENTS_PARTITIONS:12}
+    chat-typing-events-replication-factor: ${ALEX_CHAT_TYPING_EVENTS_REPLICATION_FACTOR:1}
+    chat-read-events-topic: ${ALEX_CHAT_READ_EVENTS_TOPIC:chat-read-events}
+    chat-read-events-partitions: ${ALEX_CHAT_READ_EVENTS_PARTITIONS:12}
+    chat-read-events-replication-factor: ${ALEX_CHAT_READ_EVENTS_REPLICATION_FACTOR:1}
+    chat-pin-events-topic: ${ALEX_CHAT_PIN_EVENTS_TOPIC:chat-pin-events}
+    chat-pin-events-partitions: ${ALEX_CHAT_PIN_EVENTS_PARTITIONS:12}
+    chat-pin-events-replication-factor: ${ALEX_CHAT_PIN_EVENTS_REPLICATION_FACTOR:1}
+    listener-concurrency: ${ALEX_KAFKA_LISTENER_CONCURRENCY:6}
+  internal:
+    system-token: ${ALEX_INTERNAL_SYSTEM_TOKEN:${ALEX_LAWFUL_SYSTEM_TOKEN:dev-li-token-change-me}}
+  lawful:
+    system-token: ${ALEX_LAWFUL_SYSTEM_TOKEN:dev-li-token-change-me}
+  features:
+    stories: ${ALEX_FEATURE_STORIES_ENABLED:true}
+    bots: ${ALEX_FEATURE_BOTS_ENABLED:true}
+    calls: ${ALEX_FEATURE_CALLS_ENABLED:true}
+    secret-chats: ${ALEX_FEATURE_SECRET_CHATS_ENABLED:true}
+    admin-compliance: ${ALEX_FEATURE_ADMIN_COMPLIANCE_ENABLED:true}
+    lawful-direct-export: ${ALEX_FEATURE_LAWFUL_DIRECT_EXPORT_ENABLED:false}
+    group-calls: ${ALEX_FEATURE_GROUP_CALLS_ENABLED:false}
+    story-interactions: ${ALEX_FEATURE_STORY_INTERACTIONS_ENABLED:false}
+    bot-api-full: ${ALEX_FEATURE_BOT_API_FULL_ENABLED:false}
+    business: ${ALEX_FEATURE_BUSINESS_ENABLED:false}
+    payments: ${ALEX_FEATURE_PAYMENTS_ENABLED:false}
+    premium: ${ALEX_FEATURE_PREMIUM_ENABLED:false}
+    monetization: ${ALEX_FEATURE_MONETIZATION_ENABLED:false}
+    translations: ${ALEX_FEATURE_TRANSLATIONS_ENABLED:false}
+  lawful:
+    direct-export:
+      inline-message-limit: ${ALEX_LAWFUL_DIRECT_EXPORT_INLINE_MESSAGE_LIMIT:500}
+  translations:
+    provider-url: ${ALEX_TRANSLATIONS_PROVIDER_URL:}
+    api-key: ${ALEX_TRANSLATIONS_API_KEY:}
+    timeout: ${ALEX_TRANSLATIONS_TIMEOUT:PT5S}
+  calls:
+    rtc:
+      ice-servers:
+        - url: ${ALEX_CALLS_STUN_URL:stun:stun.l.google.com:19302}
+        - url: ${ALEX_CALLS_TURN_URL:}
+          username: ${ALEX_CALLS_TURN_USERNAME:}
+          credential: ${ALEX_CALLS_TURN_CREDENTIAL:}
+      generated-turn:
+        enabled: ${ALEX_CALLS_GENERATED_TURN_ENABLED:false}
+        url: ${ALEX_CALLS_GENERATED_TURN_URL:}
+        shared-secret: ${ALEX_CALLS_GENERATED_TURN_SHARED_SECRET:}
+        username-prefix: ${ALEX_CALLS_GENERATED_TURN_USERNAME_PREFIX:alex}
+        ttl: ${ALEX_CALLS_GENERATED_TURN_TTL:PT12H}
+      media-policy:
+        video-bitrate-high-kbps: ${ALEX_CALLS_VIDEO_BITRATE_HIGH_KBPS:1400}
+        video-bitrate-medium-kbps: ${ALEX_CALLS_VIDEO_BITRATE_MEDIUM_KBPS:800}
+        video-bitrate-low-kbps: ${ALEX_CALLS_VIDEO_BITRATE_LOW_KBPS:240}
+        screen-share-bitrate-kbps: ${ALEX_CALLS_SCREEN_SHARE_BITRATE_KBPS:1600}
+        stats-sample-interval-seconds: ${ALEX_CALLS_STATS_SAMPLE_INTERVAL_SECONDS:4}
+        degraded-connection-rtt-ms: ${ALEX_CALLS_DEGRADED_CONNECTION_RTT_MS:220}
+        poor-connection-rtt-ms: ${ALEX_CALLS_POOR_CONNECTION_RTT_MS:450}
+        degraded-connection-packet-loss-percent: ${ALEX_CALLS_DEGRADED_CONNECTION_PACKET_LOSS_PERCENT:5}
+        poor-connection-packet-loss-percent: ${ALEX_CALLS_POOR_CONNECTION_PACKET_LOSS_PERCENT:12}
+  bots:
+    long-poll:
+      max-timeout-seconds: ${ALEX_BOTS_LONG_POLL_MAX_TIMEOUT_SECONDS:30}
+      max-limit: ${ALEX_BOTS_LONG_POLL_MAX_LIMIT:100}
+    webhook:
+      dispatch-interval-ms: ${ALEX_BOTS_WEBHOOK_DISPATCH_INTERVAL_MS:5000}
+      request-timeout: ${ALEX_BOTS_WEBHOOK_REQUEST_TIMEOUT:PT10S}
+    web-app:
+      init-secret: ${ALEX_BOT_WEB_APP_INIT_SECRET:dev-bot-web-app-secret-change-me}
+      launch-ttl: ${ALEX_BOT_WEB_APP_LAUNCH_TTL:PT10M}
+      platform: ${ALEX_BOT_WEB_APP_PLATFORM:alex-mobile}
+  media:
+    s3:
+      endpoint: ${ALEX_S3_ENDPOINT:http://localhost:9000}
+      public-endpoint: ${ALEX_S3_PUBLIC_ENDPOINT:http://localhost:9000}
+      access-key: ${ALEX_S3_ACCESS_KEY:alexminio}
+      secret-key: ${ALEX_S3_SECRET_KEY:alexminio-secret}
+      bucket: ${ALEX_S3_BUCKET:alex-media}
+      presigned-url-ttl: ${ALEX_S3_PRESIGNED_URL_TTL:PT12H}
+    processing:
+      batch-size: ${ALEX_MEDIA_PROCESSING_BATCH_SIZE:20}
+      preview-max-dimension: ${ALEX_MEDIA_PREVIEW_MAX_DIMENSION:1280}
+      thumbnail-max-dimension: ${ALEX_MEDIA_THUMBNAIL_MAX_DIMENSION:320}
+  notifications:
+    expo:
+      enabled: ${ALEX_EXPO_NOTIFICATIONS_ENABLED:true}
+      base-url: ${ALEX_EXPO_NOTIFICATIONS_BASE_URL:https://exp.host}
+      sound: ${ALEX_EXPO_NOTIFICATIONS_SOUND:default}
+  storage:
+    root: ${ALEX_STORAGE_ROOT:storage}
+    attachments:
+      max-file-size-bytes: ${ALEX_ATTACHMENTS_MAX_FILE_SIZE_BYTES:26214400}
+      resumable:
+        chunk-size-bytes: ${ALEX_ATTACHMENTS_RESUMABLE_CHUNK_SIZE_BYTES:1048576}
+        session-ttl: ${ALEX_ATTACHMENTS_RESUMABLE_SESSION_TTL:PT6H}
+        cleanup-batch-size: ${ALEX_ATTACHMENTS_RESUMABLE_CLEANUP_BATCH_SIZE:100}
+    stories:
+      max-file-size-bytes: ${ALEX_STORIES_MAX_FILE_SIZE_BYTES:26214400}
+    profile-photos:
+      max-file-size-bytes: ${ALEX_PROFILE_PHOTOS_MAX_FILE_SIZE_BYTES:5242880}
+
+logging:
+  level:
+    org.springframework.web: INFO
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never

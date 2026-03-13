@@ -1,0 +1,18 @@
+spring:
+  config:
+    activate:
+      on-profile: test
+  flyway:
+    clean-disabled: false
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+alex:
+  features:
+    lawful-direct-export: true
+  notifications:
+    expo:
+      enabled: false

@@ -1,0 +1,14 @@
+spring:
+  config:
+    activate:
+      on-profile: local
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+alex:
+  auth:
+    code:
+      expose-debug-code: true

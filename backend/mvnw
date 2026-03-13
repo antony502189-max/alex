@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+BASE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+WRAPPER_JAR="$BASE_DIR/.mvn/wrapper/maven-wrapper.jar"
+
+if [ ! -f "$WRAPPER_JAR" ]; then
+  echo "Missing $WRAPPER_JAR" >&2
+  exit 1
+fi
+
+JAVA_CMD="${JAVA_HOME:-}/bin/java"
+if [ ! -x "$JAVA_CMD" ]; then
+  JAVA_CMD="$(command -v java)"
+fi
+
+if [ -z "${JAVA_CMD:-}" ]; then
+  echo "java command was not found. Install Java 17+ or set JAVA_HOME." >&2
+  exit 1
+fi
+
+exec "$JAVA_CMD" \
+  -Dmaven.multiModuleProjectDirectory="$BASE_DIR" \
+  -classpath "$WRAPPER_JAR" \
+  org.apache.maven.wrapper.MavenWrapperMain "$@"

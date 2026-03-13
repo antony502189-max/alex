@@ -1,0 +1,13 @@
+ALTER TABLE stories
+    ALTER COLUMN text DROP NOT NULL;
+
+ALTER TABLE stories
+    ADD COLUMN IF NOT EXISTS media_kind VARCHAR(16),
+    ADD COLUMN IF NOT EXISTS media_file_name VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS media_content_type VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS media_duration_ms BIGINT,
+    ADD COLUMN IF NOT EXISTS media_storage_provider VARCHAR(32),
+    ADD COLUMN IF NOT EXISTS media_bucket_name VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS media_object_key VARCHAR(512),
+    ADD COLUMN IF NOT EXISTS audience VARCHAR(16) NOT NULL DEFAULT 'DEFAULT',
+    ADD COLUMN IF NOT EXISTS allowed_viewer_user_ids TEXT NOT NULL DEFAULT '';

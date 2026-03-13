@@ -1,0 +1,2 @@
+ALTER TABLE chat_members
+    ADD COLUMN IF NOT EXISTS anonymous_admin BOOLEAN NOT NULL DEFAULT FALSE;
