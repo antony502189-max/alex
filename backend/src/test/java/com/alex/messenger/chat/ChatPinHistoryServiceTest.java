@@ -2,6 +2,8 @@ package com.alex.messenger.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.alex.messenger.chat.dto.PinnedMessageHistoryResponse;
@@ -49,7 +51,7 @@ class ChatPinHistoryServiceTest {
     }
 
     @Test
-    void listPinnedMessagesReturnsHistoryWithMessagePreviews() {
+    void listPinnedMessagesSkipsInaccessiblePinsAndReturnsAccessiblePreviews() {
         UUID requesterId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();
         UUID activeMessageId = UUID.randomUUID();
@@ -86,13 +88,51 @@ class ChatPinHistoryServiceTest {
 
         List<PinnedMessageHistoryResponse> response = chatPinHistoryService.listPinnedMessages(requesterId, chatId, 20);
 
-        assertThat(response).hasSize(2);
+        assertThat(response).hasSize(1);
         assertThat(response.get(0).active()).isTrue();
         assertThat(response.get(0).message()).isNotNull();
         assertThat(response.get(0).message().text()).isEqualTo("Current pin");
         assertThat(response.get(0).pinnedByDisplayName()).isEqualTo("Moderator");
-        assertThat(response.get(1).active()).isFalse();
-        assertThat(response.get(1).message()).isNull();
+    }
+
+    @Test
+    void listPinnedMessagesBackfillsPastFilteredFirstPage() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID adminUserId = UUID.randomUUID();
+        UUID visibleMessageId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        List<ChatPinEventEntity> firstPage = java.util.stream.IntStream.range(0, 6)
+                .mapToObj(index -> pinEvent(chatId, UUID.randomUUID(), adminUserId, false, Instant.parse("2026-03-12T11:59:30Z")))
+                .toList();
+        List<ChatPinEventEntity> secondPage = List.of(pinEvent(chatId, visibleMessageId, adminUserId, true, null));
+
+        UserEntity admin = new UserEntity();
+        admin.setId(adminUserId);
+        admin.setDisplayName("Moderator");
+
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(chatPinEventRepository.findAllByChatIdOrderByPinnedAtDesc(eq(chatId), eq(org.springframework.data.domain.PageRequest.of(0, 6))))
+                .thenReturn(firstPage);
+        when(chatPinEventRepository.findAllByChatIdOrderByPinnedAtDesc(eq(chatId), eq(org.springframework.data.domain.PageRequest.of(1, 6))))
+                .thenReturn(secondPage);
+        when(userRepository.findAllById(List.of(adminUserId))).thenReturn(List.of(admin));
+        for (ChatPinEventEntity hiddenPin : firstPage) {
+            when(messageService.getMessage(requesterId, hiddenPin.getMessageId())).thenThrow(
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found")
+            );
+        }
+        when(messageService.getMessage(requesterId, visibleMessageId)).thenReturn(message(chatId, visibleMessageId, "Older visible pin"));
+
+        List<PinnedMessageHistoryResponse> response = chatPinHistoryService.listPinnedMessages(requesterId, chatId, 1);
+
+        assertThat(response).hasSize(1);
+        assertThat(response.get(0).message().messageId()).isEqualTo(visibleMessageId);
+        assertThat(response.get(0).message().text()).isEqualTo("Older visible pin");
+        verify(chatPinEventRepository).findAllByChatIdOrderByPinnedAtDesc(eq(chatId), eq(org.springframework.data.domain.PageRequest.of(1, 6)));
     }
 
     private ChatPinEventEntity pinEvent(

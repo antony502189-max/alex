@@ -39,6 +39,7 @@ public record ChatSummaryResponse(
         boolean joinRequiresApproval,
         boolean commentsEnabled,
         boolean reactionsEnabled,
-        boolean crossPostingEnabled
+        boolean crossPostingEnabled,
+        ChatLastMessagePreviewResponse lastMessage
 ) {
 }

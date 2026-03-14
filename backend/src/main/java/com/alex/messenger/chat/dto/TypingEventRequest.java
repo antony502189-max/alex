@@ -1,6 +1,9 @@
 package com.alex.messenger.chat.dto;
 
+import java.util.UUID;
+
 public record TypingEventRequest(
-        boolean typing
+        boolean typing,
+        UUID topicId
 ) {
 }

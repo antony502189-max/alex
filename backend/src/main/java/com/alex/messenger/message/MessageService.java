@@ -37,6 +37,7 @@ import com.alex.messenger.poll.PollEntity;
 import com.alex.messenger.poll.PollService;
 import com.alex.messenger.sticker.StickerService;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -55,6 +56,22 @@ import org.springframework.web.server.ResponseStatusException;
 @Service
 @RequiredArgsConstructor
 public class MessageService {
+
+    private record ResolvedReadScope(
+            ForumTopicEntity topic,
+            UUID threadRootMessageId
+    ) {
+    }
+
+    private record VisibleMessageReferences(
+            UUID replyToMessageId,
+            UUID threadRootMessageId,
+            UUID discussionChatId,
+            UUID discussionRootMessageId,
+            UUID forwardedFromChatId,
+            UUID forwardedFromMessageId
+    ) {
+    }
 
     private final MessageRepository messageRepository;
     private final MessageTopicRepository messageTopicRepository;
@@ -133,7 +150,7 @@ public class MessageService {
                         senderId,
                         existing,
                         messageReactionService.getSummaries(existing.getMessageId()),
-                        attachmentService.getResponses(existing.getAttachmentIds()),
+                        getAttachmentResponses(senderId, existing.getAttachmentIds()),
                         request.clientMessageId()
                 );
             }
@@ -149,7 +166,8 @@ public class MessageService {
                 chat.getId(),
                 senderId,
                 content,
-                replyTarget != null ? replyTarget.getSenderId() : null
+                replyTarget != null ? replyTarget.getSenderId() : null,
+                lookup.getTopicId()
         );
         publish(lookup, recipientIds, request.clientMessageId());
         botUpdateService.maybeEnqueueIncomingMessage(chat, senderId, lookup);
@@ -159,7 +177,7 @@ public class MessageService {
             messageIdempotencyService.markCompleted(senderId, request.clientMessageId(), lookup.getMessageId());
         }
 
-        return toResponse(senderId, lookup, List.of(), attachmentService.getResponses(attachmentIds), request.clientMessageId());
+        return toResponse(senderId, lookup, List.of(), getAttachmentResponses(senderId, attachmentIds), request.clientMessageId());
     }
 
     @Transactional
@@ -267,7 +285,7 @@ public class MessageService {
                         senderId,
                         existing,
                         messageReactionService.getSummaries(existing.getMessageId()),
-                        attachmentService.getResponses(existing.getAttachmentIds()),
+                        getAttachmentResponses(senderId, existing.getAttachmentIds()),
                         request.clientMessageId()
                 );
             }
@@ -299,7 +317,8 @@ public class MessageService {
                 chat.getId(),
                 senderId,
                 messageContentCodec.plain(selection.text()),
-                replyTarget != null ? replyTarget.getSenderId() : null
+                replyTarget != null ? replyTarget.getSenderId() : null,
+                lookup.getTopicId()
         );
         publish(lookup, recipientIds, request.clientMessageId());
         if (request.clientMessageId() != null) {
@@ -414,16 +433,15 @@ public class MessageService {
             UUID threadRootMessageId
     ) {
         ChatEntity chat = chatService.getOwnedChat(requesterId, chatId);
-        ForumTopicEntity topic = forumTopicService.resolveTopicForRead(chat, requesterId, topicId);
-        UUID resolvedThreadRootMessageId = resolveThreadRootForRead(requesterId, chatId, threadRootMessageId);
+        ResolvedReadScope readScope = resolveReadScope(chat, requesterId, topicId, threadRootMessageId);
         return scheduledMessageRepository.findAllBySenderIdAndChatIdAndStatusInOrderByScheduledAtAsc(
                         requesterId,
                         chatId,
                         List.of("PENDING", "WAITING_ONLINE")
                 ).stream()
-                .filter(message -> Objects.equals(message.getTopicId(), topic != null ? topic.getId() : null))
-                .filter(message -> Objects.equals(message.getThreadRootMessageId(), resolvedThreadRootMessageId))
-                .map(this::toScheduledResponse)
+                .filter(message -> Objects.equals(message.getTopicId(), readScope.topic() != null ? readScope.topic().getId() : null))
+                .filter(message -> Objects.equals(message.getThreadRootMessageId(), readScope.threadRootMessageId()))
+                .map(message -> toScheduledResponse(requesterId, message))
                 .toList();
     }
 
@@ -482,31 +500,35 @@ public class MessageService {
         try {
             ChatEntity chat = chatService.getOwnedChat(scheduledMessage.getSenderId(), scheduledMessage.getChatId());
             chatService.ensureCanPost(chat, scheduledMessage.getSenderId());
-            ensureScheduledCommentPolicyAllowsWrite(chat, scheduledMessage);
+            ForumTopicEntity topic = forumTopicService.resolveTopicForWrite(
+                    chat,
+                    scheduledMessage.getSenderId(),
+                    scheduledMessage.getTopicId()
+            );
+            List<UUID> attachmentIds = parseAttachmentIds(scheduledMessage.getAttachmentIds());
+            attachmentService.assertUsableAttachments(scheduledMessage.getSenderId(), chat.getId(), attachmentIds);
+            MessageLookupEntity replyTarget = resolveScheduledReplyTargetForDispatch(
+                    chat,
+                    topic != null ? topic.getId() : null,
+                    scheduledMessage
+            );
+            ensureScheduledCommentPolicyAllowsWrite(chat, replyTarget);
 
             MessageLookupEntity lookup = buildMessageLookupFromEncrypted(
                     chat,
                     scheduledMessage.getSenderId(),
-                    scheduledMessage.getTopicId(),
+                    topic != null ? topic.getId() : null,
                     scheduledMessage.getReplyToMessageId(),
                     null,
                     null,
                     null,
                     scheduledMessage.getStickerId(),
-                    parseAttachmentIds(scheduledMessage.getAttachmentIds()),
+                    attachmentIds,
                     scheduledMessage.getCiphertext(),
                     scheduledMessage.getNonce(),
                     scheduledMessage.getKeyVersion()
             );
-            applyThreadMetadata(
-                    lookup,
-                    null,
-                    scheduledMessage.getThreadRootMessageId(),
-                    scheduledMessage.getDiscussionRootMessageId() != null
-                            ? scheduledMessage.getDiscussionChatId()
-                            : null
-            );
-            lookup.setDiscussionRootMessageId(scheduledMessage.getDiscussionRootMessageId());
+            applyThreadMetadata(lookup, replyTarget, null, null);
             List<UUID> recipientIds = chatService.getRecipientIds(chat, scheduledMessage.getSenderId());
 
             persistMessage(lookup);
@@ -518,7 +540,8 @@ public class MessageService {
                 chat.getId(),
                 scheduledMessage.getSenderId(),
                 decodeMessageContent(lookup),
-                resolveReplyTargetSenderId(scheduledMessage.getReplyToMessageId())
+                resolveReplyTargetSenderId(scheduledMessage.getReplyToMessageId()),
+                lookup.getTopicId()
         );
         publish(lookup, recipientIds);
         botUpdateService.maybeEnqueueIncomingMessage(chat, scheduledMessage.getSenderId(), lookup);
@@ -584,7 +607,7 @@ public class MessageService {
                         senderId,
                         existing,
                         messageReactionService.getSummaries(existing.getMessageId()),
-                        attachmentService.getResponses(existing.getAttachmentIds()),
+                        getAttachmentResponses(senderId, existing.getAttachmentIds()),
                         request.clientMessageId()
                 );
             }
@@ -616,7 +639,8 @@ public class MessageService {
                 chat.getId(),
                 senderId,
                 messageContentCodec.plain(request.question().trim()),
-                replyTarget != null ? replyTarget.getSenderId() : null
+                replyTarget != null ? replyTarget.getSenderId() : null,
+                lookup.getTopicId()
         );
         publish(lookup, recipientIds, request.clientMessageId());
         botUpdateService.maybeEnqueueIncomingMessage(chat, senderId, lookup);
@@ -666,11 +690,16 @@ public class MessageService {
                         senderId,
                         existing,
                         messageReactionService.getSummaries(existing.getMessageId()),
-                        attachmentService.getResponses(existing.getAttachmentIds()),
+                        getAttachmentResponses(senderId, existing.getAttachmentIds()),
                         request.clientMessageId()
                 );
             }
         }
+        List<UUID> forwardedAttachmentIds = attachmentService.cloneAttachmentsToChat(
+                senderId,
+                targetChat.getId(),
+                source.getAttachmentIds() != null ? source.getAttachmentIds() : List.of()
+        );
 
         MessageLookupEntity lookup = buildNewMessage(
                 targetChat,
@@ -682,7 +711,7 @@ public class MessageService {
                 source.getMessageId(),
                 source.getPollId(),
                 source.getStickerId(),
-                source.getAttachmentIds() != null ? source.getAttachmentIds() : List.of(),
+                forwardedAttachmentIds,
                 reservedMessageId
         );
         lookup.setViaBotUserId(source.getViaBotUserId());
@@ -698,7 +727,8 @@ public class MessageService {
                 targetChat.getId(),
                 senderId,
                 sourceContent,
-                replyTarget != null ? replyTarget.getSenderId() : null
+                replyTarget != null ? replyTarget.getSenderId() : null,
+                lookup.getTopicId()
         );
         publish(lookup, recipientIds, request.clientMessageId());
         botUpdateService.maybeEnqueueIncomingMessage(targetChat, senderId, lookup);
@@ -711,7 +741,7 @@ public class MessageService {
                 senderId,
                 lookup,
                 List.of(),
-                attachmentService.getResponses(lookup.getAttachmentIds()),
+                getAttachmentResponses(senderId, lookup.getAttachmentIds()),
                 request.clientMessageId()
         );
     }
@@ -754,7 +784,7 @@ public class MessageService {
                 senderId,
                 lookup,
                 messageReactionService.getSummaries(lookup.getMessageId()),
-                attachmentService.getResponses(lookup.getAttachmentIds())
+                getAttachmentResponses(senderId, lookup.getAttachmentIds())
         );
     }
 
@@ -780,7 +810,7 @@ public class MessageService {
                 senderId,
                 lookup,
                 messageReactionService.getSummaries(lookup.getMessageId()),
-                attachmentService.getResponses(lookup.getAttachmentIds())
+                getAttachmentResponses(senderId, lookup.getAttachmentIds())
         );
     }
 
@@ -794,7 +824,7 @@ public class MessageService {
                 requesterId,
                 lookup,
                 messageReactionService.getSummaries(lookup.getMessageId()),
-                attachmentService.getResponses(lookup.getAttachmentIds())
+                getAttachmentResponses(requesterId, lookup.getAttachmentIds())
         );
     }
 
@@ -811,7 +841,7 @@ public class MessageService {
                 requesterId,
                 lookup,
                 messageReactionService.getSummaries(lookup.getMessageId()),
-                attachmentService.getResponses(lookup.getAttachmentIds())
+                getAttachmentResponses(requesterId, lookup.getAttachmentIds())
         );
     }
 
@@ -830,7 +860,7 @@ public class MessageService {
                 requesterId,
                 lookup,
                 messageReactionService.getSummaries(lookup.getMessageId()),
-                attachmentService.getResponses(lookup.getAttachmentIds())
+                getAttachmentResponses(requesterId, lookup.getAttachmentIds())
         );
     }
 
@@ -844,18 +874,17 @@ public class MessageService {
             int limit
     ) {
         ChatEntity chat = chatService.getOwnedChat(requesterId, chatId);
-        ForumTopicEntity topic = forumTopicService.resolveTopicForRead(chat, requesterId, topicId);
-        UUID resolvedThreadRootMessageId = resolveThreadRootForRead(requesterId, chatId, threadRootMessageId);
+        ResolvedReadScope readScope = resolveReadScope(chat, requesterId, topicId, threadRootMessageId);
         int normalizedLimit = Math.min(Math.max(limit, 1), 100);
 
-        if (resolvedThreadRootMessageId != null) {
-            List<MessageThreadEntity> messages = before == null
-                    ? messageThreadRepository.findRecentByThreadRootMessageId(resolvedThreadRootMessageId, normalizedLimit)
+        if (readScope.threadRootMessageId() != null) {
+            List<MessageThreadEntity> messages = new ArrayList<>(before == null
+                    ? messageThreadRepository.findRecentByThreadRootMessageId(readScope.threadRootMessageId(), normalizedLimit)
                     : messageThreadRepository.findRecentByThreadRootMessageIdBefore(
-                            resolvedThreadRootMessageId,
+                            readScope.threadRootMessageId(),
                             before,
                             normalizedLimit
-                    );
+                    ));
             Collections.reverse(messages);
             Map<UUID, List<MessageReactionSummary>> reactions =
                     messageReactionService.getSummaries(messages.stream().map(message -> message.getKey().getMessageId()).toList());
@@ -865,15 +894,15 @@ public class MessageService {
                             requesterId,
                             message,
                             reactions.getOrDefault(message.getKey().getMessageId(), List.of()),
-                            attachmentService.getResponses(message.getAttachmentIds())
+                            getAttachmentResponses(requesterId, message.getAttachmentIds())
                     ))
                     .toList();
         }
 
-        if (topic != null) {
-            List<MessageTopicEntity> messages = before == null
-                    ? messageTopicRepository.findRecentByTopicId(topic.getId(), normalizedLimit)
-                    : messageTopicRepository.findRecentByTopicIdBefore(topic.getId(), before, normalizedLimit);
+        if (readScope.topic() != null) {
+            List<MessageTopicEntity> messages = new ArrayList<>(before == null
+                    ? messageTopicRepository.findRecentByTopicId(readScope.topic().getId(), normalizedLimit)
+                    : messageTopicRepository.findRecentByTopicIdBefore(readScope.topic().getId(), before, normalizedLimit));
             Collections.reverse(messages);
             Map<UUID, List<MessageReactionSummary>> reactions =
                     messageReactionService.getSummaries(messages.stream().map(message -> message.getKey().getMessageId()).toList());
@@ -883,14 +912,14 @@ public class MessageService {
                             requesterId,
                             message,
                             reactions.getOrDefault(message.getKey().getMessageId(), List.of()),
-                            attachmentService.getResponses(message.getAttachmentIds())
+                            getAttachmentResponses(requesterId, message.getAttachmentIds())
                     ))
                     .toList();
         }
 
-        List<MessageEntity> messages = before == null
+        List<MessageEntity> messages = new ArrayList<>(before == null
                 ? messageRepository.findRecentByChatId(chat.getId(), normalizedLimit)
-                : messageRepository.findRecentByChatIdBefore(chat.getId(), before, normalizedLimit);
+                : messageRepository.findRecentByChatIdBefore(chat.getId(), before, normalizedLimit));
         Collections.reverse(messages);
         Map<UUID, List<MessageReactionSummary>> reactions =
                 messageReactionService.getSummaries(messages.stream().map(message -> message.getKey().getMessageId()).toList());
@@ -900,7 +929,7 @@ public class MessageService {
                         requesterId,
                         message,
                         reactions.getOrDefault(message.getKey().getMessageId(), List.of()),
-                        attachmentService.getResponses(message.getAttachmentIds())
+                        getAttachmentResponses(requesterId, message.getAttachmentIds())
                 ))
                 .toList();
     }
@@ -915,26 +944,25 @@ public class MessageService {
             int limit
     ) {
         ChatEntity chat = chatService.getOwnedChat(requesterId, chatId);
-        ForumTopicEntity topic = forumTopicService.resolveTopicForRead(chat, requesterId, topicId);
-        UUID resolvedThreadRootMessageId = resolveThreadRootForRead(requesterId, chatId, threadRootMessageId);
+        ResolvedReadScope readScope = resolveReadScope(chat, requesterId, topicId, threadRootMessageId);
         String normalizedQuery = query.trim().toLowerCase();
         if (normalizedQuery.isBlank()) {
             return new SearchMessagesResponse(query, List.of());
         }
 
         int normalizedLimit = Math.min(Math.max(limit, 1), 100);
-        if (resolvedThreadRootMessageId != null) {
-            List<MessageThreadEntity> threadMessages = messageThreadRepository.findAllByThreadRootMessageId(resolvedThreadRootMessageId).stream()
+        if (readScope.threadRootMessageId() != null) {
+            List<MessageThreadEntity> threadMessages = messageThreadRepository.findAllByThreadRootMessageId(readScope.threadRootMessageId()).stream()
                     .filter(message -> message.getDeletedAt() == null)
                     .toList();
             Map<UUID, String> searchCorpora = buildThreadSearchCorpora(threadMessages);
-            List<MessageThreadEntity> matches = threadMessages.stream()
+            List<MessageThreadEntity> matches = new ArrayList<>(threadMessages.stream()
                     .filter(message -> searchCorpora
                             .getOrDefault(message.getKey().getMessageId(), "")
                             .contains(normalizedQuery))
                     .sorted(java.util.Comparator.comparing(MessageThreadEntity::getCreatedAt).reversed())
                     .limit(normalizedLimit)
-                    .toList();
+                    .toList());
 
             Collections.reverse(matches);
             Map<UUID, List<MessageReactionSummary>> reactions =
@@ -947,24 +975,24 @@ public class MessageService {
                                     requesterId,
                                     message,
                                     reactions.getOrDefault(message.getKey().getMessageId(), List.of()),
-                                    attachmentService.getResponses(message.getAttachmentIds())
+                                    getAttachmentResponses(requesterId, message.getAttachmentIds())
                             ))
                             .toList()
             );
         }
 
-        if (topic != null) {
-            List<MessageTopicEntity> topicMessages = messageTopicRepository.findAllByTopicId(topic.getId()).stream()
+        if (readScope.topic() != null) {
+            List<MessageTopicEntity> topicMessages = messageTopicRepository.findAllByTopicId(readScope.topic().getId()).stream()
                     .filter(message -> message.getDeletedAt() == null)
                     .toList();
             Map<UUID, String> searchCorpora = buildTopicSearchCorpora(topicMessages);
-            List<MessageTopicEntity> matches = topicMessages.stream()
+            List<MessageTopicEntity> matches = new ArrayList<>(topicMessages.stream()
                     .filter(message -> searchCorpora
                             .getOrDefault(message.getKey().getMessageId(), "")
                             .contains(normalizedQuery))
                     .sorted(java.util.Comparator.comparing(MessageTopicEntity::getCreatedAt).reversed())
                     .limit(normalizedLimit)
-                    .toList();
+                    .toList());
 
             Collections.reverse(matches);
             Map<UUID, List<MessageReactionSummary>> reactions =
@@ -977,7 +1005,7 @@ public class MessageService {
                                     requesterId,
                                     message,
                                     reactions.getOrDefault(message.getKey().getMessageId(), List.of()),
-                                    attachmentService.getResponses(message.getAttachmentIds())
+                                    getAttachmentResponses(requesterId, message.getAttachmentIds())
                             ))
                             .toList()
             );
@@ -987,13 +1015,13 @@ public class MessageService {
                 .filter(message -> message.getDeletedAt() == null)
                 .toList();
         Map<UUID, String> searchCorpora = buildMessageSearchCorpora(chatMessages);
-        List<MessageEntity> matches = chatMessages.stream()
+        List<MessageEntity> matches = new ArrayList<>(chatMessages.stream()
                 .filter(message -> searchCorpora
                         .getOrDefault(message.getKey().getMessageId(), "")
                         .contains(normalizedQuery))
                 .sorted(java.util.Comparator.comparing(MessageEntity::getCreatedAt).reversed())
                 .limit(normalizedLimit)
-                .toList();
+                .toList());
 
         Collections.reverse(matches);
         Map<UUID, List<MessageReactionSummary>> reactions =
@@ -1006,7 +1034,7 @@ public class MessageService {
                                 requesterId,
                                 message,
                                 reactions.getOrDefault(message.getKey().getMessageId(), List.of()),
-                                attachmentService.getResponses(message.getAttachmentIds())
+                                getAttachmentResponses(requesterId, message.getAttachmentIds())
                         ))
                 .toList()
         );
@@ -1025,18 +1053,26 @@ public class MessageService {
         }
 
         int normalizedLimit = Math.min(Math.max(limit, 1), 50);
-        List<MessageEntity> candidateMessages = chatIds.stream()
-                .flatMap(chatId -> messageRepository.findAllByChatId(chatId).stream())
+        List<UUID> uniqueChatIds = new ArrayList<>(new LinkedHashSet<>(chatIds));
+        Map<UUID, ChatEntity> chatsById = new LinkedHashMap<>();
+        for (UUID chatId : uniqueChatIds) {
+            chatsById.put(chatId, chatService.getOwnedChat(requesterId, chatId));
+        }
+        List<MessageEntity> candidateMessages = uniqueChatIds.stream()
+                .flatMap(chatId -> messageRepository.findAllByChatId(chatId).stream()
+                        .filter(message -> isMessageVisibleToRequester(chatsById.get(chatId), requesterId, message.getTopicId())))
                 .filter(message -> message.getDeletedAt() == null)
                 .toList();
         Map<UUID, String> searchCorpora = buildMessageSearchCorpora(candidateMessages);
-        List<MessageEntity> matches = candidateMessages.stream()
+        List<MessageEntity> matches = new ArrayList<>(candidateMessages.stream()
                 .filter(message -> searchCorpora
                         .getOrDefault(message.getKey().getMessageId(), "")
                         .contains(normalizedQuery))
                 .sorted(java.util.Comparator.comparing(MessageEntity::getCreatedAt).reversed())
                 .limit(normalizedLimit)
-                .toList();
+                .toList());
+
+        Collections.reverse(matches);
 
         Map<UUID, List<MessageReactionSummary>> reactions =
                 messageReactionService.getSummaries(matches.stream().map(message -> message.getKey().getMessageId()).toList());
@@ -1046,7 +1082,7 @@ public class MessageService {
                         requesterId,
                         message,
                         reactions.getOrDefault(message.getKey().getMessageId(), List.of()),
-                        attachmentService.getResponses(message.getAttachmentIds())
+                        getAttachmentResponses(requesterId, message.getAttachmentIds())
                 ))
                 .toList();
     }
@@ -1058,7 +1094,7 @@ public class MessageService {
                 requesterId,
                 lookup,
                 messageReactionService.getSummaries(lookup.getMessageId()),
-                attachmentService.getResponses(lookup.getAttachmentIds())
+                getAttachmentResponses(requesterId, lookup.getAttachmentIds())
         );
     }
 
@@ -1177,6 +1213,40 @@ public class MessageService {
         );
     }
 
+    private MessageLookupEntity buildSystemMessage(
+            ChatEntity chat,
+            UUID senderId,
+            MessageTextContent content,
+            UUID topicId,
+            UUID replyToMessageId,
+            UUID forwardedFromChatId,
+            UUID forwardedFromMessageId,
+            UUID pollId,
+            UUID stickerId,
+            List<UUID> attachmentIds
+    ) {
+        EncryptedPayload encryptedPayload = chatEncryptionService.encrypt(
+                chat.getId(),
+                messageContentCodec.encode(content)
+        );
+        return buildMessageLookupFromEncrypted(
+                chat,
+                senderId,
+                topicId,
+                replyToMessageId,
+                forwardedFromChatId,
+                forwardedFromMessageId,
+                pollId,
+                stickerId,
+                attachmentIds,
+                encryptedPayload.ciphertext(),
+                encryptedPayload.nonce(),
+                encryptedPayload.keyVersion(),
+                null,
+                chatService.getRecipientIdsForSystem(chat, senderId)
+        );
+    }
+
     private MessageLookupEntity buildMessageLookupFromEncrypted(
             ChatEntity chat,
             UUID senderId,
@@ -1223,9 +1293,42 @@ public class MessageService {
             int keyVersion,
             UUID messageId
     ) {
+        return buildMessageLookupFromEncrypted(
+                chat,
+                senderId,
+                topicId,
+                replyToMessageId,
+                forwardedFromChatId,
+                forwardedFromMessageId,
+                pollId,
+                stickerId,
+                attachmentIds,
+                ciphertext,
+                nonce,
+                keyVersion,
+                messageId,
+                chatService.getRecipientIds(chat, senderId)
+        );
+    }
+
+    private MessageLookupEntity buildMessageLookupFromEncrypted(
+            ChatEntity chat,
+            UUID senderId,
+            UUID topicId,
+            UUID replyToMessageId,
+            UUID forwardedFromChatId,
+            UUID forwardedFromMessageId,
+            UUID pollId,
+            UUID stickerId,
+            List<UUID> attachmentIds,
+            String ciphertext,
+            String nonce,
+            int keyVersion,
+            UUID messageId,
+            List<UUID> recipientIds
+    ) {
         UUID resolvedMessageId = messageId != null ? messageId : Uuids.timeBased();
         Instant createdAt = Instant.ofEpochMilli(Uuids.unixTimestamp(resolvedMessageId));
-        List<UUID> recipientIds = chatService.getRecipientIds(chat, senderId);
         MessageLookupEntity lookup = new MessageLookupEntity();
         lookup.setMessageId(resolvedMessageId);
         lookup.setChatId(chat.getId());
@@ -1259,6 +1362,9 @@ public class MessageService {
         }
         MessageLookupEntity replyTo = messageLookupRepository.findById(replyToMessageId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Reply target not found"));
+        if (replyTo.getDeletedAt() != null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Reply target not found");
+        }
         if (!replyTo.getChatId().equals(chatId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Reply target belongs to another chat");
         }
@@ -1315,15 +1421,67 @@ public class MessageService {
         lookup.setDiscussionChatId(discussionChatId);
     }
 
-    private UUID resolveThreadRootForRead(UUID requesterId, UUID chatId, UUID threadRootMessageId) {
+    private ResolvedReadScope resolveReadScope(
+            ChatEntity chat,
+            UUID requesterId,
+            UUID topicId,
+            UUID threadRootMessageId
+    ) {
+        ForumTopicEntity topic = forumTopicService.resolveTopicForRead(chat, requesterId, topicId);
         if (threadRootMessageId == null) {
-            return null;
+            return new ResolvedReadScope(topic, null);
         }
-        MessageLookupEntity root = getAccessibleMessage(requesterId, threadRootMessageId);
-        if (!root.getChatId().equals(chatId)) {
+
+        MessageLookupEntity threadRoot = getAccessibleThreadScopeMessage(requesterId, threadRootMessageId);
+        if (!threadRoot.getChatId().equals(chat.getId())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Thread belongs to another chat");
         }
-        return root.getThreadRootMessageId() != null ? root.getThreadRootMessageId() : root.getMessageId();
+
+        UUID normalizedThreadRootMessageId = threadRoot.getThreadRootMessageId() != null
+                ? threadRoot.getThreadRootMessageId()
+                : threadRoot.getMessageId();
+        if (topicId != null && !Objects.equals(threadRoot.getTopicId(), topic != null ? topic.getId() : null)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Thread belongs to another topic");
+        }
+        if (topicId == null && topic != null && !Boolean.TRUE.equals(topic.getGeneralTopic()) && !Objects.equals(topic.getId(), threadRoot.getTopicId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Thread belongs to another topic");
+        }
+        if (topicId == null && threadRoot.getTopicId() != null && Boolean.TRUE.equals(chat.getForumEnabled())) {
+            ForumTopicEntity inferredTopic = new ForumTopicEntity();
+            inferredTopic.setId(threadRoot.getTopicId());
+            inferredTopic.setChatId(chat.getId());
+            topic = inferredTopic;
+        }
+        return new ResolvedReadScope(topic, normalizedThreadRootMessageId);
+    }
+
+    private MessageLookupEntity getAccessibleThreadScopeMessage(UUID requesterId, UUID messageId) {
+        MessageLookupEntity lookup = messageLookupRepository.findById(messageId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
+        ChatEntity chat = chatService.getOwnedChat(requesterId, lookup.getChatId());
+        ensureMessageVisibleToRequester(chat, requesterId, lookup.getTopicId());
+        return lookup;
+    }
+
+    private boolean isMessageVisibleToRequester(ChatEntity chat, UUID requesterId, UUID topicId) {
+        if (chat == null) {
+            return false;
+        }
+        if (topicId == null || !Boolean.TRUE.equals(chat.getForumEnabled())) {
+            return true;
+        }
+        try {
+            forumTopicService.resolveTopicForRead(chat, requesterId, topicId);
+            return true;
+        } catch (ResponseStatusException exception) {
+            return false;
+        }
+    }
+
+    private void ensureMessageVisibleToRequester(ChatEntity chat, UUID requesterId, UUID topicId) {
+        if (!isMessageVisibleToRequester(chat, requesterId, topicId)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found");
+        }
     }
 
     private void ensureReactionsAllowed(MessageLookupEntity lookup) {
@@ -1346,13 +1504,35 @@ public class MessageService {
         }
     }
 
-    private void ensureScheduledCommentPolicyAllowsWrite(ChatEntity chat, ScheduledMessageEntity scheduledMessage) {
-        if (!"GROUP".equals(chat.getChatType()) || scheduledMessage.getThreadRootMessageId() == null) {
+    private MessageLookupEntity resolveScheduledReplyTargetForDispatch(
+            ChatEntity chat,
+            UUID topicId,
+            ScheduledMessageEntity scheduledMessage
+    ) {
+        MessageLookupEntity replyTarget = resolveReplyTarget(chat.getId(), topicId, scheduledMessage.getReplyToMessageId());
+        if (replyTarget == null) {
+            if (scheduledMessage.getThreadRootMessageId() != null
+                    || scheduledMessage.getDiscussionChatId() != null
+                    || scheduledMessage.getDiscussionRootMessageId() != null) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Scheduled message thread metadata is out of date");
+            }
+            return null;
+        }
+
+        if (!Objects.equals(scheduledMessage.getThreadRootMessageId(), resolveThreadRootMessageId(replyTarget))
+                || !Objects.equals(scheduledMessage.getDiscussionChatId(), resolveDiscussionChatId(chat, replyTarget))
+                || !Objects.equals(scheduledMessage.getDiscussionRootMessageId(), resolveDiscussionRootMessageId(replyTarget))) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Scheduled message thread metadata is out of date");
+        }
+        return replyTarget;
+    }
+
+    private void ensureScheduledCommentPolicyAllowsWrite(ChatEntity chat, MessageLookupEntity replyTarget) {
+        if (!"GROUP".equals(chat.getChatType()) || replyTarget == null) {
             return;
         }
 
-        MessageLookupEntity threadRoot = messageLookupRepository.findById(scheduledMessage.getThreadRootMessageId())
-                .orElse(null);
+        MessageLookupEntity threadRoot = resolveCommentThreadRoot(replyTarget);
         if (threadRoot == null || threadRoot.getForwardedFromChatId() == null) {
             return;
         }
@@ -1385,7 +1565,12 @@ public class MessageService {
                 ? forumTopicService.ensureGeneralTopic(discussionChat).getId()
                 : null;
         MessageTextContent content = decodeMessageContent(lookup);
-        MessageLookupEntity rootLookup = buildNewMessage(
+        List<UUID> discussionAttachmentIds = attachmentService.cloneAttachmentsToChatForSystem(
+                senderId,
+                discussionChat.getId(),
+                lookup.getAttachmentIds() != null ? lookup.getAttachmentIds() : List.of()
+        );
+        MessageLookupEntity rootLookup = buildSystemMessage(
                 discussionChat,
                 senderId,
                 content,
@@ -1395,7 +1580,7 @@ public class MessageService {
                 lookup.getMessageId(),
                 lookup.getPollId(),
                 lookup.getStickerId(),
-                lookup.getAttachmentIds() != null ? lookup.getAttachmentIds() : List.of()
+                discussionAttachmentIds
         );
         rootLookup.setViaBotUserId(lookup.getViaBotUserId());
         rootLookup.setThreadRootMessageId(rootLookup.getMessageId());
@@ -1405,15 +1590,15 @@ public class MessageService {
         persistMessage(rootLookup);
         chatService.updateLastMessageAt(discussionChat, rootLookup.getCreatedAt());
         forumTopicService.touchTopic(rootLookup.getTopicId(), rootLookup.getCreatedAt());
-        chatService.incrementUnreadCounts(discussionChat.getId(), senderId, content, null);
-        publish(rootLookup, chatService.getRecipientIds(discussionChat, senderId));
+        chatService.incrementUnreadCounts(discussionChat.getId(), senderId, content, null, rootLookup.getTopicId());
+        publish(rootLookup, chatService.getRecipientIdsForSystem(discussionChat, senderId));
 
         lookup.setDiscussionChatId(discussionChat.getId());
         lookup.setDiscussionRootMessageId(rootLookup.getMessageId());
         persistMessage(lookup);
     }
 
-    private ScheduledMessageResponse toScheduledResponse(ScheduledMessageEntity scheduledMessage) {
+    private ScheduledMessageResponse toScheduledResponse(UUID requesterId, ScheduledMessageEntity scheduledMessage) {
         MessageTextContent content = decodeMessageContent(
                 scheduledMessage.getChatId(),
                 scheduledMessage.getCiphertext(),
@@ -1421,16 +1606,25 @@ public class MessageService {
                 scheduledMessage.getKeyVersion()
         );
         List<MessageAttachmentResponse> attachments =
-                attachmentService.getResponses(parseAttachmentIds(scheduledMessage.getAttachmentIds()));
+                getAttachmentResponses(requesterId, parseAttachmentIds(scheduledMessage.getAttachmentIds()));
+        VisibleMessageReferences references = resolveVisibleReferences(
+                requesterId,
+                scheduledMessage.getReplyToMessageId(),
+                scheduledMessage.getThreadRootMessageId(),
+                scheduledMessage.getDiscussionChatId(),
+                scheduledMessage.getDiscussionRootMessageId(),
+                null,
+                null
+        );
         return new ScheduledMessageResponse(
                 scheduledMessage.getId(),
                 scheduledMessage.getClientMessageId(),
                 scheduledMessage.getChatId(),
                 scheduledMessage.getSenderId(),
                 scheduledMessage.getTopicId(),
-                scheduledMessage.getThreadRootMessageId(),
-                scheduledMessage.getDiscussionChatId(),
-                scheduledMessage.getDiscussionRootMessageId(),
+                references.threadRootMessageId(),
+                references.discussionChatId(),
+                references.discussionRootMessageId(),
                 content.text(),
                 content.entities(),
                 resolveResponseMessageType(content, null, scheduledMessage.getStickerId(), attachments),
@@ -1439,7 +1633,7 @@ public class MessageService {
                 content.location(),
                 content.contactCard(),
                 content.serviceMessage(),
-                scheduledMessage.getReplyToMessageId(),
+                references.replyToMessageId(),
                 scheduledMessage.getStickerId(),
                 attachments,
                 scheduledMessage.getScheduledAt(),
@@ -1494,12 +1688,12 @@ public class MessageService {
                 if (!existing.getChatId().equals(expectedChatId)) {
                     throw new ResponseStatusException(HttpStatus.CONFLICT, "clientMessageId is already bound to another scheduled chat");
                 }
-                return toScheduledResponse(existing);
+                return toScheduledResponse(senderId, existing);
             }
         }
 
         try {
-            return toScheduledResponse(scheduledMessageRepository.save(scheduledMessage));
+            return toScheduledResponse(senderId, scheduledMessageRepository.save(scheduledMessage));
         } catch (DataIntegrityViolationException duplicateScheduleRace) {
             if (clientMessageId == null) {
                 throw duplicateScheduleRace;
@@ -1510,8 +1704,12 @@ public class MessageService {
             if (!existing.getChatId().equals(expectedChatId)) {
                 throw new ResponseStatusException(HttpStatus.CONFLICT, "clientMessageId is already bound to another scheduled chat");
             }
-            return toScheduledResponse(existing);
+            return toScheduledResponse(senderId, existing);
         }
+    }
+
+    private List<MessageAttachmentResponse> getAttachmentResponses(UUID requesterId, List<UUID> attachmentIds) {
+        return attachmentService.getResponses(requesterId, attachmentIds);
     }
 
     private ChatMessageResponse toResponse(
@@ -1538,6 +1736,15 @@ public class MessageService {
                 lookup.getChatId(),
                 lookup.getSenderId()
         );
+        VisibleMessageReferences references = resolveVisibleReferences(
+                requesterId,
+                lookup.getReplyToMessageId(),
+                lookup.getThreadRootMessageId(),
+                lookup.getDiscussionChatId(),
+                lookup.getDiscussionRootMessageId(),
+                lookup.getForwardedFromChatId(),
+                lookup.getForwardedFromMessageId()
+        );
         return new ChatMessageResponse(
                 lookup.getChatId(),
                 lookup.getMessageId(),
@@ -1550,10 +1757,10 @@ public class MessageService {
                 lookup.getRecipientId(),
                 lookup.getViaBotUserId(),
                 lookup.getTopicId(),
-                lookup.getThreadRootMessageId(),
-                lookup.getDiscussionChatId(),
-                lookup.getDiscussionRootMessageId(),
-                countComments(lookup.getDiscussionRootMessageId()),
+                references.threadRootMessageId(),
+                references.discussionChatId(),
+                references.discussionRootMessageId(),
+                countComments(references.discussionRootMessageId()),
                 content.text(),
                 content.entities(),
                 resolveResponseMessageType(content, lookup.getPollId(), lookup.getStickerId(), attachments),
@@ -1563,9 +1770,9 @@ public class MessageService {
                 content.contactCard(),
                 content.serviceMessage(),
                 lookup.getCreatedAt(),
-                lookup.getReplyToMessageId(),
-                lookup.getForwardedFromChatId(),
-                lookup.getForwardedFromMessageId(),
+                references.replyToMessageId(),
+                references.forwardedFromChatId(),
+                references.forwardedFromMessageId(),
                 pollService.getPollResponse(lookup.getPollId(), requesterId),
                 stickerService.getStickerResponse(lookup.getStickerId()),
                 attachments,
@@ -1593,6 +1800,15 @@ public class MessageService {
                 message.getKey().getChatId(),
                 message.getSenderId()
         );
+        VisibleMessageReferences references = resolveVisibleReferences(
+                requesterId,
+                message.getReplyToMessageId(),
+                message.getThreadRootMessageId(),
+                message.getDiscussionChatId(),
+                message.getDiscussionRootMessageId(),
+                message.getForwardedFromChatId(),
+                message.getForwardedFromMessageId()
+        );
         return new ChatMessageResponse(
                 message.getKey().getChatId(),
                 message.getKey().getMessageId(),
@@ -1605,10 +1821,10 @@ public class MessageService {
                 message.getRecipientId(),
                 message.getViaBotUserId(),
                 message.getTopicId(),
-                message.getThreadRootMessageId(),
-                message.getDiscussionChatId(),
-                message.getDiscussionRootMessageId(),
-                countComments(message.getDiscussionRootMessageId()),
+                references.threadRootMessageId(),
+                references.discussionChatId(),
+                references.discussionRootMessageId(),
+                countComments(references.discussionRootMessageId()),
                 content.text(),
                 content.entities(),
                 resolveResponseMessageType(content, message.getPollId(), message.getStickerId(), attachments),
@@ -1618,9 +1834,9 @@ public class MessageService {
                 content.contactCard(),
                 content.serviceMessage(),
                 message.getCreatedAt(),
-                message.getReplyToMessageId(),
-                message.getForwardedFromChatId(),
-                message.getForwardedFromMessageId(),
+                references.replyToMessageId(),
+                references.forwardedFromChatId(),
+                references.forwardedFromMessageId(),
                 pollService.getPollResponse(message.getPollId(), requesterId),
                 stickerService.getStickerResponse(message.getStickerId()),
                 attachments,
@@ -1648,6 +1864,15 @@ public class MessageService {
                 message.getChatId(),
                 message.getSenderId()
         );
+        VisibleMessageReferences references = resolveVisibleReferences(
+                requesterId,
+                message.getReplyToMessageId(),
+                message.getThreadRootMessageId(),
+                message.getDiscussionChatId(),
+                message.getDiscussionRootMessageId(),
+                message.getForwardedFromChatId(),
+                message.getForwardedFromMessageId()
+        );
         return new ChatMessageResponse(
                 message.getChatId(),
                 message.getKey().getMessageId(),
@@ -1660,10 +1885,10 @@ public class MessageService {
                 message.getRecipientId(),
                 message.getViaBotUserId(),
                 message.getKey().getTopicId(),
-                message.getThreadRootMessageId(),
-                message.getDiscussionChatId(),
-                message.getDiscussionRootMessageId(),
-                countComments(message.getDiscussionRootMessageId()),
+                references.threadRootMessageId(),
+                references.discussionChatId(),
+                references.discussionRootMessageId(),
+                countComments(references.discussionRootMessageId()),
                 content.text(),
                 content.entities(),
                 resolveResponseMessageType(content, message.getPollId(), message.getStickerId(), attachments),
@@ -1673,9 +1898,9 @@ public class MessageService {
                 content.contactCard(),
                 content.serviceMessage(),
                 message.getCreatedAt(),
-                message.getReplyToMessageId(),
-                message.getForwardedFromChatId(),
-                message.getForwardedFromMessageId(),
+                references.replyToMessageId(),
+                references.forwardedFromChatId(),
+                references.forwardedFromMessageId(),
                 pollService.getPollResponse(message.getPollId(), requesterId),
                 stickerService.getStickerResponse(message.getStickerId()),
                 attachments,
@@ -1703,6 +1928,15 @@ public class MessageService {
                 message.getChatId(),
                 message.getSenderId()
         );
+        VisibleMessageReferences references = resolveVisibleReferences(
+                requesterId,
+                message.getReplyToMessageId(),
+                message.getKey().getThreadRootMessageId(),
+                message.getDiscussionChatId(),
+                message.getDiscussionRootMessageId(),
+                message.getForwardedFromChatId(),
+                message.getForwardedFromMessageId()
+        );
         return new ChatMessageResponse(
                 message.getChatId(),
                 message.getKey().getMessageId(),
@@ -1715,10 +1949,10 @@ public class MessageService {
                 message.getRecipientId(),
                 message.getViaBotUserId(),
                 message.getTopicId(),
-                message.getKey().getThreadRootMessageId(),
-                message.getDiscussionChatId(),
-                message.getDiscussionRootMessageId(),
-                countComments(message.getDiscussionRootMessageId()),
+                references.threadRootMessageId(),
+                references.discussionChatId(),
+                references.discussionRootMessageId(),
+                countComments(references.discussionRootMessageId()),
                 content.text(),
                 content.entities(),
                 resolveResponseMessageType(content, message.getPollId(), message.getStickerId(), attachments),
@@ -1728,9 +1962,9 @@ public class MessageService {
                 content.contactCard(),
                 content.serviceMessage(),
                 message.getCreatedAt(),
-                message.getReplyToMessageId(),
-                message.getForwardedFromChatId(),
-                message.getForwardedFromMessageId(),
+                references.replyToMessageId(),
+                references.forwardedFromChatId(),
+                references.forwardedFromMessageId(),
                 pollService.getPollResponse(message.getPollId(), requesterId),
                 stickerService.getStickerResponse(message.getStickerId()),
                 attachments,
@@ -1742,6 +1976,88 @@ public class MessageService {
                 message.getEditedAt(),
                 message.getDeletedAt()
         );
+    }
+
+    private VisibleMessageReferences resolveVisibleReferences(
+            UUID requesterId,
+            UUID replyToMessageId,
+            UUID threadRootMessageId,
+            UUID discussionChatId,
+            UUID discussionRootMessageId,
+            UUID forwardedFromChatId,
+            UUID forwardedFromMessageId
+    ) {
+        UUID visibleReplyToMessageId = resolveVisibleMessageReferenceId(requesterId, replyToMessageId);
+        UUID visibleThreadRootMessageId = resolveVisibleMessageReferenceId(requesterId, threadRootMessageId);
+        UUID visibleDiscussionRootMessageId = resolveVisibleMessageReferenceId(requesterId, discussionRootMessageId);
+        UUID visibleDiscussionChatId = visibleDiscussionRootMessageId != null
+                ? discussionChatId
+                : resolveVisibleChatReferenceId(requesterId, discussionChatId);
+        UUID visibleForwardedFromMessageId = resolveVisibleForwardedMessageReferenceId(
+                requesterId,
+                forwardedFromChatId,
+                forwardedFromMessageId
+        );
+        UUID visibleForwardedFromChatId = visibleForwardedFromMessageId != null
+                ? forwardedFromChatId
+                : resolveVisibleChatReferenceId(requesterId, forwardedFromChatId);
+        return new VisibleMessageReferences(
+                visibleReplyToMessageId,
+                visibleThreadRootMessageId,
+                visibleDiscussionChatId,
+                visibleDiscussionRootMessageId,
+                visibleForwardedFromChatId,
+                visibleForwardedFromMessageId
+        );
+    }
+
+    private UUID resolveVisibleMessageReferenceId(UUID requesterId, UUID messageId) {
+        if (messageId == null) {
+            return null;
+        }
+        MessageLookupEntity reference = messageLookupRepository.findById(messageId).orElse(null);
+        if (reference == null || reference.getDeletedAt() != null) {
+            return null;
+        }
+        try {
+            ChatEntity chat = chatService.getOwnedChat(requesterId, reference.getChatId());
+            ensureMessageVisibleToRequester(chat, requesterId, reference.getTopicId());
+            return messageId;
+        } catch (ResponseStatusException exception) {
+            return null;
+        }
+    }
+
+    private UUID resolveVisibleForwardedMessageReferenceId(UUID requesterId, UUID forwardedFromChatId, UUID forwardedFromMessageId) {
+        if (forwardedFromMessageId == null) {
+            return null;
+        }
+        MessageLookupEntity reference = messageLookupRepository.findById(forwardedFromMessageId).orElse(null);
+        if (reference == null || reference.getDeletedAt() != null) {
+            return null;
+        }
+        if (forwardedFromChatId != null && !forwardedFromChatId.equals(reference.getChatId())) {
+            return null;
+        }
+        try {
+            ChatEntity chat = chatService.getOwnedChat(requesterId, reference.getChatId());
+            ensureMessageVisibleToRequester(chat, requesterId, reference.getTopicId());
+            return forwardedFromMessageId;
+        } catch (ResponseStatusException exception) {
+            return null;
+        }
+    }
+
+    private UUID resolveVisibleChatReferenceId(UUID requesterId, UUID chatId) {
+        if (chatId == null) {
+            return null;
+        }
+        try {
+            chatService.getOwnedChat(requesterId, chatId);
+            return chatId;
+        } catch (ResponseStatusException exception) {
+            return null;
+        }
     }
 
     private MessageTextContent decodeMessageContent(MessageLookupEntity lookup) {
@@ -1784,7 +2100,10 @@ public class MessageService {
         if (discussionRootMessageId == null) {
             return 0;
         }
-        return Math.max(0, messageThreadRepository.findAllByThreadRootMessageId(discussionRootMessageId).size() - 1);
+        return (int) messageThreadRepository.findAllByThreadRootMessageId(discussionRootMessageId).stream()
+                .filter(message -> !discussionRootMessageId.equals(message.getKey().getMessageId()))
+                .filter(message -> message.getDeletedAt() == null)
+                .count();
     }
 
     private MessageTextContent decodeMessageContent(UUID chatId, String ciphertext, String nonce, int keyVersion) {
@@ -2002,6 +2321,9 @@ public class MessageService {
         }
         MessageLookupEntity replyTo = messageLookupRepository.findById(replyToMessageId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Reply target not found"));
+        if (replyTo.getDeletedAt() != null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Reply target not found");
+        }
         if (!replyTo.getChatId().equals(chatId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Reply target belongs to another chat");
         }
@@ -2030,7 +2352,8 @@ public class MessageService {
     private MessageLookupEntity getAccessibleMessage(UUID requesterId, UUID messageId) {
         MessageLookupEntity lookup = messageLookupRepository.findById(messageId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
-        chatService.getOwnedChat(requesterId, lookup.getChatId());
+        ChatEntity chat = chatService.getOwnedChat(requesterId, lookup.getChatId());
+        ensureMessageVisibleToRequester(chat, requesterId, lookup.getTopicId());
         return lookup;
     }
 

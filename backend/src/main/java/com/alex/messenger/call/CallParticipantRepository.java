@@ -11,6 +11,8 @@ public interface CallParticipantRepository extends JpaRepository<CallParticipant
 
     List<CallParticipantEntity> findAllByIdCallIdIn(Collection<UUID> callIds);
 
+    List<CallParticipantEntity> findAllByIdUserIdAndIdCallIdIn(UUID userId, Collection<UUID> callIds);
+
     long countByIdCallIdAndStateIn(UUID callId, Collection<String> states);
 
     boolean existsByIdCallIdAndIdUserId(UUID callId, UUID userId);

@@ -10,6 +10,7 @@ import com.alex.messenger.media.MediaService;
 import com.alex.messenger.media.PresignedMediaAccess;
 import com.alex.messenger.message.dto.MessageAttachmentResponse;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -220,11 +221,105 @@ public class AttachmentService {
         }
 
         Map<UUID, AttachmentEntity> attachmentsById = findAllOrdered(attachmentIds);
-        return attachmentIds.stream()
+        List<AttachmentEntity> attachments = attachmentIds.stream()
                 .map(attachmentsById::get)
                 .filter(java.util.Objects::nonNull)
+                .toList();
+        assertRequesterCanAccessAttachments(requesterId, attachments);
+        return attachments.stream()
                 .map(attachment -> toResponse(attachment, requesterId))
                 .toList();
+    }
+
+    @Transactional
+    public List<UUID> cloneAttachmentsToChat(UUID requesterId, UUID targetChatId, List<UUID> attachmentIds) {
+        return cloneAttachmentsToChat(requesterId, targetChatId, attachmentIds, true);
+    }
+
+    @Transactional
+    public List<UUID> cloneAttachmentsToChatForSystem(UUID requesterId, UUID targetChatId, List<UUID> attachmentIds) {
+        return cloneAttachmentsToChat(requesterId, targetChatId, attachmentIds, false);
+    }
+
+    @Transactional
+    private List<UUID> cloneAttachmentsToChat(
+            UUID requesterId,
+            UUID targetChatId,
+            List<UUID> attachmentIds,
+            boolean requireTargetMembership
+    ) {
+        if (attachmentIds == null || attachmentIds.isEmpty()) {
+            return List.of();
+        }
+
+        if (requireTargetMembership) {
+            chatService.getOwnedChat(requesterId, targetChatId);
+        } else {
+            chatService.getChat(targetChatId);
+        }
+        Map<UUID, AttachmentEntity> attachmentsById = findAllOrdered(attachmentIds);
+        if (attachmentsById.size() != new LinkedHashSet<>(attachmentIds).size()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "One or more attachments were not found");
+        }
+
+        List<AttachmentEntity> sourceAttachments = attachmentIds.stream()
+                .map(attachmentsById::get)
+                .filter(java.util.Objects::nonNull)
+                .toList();
+        assertRequesterCanAccessAttachments(requesterId, sourceAttachments);
+
+        Map<UUID, UUID> clonedAlbumIds = new LinkedHashMap<>();
+        List<UUID> clonedAttachmentIds = new ArrayList<>(sourceAttachments.size());
+        for (AttachmentEntity source : sourceAttachments) {
+            UUID clonedAttachmentId = UUID.randomUUID();
+            byte[] sourceBytes = loadCloneSourceBytes(source);
+            MediaObjectReference mediaObjectReference = mediaService.upload(
+                    targetChatId,
+                    clonedAttachmentId,
+                    source.getOriginalFileName(),
+                    source.getContentType(),
+                    sourceBytes.length,
+                    new ByteArrayInputStream(sourceBytes)
+            );
+
+            AttachmentEntity clone = new AttachmentEntity();
+            clone.setId(clonedAttachmentId);
+            clone.setChatId(targetChatId);
+            clone.setUploaderUserId(requesterId);
+            clone.setOriginalFileName(source.getOriginalFileName());
+            clone.setContentType(source.getContentType());
+            clone.setKind(source.getKind());
+            clone.setFileSizeBytes(source.getFileSizeBytes());
+            clone.setDurationMs(source.getDurationMs());
+            clone.setWidth(source.getWidth());
+            clone.setHeight(source.getHeight());
+            clone.setWaveform(source.getWaveform());
+            clone.setAlbumId(source.getAlbumId() != null
+                    ? clonedAlbumIds.computeIfAbsent(source.getAlbumId(), ignored -> UUID.randomUUID())
+                    : null);
+            clone.setAlbumItemIndex(source.getAlbumItemIndex());
+            clone.setPreviewBucketName(null);
+            clone.setPreviewObjectKey(null);
+            clone.setThumbnailBucketName(null);
+            clone.setThumbnailObjectKey(null);
+            clone.setProcessingStatus("NOT_REQUIRED");
+            clone.setModerationStatus(source.getModerationStatus());
+            clone.setModerationReason(source.getModerationReason());
+            clone.setModerationSensitive(source.isModerationSensitive());
+            clone.setModerationReviewedByUserId(source.getModerationReviewedByUserId());
+            clone.setModerationReviewedAt(source.getModerationReviewedAt());
+            clone.setStorageProvider("S3");
+            clone.setBucketName(mediaObjectReference.bucketName());
+            clone.setObjectKey(mediaObjectReference.objectKey());
+            clone.setStoragePath(mediaObjectReference.storagePath());
+            clone.setNonce(null);
+            clone.setKeyVersion(null);
+
+            AttachmentEntity saved = attachmentRepository.save(clone);
+            mediaProcessingService.enqueueAttachmentPreview(saved);
+            clonedAttachmentIds.add(saved.getId());
+        }
+        return List.copyOf(clonedAttachmentIds);
     }
 
     @Transactional(readOnly = true)
@@ -276,7 +371,12 @@ public class AttachmentService {
         if (attachments.isEmpty()) {
             return List.of();
         }
-        chatService.getOwnedChat(requesterId, attachments.get(0).getChatId());
+        UUID chatId = attachments.get(0).getChatId();
+        boolean multipleChats = attachments.stream().anyMatch(attachment -> !chatId.equals(attachment.getChatId()));
+        if (multipleChats) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Album attachments must belong to one chat");
+        }
+        chatService.getOwnedChat(requesterId, chatId);
         return attachments.stream().map(attachment -> toResponse(attachment, requesterId)).toList();
     }
 
@@ -321,14 +421,25 @@ public class AttachmentService {
         return attachmentsById;
     }
 
+    private void assertRequesterCanAccessAttachments(UUID requesterId, List<AttachmentEntity> attachments) {
+        if (requesterId == null || attachments == null || attachments.isEmpty()) {
+            return;
+        }
+        for (UUID chatId : attachments.stream().map(AttachmentEntity::getChatId).distinct().toList()) {
+            chatService.getOwnedChat(requesterId, chatId);
+        }
+    }
+
     private MessageAttachmentResponse toResponse(AttachmentEntity attachment, UUID requesterId) {
         boolean blockedByModeration = isBlockedByModeration(requesterId, attachment);
         boolean hidePreviewForSensitive = shouldHidePreviewForSensitiveContent(requesterId, attachment);
-        AttachmentAccessResponse accessResponse = blockedByModeration
+        AttachmentAccessResponse accessResponse = requesterId == null
                 ? new AttachmentAccessResponse(null, null, null, true)
-                : buildAccessResponse(attachment);
-        String previewUrl = hidePreviewForSensitive ? null : accessResponse.previewUrl();
-        String thumbnailUrl = hidePreviewForSensitive ? null : resolveThumbnailUrl(attachment);
+                : blockedByModeration
+                        ? new AttachmentAccessResponse(null, null, null, true)
+                        : buildAccessResponse(attachment);
+        String previewUrl = requesterId == null || hidePreviewForSensitive ? null : accessResponse.previewUrl();
+        String thumbnailUrl = requesterId == null || hidePreviewForSensitive ? null : resolveThumbnailUrl(attachment);
         return new MessageAttachmentResponse(
                 attachment.getId(),
                 attachment.getOriginalFileName(),
@@ -412,6 +523,30 @@ public class AttachmentService {
         return "S3".equalsIgnoreCase(attachment.getStorageProvider())
                 && attachment.getBucketName() != null
                 && attachment.getObjectKey() != null;
+    }
+
+    private byte[] loadCloneSourceBytes(AttachmentEntity attachment) {
+        if (isS3Stored(attachment)) {
+            return mediaService.downloadObjectBytes(attachment.getBucketName(), attachment.getObjectKey());
+        }
+        if (attachment.getStoragePath() == null || attachment.getStoragePath().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Attachment source media is unavailable");
+        }
+        byte[] storedBytes;
+        try {
+            storedBytes = Files.readAllBytes(Path.of(attachment.getStoragePath()));
+        } catch (IOException exception) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Unable to read attachment", exception);
+        }
+        if (attachment.getNonce() != null && attachment.getKeyVersion() != null) {
+            return chatEncryptionService.decryptBytes(
+                    attachment.getChatId(),
+                    storedBytes,
+                    attachment.getNonce(),
+                    attachment.getKeyVersion()
+            );
+        }
+        return storedBytes;
     }
 
     private boolean isImageAttachment(AttachmentEntity attachment) {

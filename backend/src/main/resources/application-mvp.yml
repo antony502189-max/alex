@@ -1,0 +1,24 @@
+spring:
+  config:
+    activate:
+      on-profile: mvp
+
+alex:
+  features:
+    stories: false
+    bots: false
+    calls: true
+    secret-chats: false
+    admin-compliance: true
+    lawful-direct-export: false
+    group-calls: true
+    story-interactions: false
+    bot-api-full: false
+    business: false
+    payments: false
+    premium: false
+    monetization: false
+    translations: false
+  notifications:
+    expo:
+      enabled: true

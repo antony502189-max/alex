@@ -1,5 +1,7 @@
 package com.alex.messenger.chat;
 
+import com.alex.messenger.attachment.AttachmentEntity;
+import com.alex.messenger.attachment.AttachmentRepository;
 import com.alex.messenger.chat.draft.ChatDraftEntity;
 import com.alex.messenger.chat.draft.ChatDraftId;
 import com.alex.messenger.chat.draft.ChatDraftRepository;
@@ -9,6 +11,7 @@ import com.alex.messenger.chat.dto.ChatAnalyticsResponse;
 import com.alex.messenger.chat.dto.ChatInviteLinkResponse;
 import com.alex.messenger.chat.dto.ChatBanResponse;
 import com.alex.messenger.chat.dto.ChatJoinRequestResponse;
+import com.alex.messenger.chat.dto.ChatLastMessagePreviewResponse;
 import com.alex.messenger.chat.dto.ChatMemberResponse;
 import com.alex.messenger.chat.dto.ChatReadEventResponse;
 import com.alex.messenger.chat.dto.ChatSummaryResponse;
@@ -30,9 +33,11 @@ import com.alex.messenger.chat.forum.ForumTopicEntity;
 import com.alex.messenger.chat.forum.ForumTopicRepository;
 import com.alex.messenger.chat.invite.ChatInviteLinkEntity;
 import com.alex.messenger.chat.invite.ChatInviteLinkRepository;
+import com.alex.messenger.crypto.ChatEncryptionService;
 import com.alex.messenger.media.PhotoAccess;
 import com.alex.messenger.media.ProfilePhotoService;
 import com.alex.messenger.media.StoredPhotoReference;
+import com.alex.messenger.message.MessageContentCodec;
 import com.alex.messenger.message.MessageEntity;
 import com.alex.messenger.message.MessageLookupEntity;
 import com.alex.messenger.message.MessageLookupRepository;
@@ -43,6 +48,7 @@ import com.alex.messenger.user.BlockedUserRepository;
 import com.alex.messenger.user.UserEntity;
 import com.alex.messenger.user.UserPresenceService;
 import com.alex.messenger.user.UserRepository;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -52,6 +58,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -81,6 +88,20 @@ public class ChatService {
     ) {
     }
 
+    public record ChatListSlice(
+            List<ChatSummaryResponse> chats,
+            String nextCursor,
+            boolean hasMore
+    ) {
+    }
+
+    private record UnreadTailCounters(
+            int unreadCount,
+            int mentionCount,
+            int replyCount
+    ) {
+    }
+
     private final ChatRepository chatRepository;
     private final ChatMemberRepository chatMemberRepository;
     private final ChatBanRepository chatBanRepository;
@@ -93,6 +114,9 @@ public class ChatService {
     private final MessageRepository messageRepository;
     private final MessageLookupRepository messageLookupRepository;
     private final MessageReactionRepository messageReactionRepository;
+    private final AttachmentRepository attachmentRepository;
+    private final ChatEncryptionService chatEncryptionService;
+    private final MessageContentCodec messageContentCodec;
     private final UserRepository userRepository;
     private final BlockedUserRepository blockedUserRepository;
     private final ProfilePhotoService profilePhotoService;
@@ -121,6 +145,24 @@ public class ChatService {
                 })
                 .filter(java.util.Objects::nonNull)
                 .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public ChatListSlice listChatsPage(UUID userId, boolean archived, String cursor, Integer limit) {
+        int normalizedLimit = Math.min(Math.max(limit != null ? limit : 50, 1), 100);
+        int offset = decodeChatCursor(cursor);
+        List<ChatSummaryResponse> chats = listChats(userId, archived);
+        if (offset > chats.size()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is out of range");
+        }
+
+        int nextOffset = Math.min(offset + normalizedLimit, chats.size());
+        boolean hasMore = nextOffset < chats.size();
+        return new ChatListSlice(
+                chats.subList(offset, nextOffset),
+                hasMore ? encodeChatCursor(nextOffset) : null,
+                hasMore
+        );
     }
 
     @Transactional(readOnly = true)
@@ -962,21 +1004,37 @@ public class ChatService {
 
     @Transactional
     public ChatReadEventResponse markRead(UUID requesterId, UUID chatId, UUID messageId) {
-        getOwnedChat(requesterId, chatId);
+        ChatEntity chat = getOwnedChat(requesterId, chatId);
         ChatMemberEntity membership = getMembership(chatId, requesterId);
+        MessageLookupEntity targetMessage = requireReadableMessageInChat(chat, requesterId, messageId);
+        MessageLookupEntity effectiveMessage = resolveEffectiveReadMessage(chat, requesterId, membership, targetMessage);
+        if (effectiveMessage == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found");
+        }
+
+        if (Objects.equals(membership.getLastReadMessageId(), effectiveMessage.getMessageId())) {
+            return new ChatReadEventResponse(
+                    chatId,
+                    requesterId,
+                    effectiveMessage.getMessageId(),
+                    membership.getLastReadAt() != null ? membership.getLastReadAt() : Instant.now()
+            );
+        }
+
         Instant readAt = Instant.now();
-        membership.setLastReadMessageId(messageId);
+        UnreadTailCounters unreadTailCounters = recalculateUnreadTailCounters(requesterId, chatId, effectiveMessage.getMessageId());
+        membership.setLastReadMessageId(effectiveMessage.getMessageId());
         membership.setLastReadAt(readAt);
-        membership.setUnreadCount(0);
-        membership.setMentionCount(0);
-        membership.setReplyCount(0);
+        membership.setUnreadCount(unreadTailCounters.unreadCount());
+        membership.setMentionCount(unreadTailCounters.mentionCount());
+        membership.setReplyCount(unreadTailCounters.replyCount());
         chatMemberRepository.save(membership);
-        return new ChatReadEventResponse(chatId, requesterId, messageId, readAt);
+        return new ChatReadEventResponse(chatId, requesterId, effectiveMessage.getMessageId(), readAt);
     }
 
     @Transactional
     public void incrementUnreadCounts(UUID chatId, UUID senderId) {
-        incrementUnreadCounts(chatId, senderId, null, null);
+        incrementUnreadCounts(chatId, senderId, null, null, null);
     }
 
     @Transactional
@@ -986,6 +1044,20 @@ public class ChatService {
             MessageTextContent content,
             UUID replyTargetSenderId
     ) {
+        incrementUnreadCounts(chatId, senderId, content, replyTargetSenderId, null);
+    }
+
+    @Transactional
+    public void incrementUnreadCounts(
+            UUID chatId,
+            UUID senderId,
+            MessageTextContent content,
+            UUID replyTargetSenderId,
+            UUID topicId
+    ) {
+        if (!shouldTrackUnreadForTopic(chatId, topicId)) {
+            return;
+        }
         List<ChatMemberEntity> memberships = chatMemberRepository.findAllByIdChatId(chatId);
         Set<UUID> mentionedUserIds = resolveMentionedUserIds(memberships, senderId, content);
         for (ChatMemberEntity membership : memberships) {
@@ -1004,17 +1076,24 @@ public class ChatService {
     }
 
     @Transactional(readOnly = true)
-    public TypingEventResponse buildTypingEvent(UUID requesterId, UUID chatId, boolean typing) {
+    public TypingEventResponse buildTypingEvent(UUID requesterId, UUID chatId, UUID topicId, boolean typing) {
         ChatEntity chat = getOwnedChat(requesterId, chatId);
         ensureCanPost(chat, requesterId);
-        return new TypingEventResponse(chatId, requesterId, typing, Instant.now());
+        UUID resolvedTopicId = resolveTypingTopicId(chat, topicId);
+        return new TypingEventResponse(
+                chatId,
+                requesterId,
+                typing,
+                resolvedTopicId,
+                Instant.now()
+        );
     }
 
     @Transactional
     public PinMessageEventResponse pinMessage(UUID requesterId, UUID chatId, UUID messageId) {
         ChatEntity chat = getOwnedChat(requesterId, chatId);
         ensureCanPin(chat, requesterId);
-        validatePinnableMessage(chat.getId(), messageId);
+        validatePinnableMessage(chat, requesterId, messageId);
 
         Instant pinnedAt = Instant.now();
         chat.setPinnedMessageId(messageId);
@@ -1227,6 +1306,9 @@ public class ChatService {
             ChatMemberEntity membership,
             ChatDraftEntity draft
     ) {
+        ChatLastMessagePreviewResponse lastMessage = buildLastMessagePreview(chat, requesterId);
+        UUID pinnedMessageId = resolveVisiblePinnedMessageId(chat);
+        Instant summaryLastMessageAt = resolveSummaryLastMessageAt(chat, lastMessage);
         long memberCount = chatMemberRepository.countByIdChatId(chat.getId());
         long topicCount = Boolean.TRUE.equals(chat.getForumEnabled())
                 ? forumTopicRepository.countByChatIdAndHiddenFalse(chat.getId())
@@ -1258,7 +1340,7 @@ public class ChatService {
                     0,
                     null,
                     null,
-                    chat.getLastMessageAt() != null ? chat.getLastMessageAt() : chat.getCreatedAt(),
+                    summaryLastMessageAt,
                     memberCount,
                     membership.getLastReadAt(),
                     membership.getUnreadCount() != null ? membership.getUnreadCount() : 0,
@@ -1268,11 +1350,12 @@ public class ChatService {
                     draft != null ? draft.getDraftText() : null,
                     draft != null ? draft.getUpdatedAt() : null,
                     membership.getMutedUntil(),
-                    chat.getPinnedMessageId(),
+                    pinnedMessageId,
                     false,
                     false,
                     true,
-                    false
+                    false,
+                    lastMessage
             );
         }
 
@@ -1300,7 +1383,7 @@ public class ChatService {
                     topicCount,
                     linkedDiscussionChatId,
                     linkedDiscussionChatTitle,
-                    chat.getLastMessageAt() != null ? chat.getLastMessageAt() : chat.getCreatedAt(),
+                    summaryLastMessageAt,
                     memberCount,
                     membership.getLastReadAt(),
                     membership.getUnreadCount() != null ? membership.getUnreadCount() : 0,
@@ -1310,11 +1393,12 @@ public class ChatService {
                     draft != null ? draft.getDraftText() : null,
                     draft != null ? draft.getUpdatedAt() : null,
                     membership.getMutedUntil(),
-                    chat.getPinnedMessageId(),
+                    pinnedMessageId,
                     Boolean.TRUE.equals(chat.getJoinRequiresApproval()),
                     "CHANNEL".equals(chat.getChatType()) && Boolean.TRUE.equals(chat.getCommentsEnabled()),
                     Boolean.TRUE.equals(chat.getReactionsEnabled()),
-                    "CHANNEL".equals(chat.getChatType()) && Boolean.TRUE.equals(chat.getCrossPostingEnabled())
+                    "CHANNEL".equals(chat.getChatType()) && Boolean.TRUE.equals(chat.getCrossPostingEnabled()),
+                    lastMessage
             );
         }
 
@@ -1346,7 +1430,7 @@ public class ChatService {
                 0,
                 null,
                 null,
-                chat.getLastMessageAt() != null ? chat.getLastMessageAt() : chat.getCreatedAt(),
+                summaryLastMessageAt,
                 memberCount,
                 membership.getLastReadAt(),
                 membership.getUnreadCount() != null ? membership.getUnreadCount() : 0,
@@ -1356,11 +1440,12 @@ public class ChatService {
                 draft != null ? draft.getDraftText() : null,
                 draft != null ? draft.getUpdatedAt() : null,
                 membership.getMutedUntil(),
-                chat.getPinnedMessageId(),
+                pinnedMessageId,
                 false,
                 false,
                 true,
-                false
+                false,
+                lastMessage
         );
     }
 
@@ -1439,15 +1524,378 @@ public class ChatService {
         chatInviteLinkRepository.save(inviteLink);
     }
 
-    private void validatePinnableMessage(UUID chatId, UUID messageId) {
+    private void validatePinnableMessage(ChatEntity chat, UUID requesterId, UUID messageId) {
+        MessageLookupEntity message = requireMessageInChat(chat.getId(), messageId);
+        if (message.getDeletedAt() != null) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Deleted message cannot be pinned");
+        }
+        if (!isReadableMessageForMember(chat, requesterId, message)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found");
+        }
+    }
+
+    private MessageLookupEntity requireMessageInChat(UUID chatId, UUID messageId) {
         MessageLookupEntity message = messageLookupRepository.findById(messageId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
         if (!message.getChatId().equals(chatId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message belongs to another chat");
         }
-        if (message.getDeletedAt() != null) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Deleted message cannot be pinned");
+        return message;
+    }
+
+    private MessageLookupEntity requireReadableMessageInChat(ChatEntity chat, UUID requesterId, UUID messageId) {
+        MessageLookupEntity message = requireMessageInChat(chat.getId(), messageId);
+        if (!isReadableMessageForMember(chat, requesterId, message)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found");
         }
+        return message;
+    }
+
+    private MessageLookupEntity resolveEffectiveReadMessage(
+            ChatEntity chat,
+            UUID requesterId,
+            ChatMemberEntity membership,
+            MessageLookupEntity targetMessage
+    ) {
+        if (membership.getLastReadMessageId() == null) {
+            return targetMessage;
+        }
+
+        MessageLookupEntity currentLastRead = messageLookupRepository.findById(membership.getLastReadMessageId()).orElse(null);
+        if (currentLastRead == null
+                || !chat.getId().equals(currentLastRead.getChatId())
+                || !isReadableMessageForMember(chat, requesterId, currentLastRead)) {
+            return targetMessage;
+        }
+        if (currentLastRead.getCreatedAt() == null || targetMessage.getCreatedAt() == null) {
+            return targetMessage;
+        }
+        return targetMessage.getCreatedAt().isBefore(currentLastRead.getCreatedAt()) ? currentLastRead : targetMessage;
+    }
+
+    private ChatLastMessagePreviewResponse buildLastMessagePreview(ChatEntity chat, UUID requesterId) {
+        MessageEntity message = findLastVisibleMessage(chat);
+        if (message == null) {
+            return null;
+        }
+        MessageTextContent content = safeDecodeMessageContent(chat.getId(), message);
+        String messageType = resolveLastMessageType(content, message);
+        MessageAuthorView author = resolveMessageAuthor(requesterId, chat.getId(), message.getSenderId());
+
+        return new ChatLastMessagePreviewResponse(
+                message.getKey().getMessageId(),
+                author.senderId(),
+                author.displayName(),
+                author.anonymous(),
+                requesterId.equals(message.getSenderId()),
+                messageType,
+                buildLastMessagePreviewText(content, messageType, message),
+                message.getCreatedAt(),
+                message.getEditedAt(),
+                message.getDeletedAt()
+        );
+    }
+
+    private UUID resolveVisiblePinnedMessageId(ChatEntity chat) {
+        UUID pinnedMessageId = chat.getPinnedMessageId();
+        if (pinnedMessageId == null) {
+            return null;
+        }
+
+        MessageLookupEntity pinnedMessage = messageLookupRepository.findById(pinnedMessageId).orElse(null);
+        if (pinnedMessage == null || !chat.getId().equals(pinnedMessage.getChatId()) || pinnedMessage.getDeletedAt() != null) {
+            return null;
+        }
+        if (!isSummaryVisibleTopic(chat, pinnedMessage.getTopicId())) {
+            return null;
+        }
+        return pinnedMessageId;
+    }
+
+    private Instant resolveSummaryLastMessageAt(ChatEntity chat, ChatLastMessagePreviewResponse lastMessage) {
+        if (lastMessage != null && lastMessage.createdAt() != null) {
+            return lastMessage.createdAt();
+        }
+        if (Boolean.TRUE.equals(chat.getForumEnabled())) {
+            return chat.getCreatedAt();
+        }
+        return chat.getLastMessageAt() != null ? chat.getLastMessageAt() : chat.getCreatedAt();
+    }
+
+    private MessageEntity findLastVisibleMessage(ChatEntity chat) {
+        int fetchLimit = Boolean.TRUE.equals(chat.getForumEnabled()) ? 100 : 1;
+        List<MessageEntity> recentMessages = messageRepository.findRecentByChatId(chat.getId(), fetchLimit);
+        if (recentMessages == null || recentMessages.isEmpty()) {
+            return null;
+        }
+        if (!Boolean.TRUE.equals(chat.getForumEnabled())) {
+            return recentMessages.get(0);
+        }
+
+        Set<UUID> visibleTopicIds = forumTopicRepository.findVisibleTopics(chat.getId()).stream()
+                .map(ForumTopicEntity::getId)
+                .collect(Collectors.toSet());
+        return recentMessages.stream()
+                .filter(message -> message.getTopicId() == null || visibleTopicIds.contains(message.getTopicId()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private boolean isSummaryVisibleTopic(ChatEntity chat, UUID topicId) {
+        if (topicId == null) {
+            return true;
+        }
+        if (!Boolean.TRUE.equals(chat.getForumEnabled())) {
+            return false;
+        }
+        return forumTopicRepository.findByIdAndChatId(topicId, chat.getId())
+                .map(topic -> !Boolean.TRUE.equals(topic.getHidden()))
+                .orElse(false);
+    }
+
+    private boolean isReadableMessageForMember(ChatEntity chat, UUID requesterId, MessageLookupEntity message) {
+        if (message == null || message.getDeletedAt() != null) {
+            return false;
+        }
+        if (!chat.getId().equals(message.getChatId())) {
+            return false;
+        }
+        return isSummaryVisibleTopic(chat, message.getTopicId());
+    }
+
+    private UnreadTailCounters recalculateUnreadTailCounters(UUID requesterId, UUID chatId, UUID lastReadMessageId) {
+        ChatEntity chat = chatRepository.findById(chatId).orElse(null);
+        Set<UUID> visibleTopicIds = chat != null && Boolean.TRUE.equals(chat.getForumEnabled())
+                ? forumTopicRepository.findVisibleTopics(chatId).stream()
+                        .map(ForumTopicEntity::getId)
+                        .collect(Collectors.toSet())
+                : Set.of();
+        List<MessageEntity> unreadMessages = messageRepository.findAllByChatIdAfterMessageId(chatId, lastReadMessageId).stream()
+                .filter(message -> isUnreadVisibleMessage(chat, visibleTopicIds, message))
+                .filter(message -> message.getDeletedAt() == null)
+                .filter(message -> !requesterId.equals(message.getSenderId()))
+                .toList();
+        if (unreadMessages.isEmpty()) {
+            return new UnreadTailCounters(0, 0, 0);
+        }
+
+        Map<UUID, MessageLookupEntity> replyTargetsById = loadMessagesById(
+                unreadMessages.stream()
+                        .map(MessageEntity::getReplyToMessageId)
+                        .filter(Objects::nonNull)
+                        .distinct()
+                        .toList()
+        );
+        String requesterUsername = userRepository.findById(requesterId)
+                .map(UserEntity::getUsername)
+                .map(String::trim)
+                .filter(username -> !username.isBlank())
+                .map(String::toLowerCase)
+                .orElse(null);
+
+        int mentionCount = 0;
+        int replyCount = 0;
+        for (MessageEntity message : unreadMessages) {
+            if (isReplyToUser(message, requesterId, replyTargetsById)) {
+                replyCount++;
+            }
+            if (mentionsUser(message, chatId, requesterUsername)) {
+                mentionCount++;
+            }
+        }
+
+        return new UnreadTailCounters(unreadMessages.size(), mentionCount, replyCount);
+    }
+
+    private boolean shouldTrackUnreadForTopic(UUID chatId, UUID topicId) {
+        if (topicId == null) {
+            return true;
+        }
+        ChatEntity chat = chatRepository.findById(chatId).orElse(null);
+        return chat != null && isSummaryVisibleTopic(chat, topicId);
+    }
+
+    private UUID resolveTypingTopicId(ChatEntity chat, UUID topicId) {
+        if (topicId == null) {
+            return null;
+        }
+        if (!"GROUP".equals(chat.getChatType())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Forum topics are only available in groups");
+        }
+        if (!Boolean.TRUE.equals(chat.getForumEnabled())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Forum topics are disabled for this chat");
+        }
+        ForumTopicEntity topic = forumTopicRepository.findByIdAndChatId(topicId, chat.getId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Topic not found"));
+        if (Boolean.TRUE.equals(topic.getHidden())) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Topic not found");
+        }
+        if (Boolean.TRUE.equals(topic.getClosed())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Topic is closed");
+        }
+        return topic.getId();
+    }
+
+    private boolean isUnreadVisibleMessage(ChatEntity chat, Set<UUID> visibleTopicIds, MessageEntity message) {
+        if (message.getTopicId() == null) {
+            return true;
+        }
+        return chat != null
+                && Boolean.TRUE.equals(chat.getForumEnabled())
+                && visibleTopicIds.contains(message.getTopicId());
+    }
+
+    private Map<UUID, MessageLookupEntity> loadMessagesById(List<UUID> messageIds) {
+        if (messageIds.isEmpty()) {
+            return Map.of();
+        }
+        return java.util.stream.StreamSupport.stream(messageLookupRepository.findAllById(messageIds).spliterator(), false)
+                .collect(Collectors.toMap(MessageLookupEntity::getMessageId, Function.identity(), (left, right) -> left));
+    }
+
+    private boolean isReplyToUser(
+            MessageEntity message,
+            UUID requesterId,
+            Map<UUID, MessageLookupEntity> replyTargetsById
+    ) {
+        if (message.getReplyToMessageId() == null) {
+            return false;
+        }
+        MessageLookupEntity replyTarget = replyTargetsById.get(message.getReplyToMessageId());
+        return replyTarget != null && requesterId.equals(replyTarget.getSenderId());
+    }
+
+    private boolean mentionsUser(MessageEntity message, UUID chatId, String username) {
+        if (username == null) {
+            return false;
+        }
+        return extractMentionUsernames(decodeMessageContent(chatId, message)).contains(username);
+    }
+
+    private MessageTextContent decodeMessageContent(UUID chatId, MessageEntity message) {
+        if (message.getCiphertext() == null || message.getNonce() == null || message.getKeyVersion() == null) {
+            return new MessageTextContent("", List.of());
+        }
+        String plaintext = chatEncryptionService.decrypt(chatId, message.getCiphertext(), message.getNonce(), message.getKeyVersion());
+        return messageContentCodec.decode(plaintext);
+    }
+
+    private MessageTextContent safeDecodeMessageContent(UUID chatId, MessageEntity message) {
+        try {
+            return decodeMessageContent(chatId, message);
+        } catch (RuntimeException ignored) {
+            return new MessageTextContent("", List.of());
+        }
+    }
+
+    private String resolveLastMessageType(MessageTextContent content, MessageEntity message) {
+        if (content.messageType() != null && !content.messageType().isBlank()) {
+            return content.messageType();
+        }
+        if (message.getPollId() != null) {
+            return "POLL";
+        }
+        if (message.getStickerId() != null) {
+            return "STICKER";
+        }
+        List<AttachmentEntity> attachments = loadAttachments(message.getAttachmentIds());
+        if (attachments.size() > 1) {
+            return "ALBUM";
+        }
+        if (!attachments.isEmpty()) {
+            String kind = attachments.get(0).getKind();
+            return kind != null && !kind.isBlank() ? kind : "FILE";
+        }
+        if (message.getAttachmentIds() != null && !message.getAttachmentIds().isEmpty()) {
+            return message.getAttachmentIds().size() > 1 ? "ALBUM" : "FILE";
+        }
+        return "TEXT";
+    }
+
+    private List<AttachmentEntity> loadAttachments(List<UUID> attachmentIds) {
+        if (attachmentIds == null || attachmentIds.isEmpty()) {
+            return List.of();
+        }
+        Map<UUID, AttachmentEntity> attachmentsById = attachmentRepository.findAllByIdIn(attachmentIds).stream()
+                .collect(Collectors.toMap(AttachmentEntity::getId, Function.identity(), (left, right) -> left));
+        return attachmentIds.stream()
+                .map(attachmentsById::get)
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    private String buildLastMessagePreviewText(MessageTextContent content, String messageType, MessageEntity message) {
+        if (message.getDeletedAt() != null) {
+            return "Message deleted";
+        }
+
+        String text = normalizePreviewText(content.text());
+        if (!text.isBlank()) {
+            return text;
+        }
+
+        String caption = normalizePreviewText(content.caption());
+        if (!caption.isBlank()) {
+            return caption;
+        }
+
+        return switch (messageType) {
+            case "LOCATION" -> firstNonBlank(
+                    normalizePreviewText(content.location() != null ? content.location().title() : null),
+                    normalizePreviewText(content.location() != null ? content.location().address() : null),
+                    "shared a location"
+            );
+            case "CONTACT_CARD" -> firstNonBlank(
+                    normalizePreviewText(contactName(content)),
+                    normalizePreviewText(content.contactCard() != null ? content.contactCard().phoneNumber() : null),
+                    "shared a contact"
+            );
+            case "SERVICE_MESSAGE" -> firstNonBlank(
+                    normalizePreviewText(content.serviceMessage() != null ? content.serviceMessage().text() : null),
+                    "sent a service update"
+            );
+            case "POLL" -> "sent a poll";
+            case "STICKER" -> "sent a sticker";
+            case "ALBUM" -> "sent an album";
+            case "VOICE" -> "sent a voice message";
+            case "AUDIO" -> "sent an audio file";
+            case "VIDEO" -> "sent a video";
+            case "VIDEO_NOTE" -> "sent a video note";
+            case "GIF" -> "sent a GIF";
+            case "IMAGE" -> "sent a photo";
+            case "FILE" -> "sent an attachment";
+            default -> "sent a message";
+        };
+    }
+
+    private String contactName(MessageTextContent content) {
+        if (content.contactCard() == null) {
+            return null;
+        }
+        String firstName = content.contactCard().firstName() != null ? content.contactCard().firstName().trim() : "";
+        String lastName = content.contactCard().lastName() != null ? content.contactCard().lastName().trim() : "";
+        String fullName = (firstName + " " + lastName).trim();
+        return fullName.isBlank() ? null : fullName;
+    }
+
+    private String normalizePreviewText(String value) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.replaceAll("\\s+", " ").trim();
+        if (normalized.isBlank()) {
+            return "";
+        }
+        return normalized.length() > 120 ? normalized.substring(0, 120) + "..." : normalized;
+    }
+
+    private String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return "";
     }
 
     private void recordPinEvent(UUID chatId, UUID messageId, UUID requesterId, Instant pinnedAt) {
@@ -1665,6 +2113,28 @@ public class ChatService {
         }
         String normalized = value.trim();
         return normalized.isBlank() ? null : normalized;
+    }
+
+    private int decodeChatCursor(String cursor) {
+        if (cursor == null || cursor.isBlank()) {
+            return 0;
+        }
+        try {
+            String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
+            int offset = Integer.parseInt(decoded);
+            if (offset < 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is invalid");
+            }
+            return offset;
+        } catch (IllegalArgumentException exception) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is invalid", exception);
+        }
+    }
+
+    private String encodeChatCursor(int offset) {
+        return Base64.getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(String.valueOf(offset).getBytes(StandardCharsets.UTF_8));
     }
 
     private Integer normalizeAutoDeleteSeconds(Integer value) {
@@ -2016,7 +2486,9 @@ public class ChatService {
                 || containsIgnoreCase(chat.about(), normalizedQuery)
                 || containsIgnoreCase(chat.publicUsername(), normalizedQuery)
                 || containsIgnoreCase(chat.peerDisplayName(), normalizedQuery)
-                || containsIgnoreCase(chat.peerPhoneNumber(), normalizedQuery);
+                || containsIgnoreCase(chat.peerPhoneNumber(), normalizedQuery)
+                || containsIgnoreCase(chat.lastMessage() != null ? chat.lastMessage().previewText() : null, normalizedQuery)
+                || containsIgnoreCase(chat.lastMessage() != null ? chat.lastMessage().senderDisplayName() : null, normalizedQuery);
     }
 
     private boolean containsIgnoreCase(String value, String normalizedQuery) {
