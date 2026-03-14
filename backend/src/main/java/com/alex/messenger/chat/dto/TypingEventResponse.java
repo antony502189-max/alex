@@ -7,6 +7,7 @@ public record TypingEventResponse(
         UUID chatId,
         UUID userId,
         boolean typing,
+        UUID topicId,
         Instant emittedAt
 ) {
 }

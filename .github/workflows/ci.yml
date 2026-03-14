@@ -17,8 +17,10 @@ jobs:
           distribution: temurin
           java-version: "17"
           cache: maven
-      - name: Run backend tests
+      - name: Run backend unit tests
         run: mvn -B test
+      - name: Run backend integration tests
+        run: mvn -B -P integration-tests verify
 
   frontend:
     runs-on: ubuntu-latest

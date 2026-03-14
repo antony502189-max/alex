@@ -27,6 +27,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -57,7 +58,23 @@ public class CallService {
 
     @Transactional(readOnly = true)
     public List<CallSessionResponse> getActiveCalls(UUID requesterId) {
-        return callSessionRepository.findByParticipantAndStatuses(requesterId, LIVE_STATUSES).stream()
+        List<CallSessionEntity> sessions = callSessionRepository.findByParticipantAndStatuses(requesterId, LIVE_STATUSES);
+        if (sessions.isEmpty()) {
+            return List.of();
+        }
+        Set<UUID> joinedChatIds = loadJoinedChatIds(requesterId);
+
+        Map<UUID, CallParticipantEntity> requesterParticipantsByCallId = callParticipantRepository
+                .findAllByIdUserIdAndIdCallIdIn(
+                        requesterId,
+                        sessions.stream().map(CallSessionEntity::getId).toList()
+                )
+                .stream()
+                .collect(Collectors.toMap(participant -> participant.getId().getCallId(), Function.identity()));
+
+        return sessions.stream()
+                .filter(session -> joinedChatIds.contains(session.getChatId()))
+                .filter(session -> isActiveForViewer(requesterParticipantsByCallId.get(session.getId())))
                 .map(session -> toResponse(session, requesterId))
                 .toList();
     }
@@ -65,21 +82,41 @@ public class CallService {
     @Transactional(readOnly = true)
     public List<CallHistoryEntryResponse> getRecentCalls(UUID requesterId, int limit) {
         int normalizedLimit = Math.max(1, Math.min(limit, 100));
+        int fetchLimit = Math.min(Math.max(normalizedLimit * 2, normalizedLimit + 10), 200);
         List<CallSessionEntity> sessions = callSessionRepository.findRecentByParticipant(
                 requesterId,
-                PageRequest.of(0, normalizedLimit)
+                PageRequest.of(0, fetchLimit)
         );
         if (sessions.isEmpty()) {
             return List.of();
         }
+        Set<UUID> joinedChatIds = loadJoinedChatIds(requesterId);
 
-        List<UUID> callIds = sessions.stream().map(CallSessionEntity::getId).toList();
+        List<CallSessionEntity> visibleSessions = sessions.stream()
+                .filter(session -> joinedChatIds.contains(session.getChatId()))
+                .toList();
+        if (visibleSessions.isEmpty()) {
+            return List.of();
+        }
+
+        List<UUID> callIds = visibleSessions.stream().map(CallSessionEntity::getId).toList();
         Map<UUID, List<CallParticipantEntity>> participantsByCallId = callParticipantRepository
                 .findAllByIdCallIdIn(callIds)
                 .stream()
                 .collect(Collectors.groupingBy(participant -> participant.getId().getCallId()));
+        List<CallSessionEntity> recentSessions = visibleSessions.stream()
+                .filter(session -> shouldIncludeInRecent(
+                        session,
+                        findParticipant(participantsByCallId.getOrDefault(session.getId(), List.of()), requesterId)
+                ))
+                .limit(normalizedLimit)
+                .toList();
+        if (recentSessions.isEmpty()) {
+            return List.of();
+        }
+
         Map<UUID, ChatEntity> chatsById = chatRepository.findAllById(
-                sessions.stream().map(CallSessionEntity::getChatId).distinct().toList()
+                recentSessions.stream().map(CallSessionEntity::getChatId).distinct().toList()
         ).stream().collect(Collectors.toMap(ChatEntity::getId, Function.identity()));
         List<UUID> directPeerIds = chatsById.values().stream()
                 .filter(chat -> "DIRECT".equals(chat.getChatType()))
@@ -90,7 +127,7 @@ public class CallService {
         Map<UUID, UserEntity> directPeersById = userRepository.findAllById(directPeerIds).stream()
                 .collect(Collectors.toMap(UserEntity::getId, Function.identity()));
 
-        return sessions.stream()
+        return recentSessions.stream()
                 .map(session -> toHistoryEntry(
                         session,
                         requesterId,
@@ -99,6 +136,12 @@ public class CallService {
                         directPeersById
                 ))
                 .toList();
+    }
+
+    private Set<UUID> loadJoinedChatIds(UUID requesterId) {
+        return chatMemberRepository.findAllByIdUserId(requesterId).stream()
+                .map(member -> member.getId().getChatId())
+                .collect(Collectors.toSet());
     }
 
     @Transactional(readOnly = true)
@@ -116,7 +159,6 @@ public class CallService {
         ChatEntity chat = chatService.getOwnedChat(requesterId, request.chatId());
         ensureCallLinksSupported(chat);
         ensureCanManageCallLinks(chat, requesterId);
-        int participantCount = chatMemberRepository.findAllByIdChatId(chat.getId()).size();
 
         Instant expiresAt = request.expiresAt();
         if (expiresAt != null && !expiresAt.isAfter(Instant.now())) {
@@ -127,7 +169,7 @@ public class CallService {
         link.setChatId(chat.getId());
         link.setCreatedByUserId(requesterId);
         link.setKind(normalizeKind(request.kind()));
-        link.setMode(normalizeMode(chat, request.mode(), request.kind(), participantCount));
+        link.setMode(normalizeJoinLinkMode(chat, request.mode(), request.kind()));
         link.setLabel(normalizeLabel(request.label()));
         link.setToken(generateJoinLinkToken());
         link.setExpiresAt(expiresAt);
@@ -143,14 +185,17 @@ public class CallService {
 
         ChatEntity chat = chatService.getOwnedChat(requesterId, link.getChatId());
         ensureCallLinksSupported(chat);
+        ensureLiveJoinLinkMode(link.getMode());
 
         Instant now = Instant.now();
         CallSessionEntity session = callSessionRepository
                 .findFirstByChatIdAndStatusInOrderByStartedAtDesc(chat.getId(), LIVE_STATUSES);
         if (session == null) {
+            ensureCanStartManagedLiveCall(chat, requesterId, link.getMode());
             session = createCallSession(chat, requesterId, link.getKind(), link.getMode(), false, now);
             publishSessionUpdate(session, "STARTED");
         } else {
+            ensureJoinLinkMatchesSession(link, session);
             joinParticipantState(session, requesterId, now);
             publishSessionUpdate(session, "UPDATED");
         }
@@ -170,6 +215,9 @@ public class CallService {
         if (callSessionRepository.existsByChatIdAndStatusIn(chat.getId(), LIVE_STATUSES)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Another live call already exists in this chat");
         }
+        int participantCount = chatMemberRepository.findAllByIdChatId(chat.getId()).size();
+        String normalizedMode = normalizeMode(chat, request.mode(), request.kind(), participantCount);
+        ensureCanStartManagedLiveCall(chat, requesterId, normalizedMode);
 
         CallSessionEntity savedSession = createCallSession(
                 chat,
@@ -198,25 +246,29 @@ public class CallService {
     @Transactional
     public CallSessionResponse declineCall(UUID requesterId, UUID callId) {
         CallSessionEntity session = getAccessibleCall(requesterId, callId);
-        if (!LIVE_STATUSES.contains(session.getStatus())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Call is no longer active");
-        }
+        ensureCallIsLive(session);
 
         CallParticipantEntity participant = getParticipant(callId, requesterId);
-        if (!"DECLINED".equals(participant.getState())) {
-            participant.setState("DECLINED");
-            participant.setLeftAt(Instant.now());
-            participant.setScreenSharing(false);
-            participant.setHandRaised(false);
-            callParticipantRepository.save(participant);
+        if (TERMINAL_PARTICIPANT_STATES.contains(participant.getState())) {
+            return toResponse(session, requesterId);
         }
+        if (!List.of("RINGING", "INVITED").contains(participant.getState())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Only invited participants can decline the call");
+        }
+        Instant now = Instant.now();
+        participant.setState("DECLINED");
+        participant.setLeftAt(now);
+        participant.setScreenSharing(false);
+        participant.setHandRaised(false);
+        callParticipantRepository.save(participant);
 
-        if (countParticipantsByStates(callId, List.of("RINGING", "JOINED")) <= 1) {
+        if ("DIRECT".equals(session.getMode()) && countParticipantsByStates(callId, List.of("RINGING", "JOINED")) <= 1) {
             session.setStatus("DECLINED");
-            Instant endedAt = Instant.now();
-            session.setEndedAt(endedAt);
-            markRemainingParticipantsMissed(callId, endedAt);
+            session.setEndedAt(now);
+            markRemainingParticipantsMissed(callId, now);
             callSessionRepository.save(session);
+        } else {
+            reconcileSessionAfterParticipantExit(session, now);
         }
 
         publishSessionUpdate(session, "UPDATED");
@@ -226,15 +278,23 @@ public class CallService {
     @Transactional
     public CallSessionResponse leaveCall(UUID requesterId, UUID callId) {
         CallSessionEntity session = getAccessibleCall(requesterId, callId);
+        if (!LIVE_STATUSES.contains(session.getStatus())) {
+            return toResponse(session, requesterId);
+        }
         CallParticipantEntity participant = getParticipant(callId, requesterId);
 
-        if (!TERMINAL_PARTICIPANT_STATES.contains(participant.getState())) {
-            participant.setState("LEFT");
-            participant.setLeftAt(Instant.now());
-            participant.setScreenSharing(false);
-            participant.setHandRaised(false);
-            callParticipantRepository.save(participant);
+        if (TERMINAL_PARTICIPANT_STATES.contains(participant.getState())) {
+            return toResponse(session, requesterId);
         }
+        if (!"JOINED".equals(participant.getState())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Only joined participants can leave the call");
+        }
+
+        participant.setState("LEFT");
+        participant.setLeftAt(Instant.now());
+        participant.setScreenSharing(false);
+        participant.setHandRaised(false);
+        callParticipantRepository.save(participant);
 
         reconcileSessionAfterParticipantExit(session, Instant.now());
         publishSessionUpdate(session, "UPDATED");
@@ -249,6 +309,7 @@ public class CallService {
             UpdateCallParticipantModerationRequest request
     ) {
         CallSessionEntity session = getAccessibleCall(requesterId, callId);
+        ensureCallIsLive(session);
         ensureCanModerateCall(requesterId, session);
         if (request == null
                 || (request.audioPublishingAllowed() == null
@@ -378,6 +439,9 @@ public class CallService {
         if (!enabled && !Boolean.TRUE.equals(participant.getAudioPublishingAllowed())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Audio publishing is disabled for this participant");
         }
+        if (!enabled && Boolean.TRUE.equals(participant.getMutedByModerator())) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Audio was muted by a moderator");
+        }
         if (Objects.equals(participant.getAudioMuted(), enabled)
                 && (!enabled || !Boolean.TRUE.equals(participant.getMutedByModerator()))) {
             return toResponse(session, requesterId);
@@ -421,13 +485,18 @@ public class CallService {
             UUID callId,
             CallSignalRequest request
     ) {
-        getAccessibleCall(requesterId, callId);
-        if (!callParticipantRepository.existsByIdCallIdAndIdUserId(callId, request.toUserId())) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Signal target is not in this call");
-        }
+        CallSessionEntity session = getAccessibleCall(requesterId, callId);
+        ensureCallIsLive(session);
         if (request.toUserId().equals(requesterId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Signal target must be another participant");
         }
+        CallParticipantEntity senderParticipant = getParticipant(callId, requesterId);
+        ensureParticipantCanSignal(senderParticipant, "Sender");
+        CallParticipantEntity targetParticipant = callParticipantRepository
+                .findById(new CallParticipantId(callId, request.toUserId()))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Signal target is not in this call"));
+        ensureParticipantCanSignal(targetParticipant, "Signal target");
+        ensureParticipantIsCurrentChatMember(session.getChatId(), request.toUserId(), "Signal target is not in this call");
 
         CallSignalEventResponse signal = new CallSignalEventResponse(
                 callId,
@@ -445,16 +514,23 @@ public class CallService {
         List<CallParticipantEntity> participants = callParticipantRepository.findAllByIdCallId(session.getId());
         Map<UUID, UserEntity> usersById = loadCallUsers(participants);
         ChatEntity chat = chatRepository.findById(session.getChatId()).orElse(null);
-        Map<UUID, ChatMemberEntity> membershipsByUserId = chat == null
-                ? Map.of()
-                : chatMemberRepository.findAllByIdChatId(session.getChatId()).stream()
-                        .collect(Collectors.toMap(member -> member.getId().getUserId(), Function.identity()));
-        for (CallParticipantEntity participant : participants) {
+        if (chat == null) {
+            return;
+        }
+        Map<UUID, ChatMemberEntity> membershipsByUserId = chatMemberRepository.findAllByIdChatId(session.getChatId()).stream()
+                .collect(Collectors.toMap(member -> member.getId().getUserId(), Function.identity()));
+        if (membershipsByUserId.isEmpty()) {
+            return;
+        }
+        List<CallParticipantEntity> visibleParticipants = participants.stream()
+                .filter(participant -> membershipsByUserId.containsKey(participant.getId().getUserId()))
+                .toList();
+        for (CallParticipantEntity participant : visibleParticipants) {
             UUID viewerId = participant.getId().getUserId();
             callRealtimeService.publishSessionEvent(
                     viewerId,
                     eventType,
-                    buildResponse(session, participants, usersById, chat, membershipsByUserId.get(viewerId), viewerId)
+                    buildResponse(session, visibleParticipants, usersById, chat, membershipsByUserId.get(viewerId), viewerId)
             );
         }
     }
@@ -478,11 +554,47 @@ public class CallService {
         return callParticipantRepository.countByIdCallIdAndStateIn(callId, states);
     }
 
+    private void ensureCallIsLive(CallSessionEntity session) {
+        if (!LIVE_STATUSES.contains(session.getStatus())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Call is no longer active");
+        }
+    }
+
+    private boolean isActiveForViewer(CallParticipantEntity participant) {
+        return participant != null && !TERMINAL_PARTICIPANT_STATES.contains(participant.getState());
+    }
+
+    private boolean shouldIncludeInRecent(CallSessionEntity session, CallParticipantEntity participant) {
+        return !LIVE_STATUSES.contains(session.getStatus()) || !isActiveForViewer(participant);
+    }
+
+    private CallParticipantEntity findParticipant(List<CallParticipantEntity> participants, UUID userId) {
+        if (participants == null || participants.isEmpty()) {
+            return null;
+        }
+        return participants.stream()
+                .filter(participant -> participant.getId().getUserId().equals(userId))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private void ensureParticipantCanSignal(CallParticipantEntity participant, String label) {
+        if (!isActiveForViewer(participant)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, label + " is no longer in this call");
+        }
+    }
+
+    private void ensureParticipantIsCurrentChatMember(UUID chatId, UUID userId, String message) {
+        if (!chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, userId)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, message);
+        }
+    }
+
     private void markRemainingParticipantsMissed(UUID callId, Instant endedAt) {
         List<CallParticipantEntity> participants = callParticipantRepository.findAllByIdCallId(callId);
         boolean changed = false;
         for (CallParticipantEntity participant : participants) {
-            if (!"RINGING".equals(participant.getState())) {
+            if (!List.of("RINGING", "INVITED").contains(participant.getState())) {
                 continue;
             }
             participant.setState("MISSED");
@@ -505,7 +617,8 @@ public class CallService {
     }
 
     private String normalizeMode(ChatEntity chat, String mode, String kind, int participantCount) {
-        String normalized = mode != null ? mode.trim().toUpperCase() : defaultMode(chat, participantCount);
+        String normalizedKind = normalizeKind(kind);
+        String normalized = mode != null ? mode.trim().toUpperCase() : defaultMode(chat, participantCount, normalizedKind);
         if ("PRIVATE".equals(normalized)) {
             normalized = "DIRECT";
         }
@@ -518,7 +631,10 @@ public class CallService {
         if (!"DIRECT".equals(normalized) && "DIRECT".equals(chat.getChatType())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Direct chats support private mode only");
         }
-        if ("VOICE_CHAT".equals(normalized) && !"VOICE".equals(normalizeKind(kind))) {
+        if ("CHANNEL".equals(chat.getChatType()) && !List.of("VOICE_CHAT", "LIVE_STREAM").contains(normalized)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Channel chats support live call modes only");
+        }
+        if ("VOICE_CHAT".equals(normalized) && !"VOICE".equals(normalizedKind)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Voice chat mode supports voice calls only");
         }
         if (List.of("VOICE_CHAT", "LIVE_STREAM").contains(normalized)
@@ -531,8 +647,24 @@ public class CallService {
         return normalized;
     }
 
-    private String defaultMode(ChatEntity chat, int participantCount) {
+    private String normalizeJoinLinkMode(ChatEntity chat, String mode, String kind) {
+        String normalizedKind = normalizeKind(kind);
+        String normalizedMode = mode != null
+                ? normalizeMode(chat, mode, normalizedKind, 2)
+                : defaultJoinLinkMode(normalizedKind);
+        ensureLiveJoinLinkMode(normalizedMode);
+        return normalizedMode;
+    }
+
+    private String defaultMode(ChatEntity chat, int participantCount, String normalizedKind) {
+        if ("CHANNEL".equals(chat.getChatType())) {
+            return "VIDEO".equals(normalizedKind) ? "LIVE_STREAM" : "VOICE_CHAT";
+        }
         return participantCount > 2 || !"DIRECT".equals(chat.getChatType()) ? "GROUP" : "DIRECT";
+    }
+
+    private String defaultJoinLinkMode(String normalizedKind) {
+        return "VIDEO".equals(normalizedKind) ? "LIVE_STREAM" : "VOICE_CHAT";
     }
 
     private CallSessionEntity createCallSession(
@@ -613,9 +745,23 @@ public class CallService {
         }
     }
 
+    private void ensureJoinLinkMatchesSession(CallJoinLinkEntity link, CallSessionEntity session) {
+        boolean modeMismatch = !Objects.equals(link.getMode(), session.getMode());
+        boolean kindMismatch = !Objects.equals(link.getKind(), session.getKind());
+        if (modeMismatch || kindMismatch) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Call link does not match the current live call");
+        }
+    }
+
     private void ensureCallLinksSupported(ChatEntity chat) {
         if (!List.of("GROUP", "CHANNEL").contains(chat.getChatType())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Call links are available only for groups and channels");
+        }
+    }
+
+    private void ensureLiveJoinLinkMode(String mode) {
+        if (!List.of("VOICE_CHAT", "LIVE_STREAM").contains(mode)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Call links support live call modes only");
         }
     }
 
@@ -632,6 +778,12 @@ public class CallService {
         }
         if (!chatService.hasMessageModerationPermission(requesterId, session.getChatId())) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Call moderation is not allowed for this member");
+        }
+    }
+
+    private void ensureCanStartManagedLiveCall(ChatEntity chat, UUID requesterId, String mode) {
+        if ("CHANNEL".equals(chat.getChatType()) || List.of("VOICE_CHAT", "LIVE_STREAM").contains(mode)) {
+            ensureCanManageCallLinks(chat, requesterId);
         }
     }
 

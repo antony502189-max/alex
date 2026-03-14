@@ -64,7 +64,9 @@ public class GlobalSearchService {
                 || containsIgnoreCase(chat.about(), normalizedQuery)
                 || containsIgnoreCase(chat.publicUsername(), normalizedQuery)
                 || containsIgnoreCase(chat.peerDisplayName(), normalizedQuery)
-                || containsIgnoreCase(chat.peerPhoneNumber(), normalizedQuery);
+                || containsIgnoreCase(chat.peerPhoneNumber(), normalizedQuery)
+                || containsIgnoreCase(chat.lastMessage() != null ? chat.lastMessage().previewText() : null, normalizedQuery)
+                || containsIgnoreCase(chat.lastMessage() != null ? chat.lastMessage().senderDisplayName() : null, normalizedQuery);
     }
 
     private boolean containsIgnoreCase(String value, String normalizedQuery) {

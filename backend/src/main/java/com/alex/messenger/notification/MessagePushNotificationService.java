@@ -7,6 +7,7 @@ import com.alex.messenger.chat.ChatEntity;
 import com.alex.messenger.chat.ChatMemberEntity;
 import com.alex.messenger.chat.ChatMemberRepository;
 import com.alex.messenger.chat.ChatRepository;
+import com.alex.messenger.chat.forum.ForumTopicService;
 import com.alex.messenger.message.MessageEvent;
 import com.alex.messenger.message.MessageTextContent;
 import com.alex.messenger.message.dto.MessageAttachmentResponse;
@@ -21,6 +22,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 @Service
 @RequiredArgsConstructor
@@ -32,6 +34,7 @@ public class MessagePushNotificationService {
     private final ChatMemberRepository chatMemberRepository;
     private final UserRepository userRepository;
     private final AttachmentService attachmentService;
+    private final ForumTopicService forumTopicService;
 
     public void notifyNewMessage(
             MessageEvent event,
@@ -58,7 +61,7 @@ public class MessagePushNotificationService {
 
         for (UUID recipientId : event.recipientIds()) {
             ChatMemberEntity membership = memberships.get(recipientId);
-            if (membership == null || isMuted(membership)) {
+            if (membership == null || isMuted(membership) || !canNotifyRecipient(chat, recipientId, event.topicId())) {
                 continue;
             }
 
@@ -81,6 +84,18 @@ public class MessagePushNotificationService {
         }
 
         pushNotificationService.send(commands);
+    }
+
+    private boolean canNotifyRecipient(ChatEntity chat, UUID recipientId, UUID topicId) {
+        if (chat == null || topicId == null || !Boolean.TRUE.equals(chat.getForumEnabled())) {
+            return true;
+        }
+        try {
+            forumTopicService.resolveTopicForRead(chat, recipientId, topicId);
+            return true;
+        } catch (ResponseStatusException exception) {
+            return false;
+        }
     }
 
     private boolean isMuted(ChatMemberEntity membership) {

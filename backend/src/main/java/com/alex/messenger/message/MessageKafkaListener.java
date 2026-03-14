@@ -1,7 +1,9 @@
 package com.alex.messenger.message;
 
 import com.alex.messenger.attachment.AttachmentService;
+import com.alex.messenger.chat.ChatEntity;
 import com.alex.messenger.chat.ChatService;
+import com.alex.messenger.chat.forum.ForumTopicService;
 import com.alex.messenger.crypto.ChatEncryptionService;
 import com.alex.messenger.message.dto.ChatMessageResponse;
 import com.alex.messenger.notification.MessagePushNotificationService;
@@ -15,6 +17,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.web.server.ResponseStatusException;
 
 @Component
 @RequiredArgsConstructor
@@ -29,7 +32,9 @@ public class MessageKafkaListener {
     private final MessagePushNotificationService messagePushNotificationService;
     private final PollService pollService;
     private final StickerService stickerService;
+    private final MessageLookupRepository messageLookupRepository;
     private final MessageThreadRepository messageThreadRepository;
+    private final ForumTopicService forumTopicService;
     private final SimpMessagingTemplate simpMessagingTemplate;
 
     @KafkaListener(topics = "${alex.kafka.chat-messages-topic}", containerFactory = "kafkaListenerContainerFactory")
@@ -47,8 +52,12 @@ public class MessageKafkaListener {
                 ));
 
         Set<UUID> recipients = new LinkedHashSet<>();
-        recipients.add(event.senderId());
-        recipients.addAll(event.recipientIds());
+        if (canDeliverToUser(event.senderId(), event.chatId(), event.topicId())) {
+            recipients.add(event.senderId());
+        }
+        event.recipientIds().stream()
+                .filter(userId -> canDeliverToUser(userId, event.chatId(), event.topicId()))
+                .forEach(recipients::add);
         List<com.alex.messenger.message.dto.MessageAttachmentResponse> rawAttachments =
                 attachmentService.getResponses(event.attachmentIds());
 
@@ -60,6 +69,7 @@ public class MessageKafkaListener {
                     event.chatId(),
                     event.senderId()
             );
+            VisibleMessageReferences references = resolveVisibleReferences(userId, event);
             ChatMessageResponse response = new ChatMessageResponse(
                     event.chatId(),
                     event.messageId(),
@@ -72,12 +82,10 @@ public class MessageKafkaListener {
                     event.recipientIds().size() == 1 ? event.recipientIds().get(0) : null,
                     event.viaBotUserId(),
                     event.topicId(),
-                    event.threadRootMessageId(),
-                    event.discussionChatId(),
-                    event.discussionRootMessageId(),
-                    event.discussionRootMessageId() != null
-                            ? Math.max(0, messageThreadRepository.findAllByThreadRootMessageId(event.discussionRootMessageId()).size() - 1)
-                            : 0,
+                    references.threadRootMessageId(),
+                    references.discussionChatId(),
+                    references.discussionRootMessageId(),
+                    countComments(references.discussionRootMessageId()),
                     content.text(),
                     content.entities(),
                     resolveResponseMessageType(content, event.pollId(), event.stickerId(), rawAttachments),
@@ -87,9 +95,9 @@ public class MessageKafkaListener {
                     content.contactCard(),
                     content.serviceMessage(),
                     event.createdAt(),
-                    event.replyToMessageId(),
-                    event.forwardedFromChatId(),
-                    event.forwardedFromMessageId(),
+                    references.replyToMessageId(),
+                    references.forwardedFromChatId(),
+                    references.forwardedFromMessageId(),
                     pollService.getPollResponse(event.pollId(), userId),
                     stickerService.getStickerResponse(event.stickerId()),
                     attachments,
@@ -105,6 +113,110 @@ public class MessageKafkaListener {
         }
 
         messagePushNotificationService.notifyNewMessage(event, content, rawAttachments);
+    }
+
+    private VisibleMessageReferences resolveVisibleReferences(UUID requesterId, MessageEvent event) {
+        UUID visibleReplyToMessageId = resolveVisibleMessageReferenceId(requesterId, event.replyToMessageId());
+        UUID visibleThreadRootMessageId = resolveVisibleMessageReferenceId(requesterId, event.threadRootMessageId());
+        UUID visibleDiscussionRootMessageId = resolveVisibleMessageReferenceId(requesterId, event.discussionRootMessageId());
+        UUID visibleDiscussionChatId = visibleDiscussionRootMessageId != null
+                ? event.discussionChatId()
+                : resolveVisibleChatReferenceId(requesterId, event.discussionChatId());
+        UUID visibleForwardedFromMessageId = resolveVisibleForwardedMessageReferenceId(
+                requesterId,
+                event.forwardedFromChatId(),
+                event.forwardedFromMessageId()
+        );
+        UUID visibleForwardedFromChatId = visibleForwardedFromMessageId != null
+                ? event.forwardedFromChatId()
+                : resolveVisibleChatReferenceId(requesterId, event.forwardedFromChatId());
+        return new VisibleMessageReferences(
+                visibleReplyToMessageId,
+                visibleThreadRootMessageId,
+                visibleDiscussionChatId,
+                visibleDiscussionRootMessageId,
+                visibleForwardedFromChatId,
+                visibleForwardedFromMessageId
+        );
+    }
+
+    private boolean canDeliverToUser(UUID userId, UUID chatId, UUID topicId) {
+        if (userId == null) {
+            return false;
+        }
+        try {
+            ChatEntity chat = chatService.getOwnedChat(userId, chatId);
+            ensureMessageVisibleToRequester(chat, userId, topicId);
+            return true;
+        } catch (ResponseStatusException exception) {
+            return false;
+        }
+    }
+
+    private UUID resolveVisibleMessageReferenceId(UUID requesterId, UUID messageId) {
+        if (messageId == null) {
+            return null;
+        }
+        MessageLookupEntity reference = messageLookupRepository.findById(messageId).orElse(null);
+        if (reference == null || reference.getDeletedAt() != null) {
+            return null;
+        }
+        try {
+            ChatEntity chat = chatService.getOwnedChat(requesterId, reference.getChatId());
+            ensureMessageVisibleToRequester(chat, requesterId, reference.getTopicId());
+            return messageId;
+        } catch (ResponseStatusException exception) {
+            return null;
+        }
+    }
+
+    private UUID resolveVisibleForwardedMessageReferenceId(UUID requesterId, UUID forwardedFromChatId, UUID forwardedFromMessageId) {
+        if (forwardedFromMessageId == null) {
+            return null;
+        }
+        MessageLookupEntity reference = messageLookupRepository.findById(forwardedFromMessageId).orElse(null);
+        if (reference == null || reference.getDeletedAt() != null) {
+            return null;
+        }
+        if (forwardedFromChatId != null && !forwardedFromChatId.equals(reference.getChatId())) {
+            return null;
+        }
+        try {
+            ChatEntity chat = chatService.getOwnedChat(requesterId, reference.getChatId());
+            ensureMessageVisibleToRequester(chat, requesterId, reference.getTopicId());
+            return forwardedFromMessageId;
+        } catch (ResponseStatusException exception) {
+            return null;
+        }
+    }
+
+    private UUID resolveVisibleChatReferenceId(UUID requesterId, UUID chatId) {
+        if (chatId == null) {
+            return null;
+        }
+        try {
+            chatService.getOwnedChat(requesterId, chatId);
+            return chatId;
+        } catch (ResponseStatusException exception) {
+            return null;
+        }
+    }
+
+    private void ensureMessageVisibleToRequester(ChatEntity chat, UUID requesterId, UUID topicId) {
+        if (chat == null || topicId == null || !Boolean.TRUE.equals(chat.getForumEnabled())) {
+            return;
+        }
+        forumTopicService.resolveTopicForRead(chat, requesterId, topicId);
+    }
+
+    private int countComments(UUID discussionRootMessageId) {
+        if (discussionRootMessageId == null) {
+            return 0;
+        }
+        return (int) messageThreadRepository.findAllByThreadRootMessageId(discussionRootMessageId).stream()
+                .filter(message -> !discussionRootMessageId.equals(message.getKey().getMessageId()))
+                .filter(message -> message.getDeletedAt() == null)
+                .count();
     }
 
     private String resolveResponseMessageType(
@@ -129,5 +241,15 @@ public class MessageKafkaListener {
             return attachments.get(0).kind();
         }
         return "TEXT";
+    }
+
+    private record VisibleMessageReferences(
+            UUID replyToMessageId,
+            UUID threadRootMessageId,
+            UUID discussionChatId,
+            UUID discussionRootMessageId,
+            UUID forwardedFromChatId,
+            UUID forwardedFromMessageId
+    ) {
     }
 }

@@ -87,6 +87,17 @@ MVP кроссплатформенного мессенджера с backend н�
 - Node.js 20+
 - npm 10+
 
+Для локальной backend-разработки в репозитории зафиксирован SDKMAN runtime:
+
+```bash
+cd backend
+sdk env install
+sdk env
+java -version
+```
+
+`.sdkmanrc` в `backend/` закрепляет `Java 17`.
+
 ## Запуск
 
 ### 1. Инфраструктура
@@ -104,6 +115,13 @@ cd E:\Alex\backend
 ```
 
 Backend по умолчанию поднимается на `http://localhost:8080`.
+
+Для backend-only MVP профиля:
+
+```bash
+cd backend
+SPRING_PROFILES_ACTIVE=mvp ./mvnw spring-boot:run
+```
 
 Альтернативно backend можно запустить вместе с инфраструктурой через Docker Compose:
 
@@ -210,6 +228,15 @@ powershell -ExecutionPolicy Bypass -File .\smoke-test.ps1
 ```powershell
 cd E:\Alex\backend
 ./mvnw test
+```
+
+`./mvnw test` теперь гоняет unit-тесты без Docker-зависимого smoke.
+
+Для Docker/Testcontainers integration smoke:
+
+```bash
+cd backend
+./mvnw -P integration-tests verify
 ```
 
 ## Ограничения MVP

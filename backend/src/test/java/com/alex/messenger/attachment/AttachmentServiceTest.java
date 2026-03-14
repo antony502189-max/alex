@@ -1,9 +1,13 @@
 package com.alex.messenger.attachment;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import com.alex.messenger.attachment.dto.ModerateAttachmentRequest;
@@ -29,7 +33,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class AttachmentServiceTest {
@@ -225,6 +231,7 @@ class AttachmentServiceTest {
         when(attachmentRepository.findAllByIdIn(any())).thenReturn(List.of(attachment));
         when(attachmentRepository.save(any(AttachmentEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
         when(chatService.getOwnedChat(moderatorId, chatId)).thenReturn(chat);
+        when(chatService.getOwnedChat(viewerId, chatId)).thenReturn(chat);
         when(chatService.hasMessageModerationPermission(moderatorId, chatId)).thenReturn(true);
         when(chatService.hasMessageModerationPermission(viewerId, chatId)).thenReturn(false);
         when(mediaService.buildDownloadAccess("media", "attachments/photo.png"))
@@ -251,6 +258,147 @@ class AttachmentServiceTest {
         assertThat(viewerResponse.blockedByModeration()).isTrue();
         assertThat(viewerResponse.downloadUrl()).isNull();
         assertThat(viewerResponse.previewUrl()).isNull();
+    }
+
+    @Test
+    void getResponsesRejectsAttachmentsFromInaccessibleChat() {
+        UUID viewerId = UUID.randomUUID();
+        UUID attachmentId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        AttachmentEntity attachment = new AttachmentEntity();
+        attachment.setId(attachmentId);
+        attachment.setChatId(chatId);
+
+        when(attachmentRepository.findAllByIdIn(any())).thenReturn(List.of(attachment));
+        when(chatService.getOwnedChat(viewerId, chatId))
+                .thenThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "Chat access denied"));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> attachmentService.getResponses(viewerId, List.of(attachmentId)),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    @Test
+    void getResponsesWithoutRequesterDoesNotExposeAccessUrls() {
+        UUID attachmentId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        AttachmentEntity attachment = new AttachmentEntity();
+        attachment.setId(attachmentId);
+        attachment.setChatId(chatId);
+        attachment.setOriginalFileName("photo.png");
+        attachment.setContentType("image/png");
+        attachment.setKind("IMAGE");
+        attachment.setFileSizeBytes(10L);
+        attachment.setStorageProvider("S3");
+        attachment.setBucketName("media");
+        attachment.setObjectKey("attachments/photo.png");
+        attachment.setPreviewBucketName("media");
+        attachment.setPreviewObjectKey("attachments/photo-preview.jpg");
+
+        when(attachmentRepository.findAllByIdIn(any())).thenReturn(List.of(attachment));
+
+        var response = attachmentService.getResponses((UUID) null, List.of(attachmentId)).get(0);
+
+        assertThat(response.downloadUrl()).isNull();
+        assertThat(response.previewUrl()).isNull();
+        assertThat(response.thumbnailUrl()).isNull();
+        assertThat(response.requiresAuthorization()).isTrue();
+        verify(mediaService, never()).buildDownloadAccess(anyString(), anyString());
+    }
+
+    @Test
+    void cloneAttachmentsToChatReuploadsMediaAndRemapsAlbum() {
+        UUID requesterId = UUID.randomUUID();
+        UUID sourceChatId = UUID.randomUUID();
+        UUID targetChatId = UUID.randomUUID();
+        UUID firstAttachmentId = UUID.randomUUID();
+        UUID secondAttachmentId = UUID.randomUUID();
+        UUID sourceAlbumId = UUID.randomUUID();
+
+        ChatEntity sourceChat = new ChatEntity();
+        sourceChat.setId(sourceChatId);
+        ChatEntity targetChat = new ChatEntity();
+        targetChat.setId(targetChatId);
+
+        AttachmentEntity first = new AttachmentEntity();
+        first.setId(firstAttachmentId);
+        first.setChatId(sourceChatId);
+        first.setUploaderUserId(UUID.randomUUID());
+        first.setOriginalFileName("one.jpg");
+        first.setContentType("image/jpeg");
+        first.setKind("IMAGE");
+        first.setFileSizeBytes(3L);
+        first.setAlbumId(sourceAlbumId);
+        first.setAlbumItemIndex(0);
+        first.setStorageProvider("S3");
+        first.setBucketName("media");
+        first.setObjectKey("chats/source/one.jpg");
+        first.setStoragePath("s3://media/chats/source/one.jpg");
+        first.setModerationStatus("APPROVED");
+
+        AttachmentEntity second = new AttachmentEntity();
+        second.setId(secondAttachmentId);
+        second.setChatId(sourceChatId);
+        second.setUploaderUserId(UUID.randomUUID());
+        second.setOriginalFileName("two.jpg");
+        second.setContentType("image/jpeg");
+        second.setKind("IMAGE");
+        second.setFileSizeBytes(4L);
+        second.setAlbumId(sourceAlbumId);
+        second.setAlbumItemIndex(1);
+        second.setStorageProvider("S3");
+        second.setBucketName("media");
+        second.setObjectKey("chats/source/two.jpg");
+        second.setStoragePath("s3://media/chats/source/two.jpg");
+        second.setModerationStatus("APPROVED");
+
+        when(chatService.getOwnedChat(requesterId, targetChatId)).thenReturn(targetChat);
+        when(chatService.getOwnedChat(requesterId, sourceChatId)).thenReturn(sourceChat);
+        when(attachmentRepository.findAllByIdIn(any())).thenReturn(List.of(first, second));
+        when(mediaService.downloadObjectBytes("media", "chats/source/one.jpg")).thenReturn(new byte[]{1, 2, 3});
+        when(mediaService.downloadObjectBytes("media", "chats/source/two.jpg")).thenReturn(new byte[]{4, 5, 6, 7});
+        when(mediaService.upload(
+                eq(targetChatId),
+                any(UUID.class),
+                anyString(),
+                anyString(),
+                anyLong(),
+                any(InputStream.class)
+        )).thenAnswer(invocation -> {
+            UUID clonedId = invocation.getArgument(1, UUID.class);
+            return new MediaObjectReference(
+                    "media",
+                    "chats/%s/%s".formatted(targetChatId, clonedId),
+                    "s3://media/chats/%s/%s".formatted(targetChatId, clonedId)
+            );
+        });
+        when(attachmentRepository.save(any(AttachmentEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        List<UUID> clonedIds = attachmentService.cloneAttachmentsToChat(
+                requesterId,
+                targetChatId,
+                List.of(firstAttachmentId, secondAttachmentId)
+        );
+
+        ArgumentCaptor<AttachmentEntity> captor = ArgumentCaptor.forClass(AttachmentEntity.class);
+        verify(attachmentRepository, org.mockito.Mockito.times(2)).save(captor.capture());
+        List<AttachmentEntity> saved = captor.getAllValues();
+
+        assertThat(clonedIds).hasSize(2).doesNotContain(firstAttachmentId, secondAttachmentId);
+        assertThat(saved).extracting(AttachmentEntity::getChatId).containsOnly(targetChatId);
+        assertThat(saved).extracting(AttachmentEntity::getUploaderUserId).containsOnly(requesterId);
+        assertThat(saved).extracting(AttachmentEntity::getAlbumItemIndex).containsExactly(0, 1);
+        assertThat(saved.get(0).getAlbumId()).isNotNull().isEqualTo(saved.get(1).getAlbumId()).isNotEqualTo(sourceAlbumId);
+        assertThat(saved).extracting(AttachmentEntity::getStoragePath).allMatch(path -> path.startsWith("s3://media/chats/" + targetChatId));
+        verify(mediaService).downloadObjectBytes("media", "chats/source/one.jpg");
+        verify(mediaService).downloadObjectBytes("media", "chats/source/two.jpg");
+        verify(mediaProcessingService, org.mockito.Mockito.times(2)).enqueueAttachmentPreview(any(AttachmentEntity.class));
     }
 
     private byte[] createPng(int width, int height) throws IOException {

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.when;
 
 import com.alex.messenger.chat.ChatService;
+import com.alex.messenger.chat.dto.ChatLastMessagePreviewResponse;
 import com.alex.messenger.chat.dto.ChatSummaryResponse;
 import com.alex.messenger.message.MessageService;
 import com.alex.messenger.message.dto.ChatMessageResponse;
@@ -79,7 +80,8 @@ class GlobalSearchServiceTest {
                 false,
                 false,
                 true,
-                false
+                false,
+                null
         );
         ChatMessageResponse message = new ChatMessageResponse(
                 chatId,
@@ -148,5 +150,70 @@ class GlobalSearchServiceTest {
         assertThat(response.messages()).hasSize(1);
         assertThat(response.messages().get(0).chat().chatId()).isEqualTo(chatId);
         assertThat(response.messages().get(0).message().messageId()).isEqualTo(message.messageId());
+    }
+
+    @Test
+    void searchMatchesChatByLastMessagePreview() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatSummaryResponse chat = new ChatSummaryResponse(
+                chatId,
+                "DIRECT",
+                "Conversation",
+                null,
+                null,
+                UUID.randomUUID(),
+                "+375291234567",
+                "Alex",
+                false,
+                null,
+                false,
+                false,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                0,
+                null,
+                null,
+                Instant.parse("2026-03-12T12:00:00Z"),
+                2,
+                null,
+                0,
+                0,
+                0,
+                false,
+                null,
+                null,
+                null,
+                null,
+                false,
+                false,
+                true,
+                false,
+                new ChatLastMessagePreviewResponse(
+                        UUID.randomUUID(),
+                        UUID.randomUUID(),
+                        "Alex",
+                        false,
+                        false,
+                        "TEXT",
+                        "Alpha project is ready",
+                        Instant.parse("2026-03-12T12:00:00Z"),
+                        null,
+                        null
+                )
+        );
+
+        when(chatService.listAllChats(requesterId)).thenReturn(List.of(chat));
+        when(userService.search(requesterId, "alpha")).thenReturn(List.of());
+        when(messageService.searchGlobalMessages(requesterId, List.of(chatId), "alpha", 10)).thenReturn(List.of());
+
+        GlobalSearchResponse response = globalSearchService.search(requesterId, "alpha", 10);
+
+        assertThat(response.chats()).extracting(ChatSummaryResponse::chatId).containsExactly(chatId);
     }
 }
