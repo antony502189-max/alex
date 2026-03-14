@@ -125,8 +125,6 @@ class CallServiceTest {
         when(callParticipantRepository.findAllByIdCallId(callId)).thenAnswer(invocation -> savedParticipants.get());
         when(userRepository.findAllById(any())).thenReturn(List.of(requester, secondUser, thirdUser));
         when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
-        when(chatMemberRepository.findById(any())).thenReturn(Optional.of(member(chatId, requesterId)));
-        when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
 
         var response = callService.startCall(
                 requesterId,
@@ -241,9 +239,6 @@ class CallServiceTest {
         when(userRepository.findAllById(any())).thenReturn(List.of(requester, secondUser));
         when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
         when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(members);
-        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId)))
-                .thenReturn(Optional.of(requesterMembership));
-        when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
 
         var response = callService.startCall(
                 requesterId,
@@ -607,9 +602,10 @@ class CallServiceTest {
         ));
         when(userRepository.findAllById(any())).thenReturn(List.of(requester, secondUser));
         when(chatRepository.findById(activeChatId)).thenReturn(Optional.of(activeChat));
-        when(chatMemberRepository.findById(new ChatMemberId(activeChatId, requesterId)))
-                .thenReturn(Optional.of(member(activeChatId, requesterId)));
-        when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
+        when(chatMemberRepository.findAllByIdChatId(activeChatId)).thenReturn(List.of(
+                member(activeChatId, requesterId),
+                member(activeChatId, secondUserId)
+        ));
 
         var activeCalls = callService.getActiveCalls(requesterId);
 
@@ -649,15 +645,55 @@ class CallServiceTest {
         ));
         when(userRepository.findAllById(any())).thenReturn(List.of(requester, secondUser));
         when(chatRepository.findById(visibleChatId)).thenReturn(Optional.of(chat(visibleChatId, "GROUP")));
-        when(chatMemberRepository.findById(new ChatMemberId(visibleChatId, requesterId)))
-                .thenReturn(Optional.of(member(visibleChatId, requesterId)));
-        when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
+        when(chatMemberRepository.findAllByIdChatId(visibleChatId)).thenReturn(List.of(
+                member(visibleChatId, requesterId),
+                member(visibleChatId, secondUserId)
+        ));
 
         var activeCalls = callService.getActiveCalls(requesterId);
 
         assertThat(activeCalls).extracting(com.alex.messenger.call.dto.CallSessionResponse::callId)
                 .containsExactly(visibleCallId);
         verify(callParticipantRepository, never()).findAllByIdCallId(removedCallId);
+    }
+
+    @Test
+    void getActiveCallsFiltersParticipantsWithoutCurrentMembership() {
+        UUID requesterId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        UUID removedUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = session(callId, chatId, requesterId, "ACTIVE", "VOICE_CHAT");
+        UserEntity requester = user(requesterId, "Requester");
+        UserEntity secondUser = user(secondUserId, "Second");
+
+        when(callSessionRepository.findByParticipantAndStatuses(requesterId, List.of("RINGING", "ACTIVE")))
+                .thenReturn(List.of(session));
+        when(chatMemberRepository.findAllByIdUserId(requesterId))
+                .thenReturn(List.of(member(chatId, requesterId)));
+        when(callParticipantRepository.findAllByIdUserIdAndIdCallIdIn(requesterId, List.of(callId)))
+                .thenReturn(List.of(participant(callId, requesterId, "JOINED")));
+        when(callParticipantRepository.findAllByIdCallId(callId)).thenReturn(List.of(
+                participant(callId, requesterId, "JOINED"),
+                participant(callId, secondUserId, "JOINED"),
+                participant(callId, removedUserId, "JOINED")
+        ));
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat(chatId, "GROUP")));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(
+                member(chatId, requesterId),
+                member(chatId, secondUserId)
+        ));
+        when(userRepository.findAllById(any())).thenReturn(List.of(requester, secondUser));
+        when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
+
+        var activeCalls = callService.getActiveCalls(requesterId);
+
+        assertThat(activeCalls).hasSize(1);
+        assertThat(activeCalls.get(0).participants())
+                .extracting(com.alex.messenger.call.dto.CallParticipantResponse::userId)
+                .containsExactlyInAnyOrder(requesterId, secondUserId);
     }
 
     @Test
@@ -707,9 +743,10 @@ class CallServiceTest {
         when(callParticipantRepository.findAllByIdCallId(callId)).thenAnswer(invocation -> participantsRef.get());
         when(userRepository.findAllById(any())).thenReturn(List.of(requester, host));
         when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
-        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId)))
-                .thenReturn(Optional.of(member(chatId, requesterId)));
-        when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(
+                member(chatId, requesterId),
+                member(chatId, hostUserId)
+        ));
 
         var response = callService.declineCall(requesterId, callId);
 
@@ -797,9 +834,10 @@ class CallServiceTest {
         when(callParticipantRepository.countByIdCallIdAndStateIn(callId, List.of("RINGING"))).thenReturn(0L);
         when(userRepository.findAllById(any())).thenReturn(List.of(requester, invited));
         when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
-        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId)))
-                .thenReturn(Optional.of(member(chatId, requesterId)));
-        when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(
+                member(chatId, requesterId),
+                member(chatId, invitedUserId)
+        ));
 
         var response = callService.leaveCall(requesterId, callId);
 
@@ -854,9 +892,10 @@ class CallServiceTest {
         when(callParticipantRepository.findAllByIdCallId(callId)).thenReturn(List.of(requesterParticipant, secondParticipant));
         when(userRepository.findAllById(any())).thenReturn(List.of(requester, secondUser));
         when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
-        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId)))
-                .thenReturn(Optional.of(member(chatId, requesterId)));
-        when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(
+                member(chatId, requesterId),
+                member(chatId, secondUserId)
+        ));
 
         var response = callService.leaveCall(requesterId, callId);
 
@@ -891,15 +930,12 @@ class CallServiceTest {
         ));
         when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
         when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(member(chatId, requesterId)));
-        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId)))
-                .thenReturn(Optional.of(member(chatId, requesterId)));
         when(userRepository.findAllById(any())).thenReturn(List.of(requester, removedUser));
-        when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
 
         var response = callService.setScreenSharing(requesterId, callId, true);
 
         assertThat(response.participants()).extracting(com.alex.messenger.call.dto.CallParticipantResponse::userId)
-                .contains(requesterId, removedUserId);
+                .containsExactly(requesterId);
         verify(callRealtimeService).publishSessionEvent(eq(requesterId), eq("UPDATED"), any());
         verify(callRealtimeService, never()).publishSessionEvent(eq(removedUserId), eq("UPDATED"), any());
     }

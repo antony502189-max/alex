@@ -512,19 +512,16 @@ public class CallService {
 
     private void publishSessionUpdate(CallSessionEntity session, String eventType) {
         List<CallParticipantEntity> participants = callParticipantRepository.findAllByIdCallId(session.getId());
-        Map<UUID, UserEntity> usersById = loadCallUsers(participants);
         ChatEntity chat = chatRepository.findById(session.getChatId()).orElse(null);
         if (chat == null) {
             return;
         }
-        Map<UUID, ChatMemberEntity> membershipsByUserId = chatMemberRepository.findAllByIdChatId(session.getChatId()).stream()
-                .collect(Collectors.toMap(member -> member.getId().getUserId(), Function.identity()));
+        Map<UUID, ChatMemberEntity> membershipsByUserId = loadMembershipsByUserId(session.getChatId());
         if (membershipsByUserId.isEmpty()) {
             return;
         }
-        List<CallParticipantEntity> visibleParticipants = participants.stream()
-                .filter(participant -> membershipsByUserId.containsKey(participant.getId().getUserId()))
-                .toList();
+        List<CallParticipantEntity> visibleParticipants = filterVisibleParticipants(participants, membershipsByUserId);
+        Map<UUID, UserEntity> usersById = loadCallUsers(visibleParticipants);
         for (CallParticipantEntity participant : visibleParticipants) {
             UUID viewerId = participant.getId().getUserId();
             callRealtimeService.publishSessionEvent(
@@ -852,18 +849,35 @@ public class CallService {
 
     private CallSessionResponse toResponse(CallSessionEntity session, UUID viewerId) {
         List<CallParticipantEntity> participants = callParticipantRepository.findAllByIdCallId(session.getId());
-        Map<UUID, UserEntity> usersById = loadCallUsers(participants);
         ChatEntity chat = chatRepository.findById(session.getChatId()).orElse(null);
-        ChatMemberEntity viewerMembership = viewerId == null
-                ? null
-                : chatMemberRepository.findById(new ChatMemberId(session.getChatId(), viewerId)).orElse(null);
-        return buildResponse(session, participants, usersById, chat, viewerMembership, viewerId);
+        Map<UUID, ChatMemberEntity> membershipsByUserId = loadMembershipsByUserId(session.getChatId());
+        List<CallParticipantEntity> visibleParticipants = filterVisibleParticipants(participants, membershipsByUserId);
+        Map<UUID, UserEntity> usersById = loadCallUsers(visibleParticipants);
+        ChatMemberEntity viewerMembership = viewerId == null ? null : membershipsByUserId.get(viewerId);
+        return buildResponse(session, visibleParticipants, usersById, chat, viewerMembership, viewerId);
     }
 
     private Map<UUID, UserEntity> loadCallUsers(List<CallParticipantEntity> participants) {
         return userRepository.findAllById(
                 participants.stream().map(participant -> participant.getId().getUserId()).toList()
         ).stream().collect(Collectors.toMap(UserEntity::getId, Function.identity()));
+    }
+
+    private Map<UUID, ChatMemberEntity> loadMembershipsByUserId(UUID chatId) {
+        return chatMemberRepository.findAllByIdChatId(chatId).stream()
+                .collect(Collectors.toMap(member -> member.getId().getUserId(), Function.identity()));
+    }
+
+    private List<CallParticipantEntity> filterVisibleParticipants(
+            List<CallParticipantEntity> participants,
+            Map<UUID, ChatMemberEntity> membershipsByUserId
+    ) {
+        if (participants == null || participants.isEmpty() || membershipsByUserId.isEmpty()) {
+            return List.of();
+        }
+        return participants.stream()
+                .filter(participant -> membershipsByUserId.containsKey(participant.getId().getUserId()))
+                .toList();
     }
 
     private CallSessionResponse buildResponse(
