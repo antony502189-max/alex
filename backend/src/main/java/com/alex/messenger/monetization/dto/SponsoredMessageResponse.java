@@ -14,6 +14,9 @@ public record SponsoredMessageResponse(
         String callToActionUrl,
         long budgetUnits,
         long spentUnits,
+        long earnedUnits,
+        long settledUnits,
+        long outstandingPayoutUnits,
         long remainingBudgetUnits,
         long costPerImpressionUnits,
         long costPerClickUnits,
@@ -24,6 +27,8 @@ public record SponsoredMessageResponse(
         Instant createdAt,
         Instant updatedAt,
         Instant publishedAt,
-        Instant activeUntil
+        Instant activeUntil,
+        Instant completedAt,
+        Instant canceledAt
 ) {
 }

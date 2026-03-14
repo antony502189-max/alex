@@ -53,6 +53,7 @@ public class PaymentService {
                 null,
                 null,
                 null,
+                null,
                 "TOP_UP",
                 "CREDIT",
                 amountUnits,
@@ -68,6 +69,15 @@ public class PaymentService {
         return paymentWalletTransactionRepository.findAllByWalletUserIdOrderByCreatedAtDesc(requesterId).stream()
                 .map(this::toTransactionResponse)
                 .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public boolean hasAvailableBalance(UUID userId, long amountUnits) {
+        requireUser(userId);
+        if (amountUnits <= 0) {
+            return true;
+        }
+        return getOrCreateWallet(userId).getBalanceUnits() >= amountUnits;
     }
 
     @Transactional
@@ -202,6 +212,7 @@ public class PaymentService {
                 recipientWallet.getUserId(),
                 invoice.getId(),
                 intent.getId(),
+                null,
                 "PAYMENT",
                 "DEBIT",
                 intent.getAmountUnits(),
@@ -212,6 +223,7 @@ public class PaymentService {
                 payerWallet.getUserId(),
                 invoice.getId(),
                 intent.getId(),
+                null,
                 "PAYMENT",
                 "CREDIT",
                 intent.getAmountUnits(),
@@ -275,6 +287,7 @@ public class PaymentService {
                 payerWallet.getUserId(),
                 invoice.getId(),
                 intent.getId(),
+                null,
                 "REFUND",
                 "DEBIT",
                 intent.getAmountUnits(),
@@ -285,6 +298,7 @@ public class PaymentService {
                 recipientWallet.getUserId(),
                 invoice.getId(),
                 intent.getId(),
+                null,
                 "REFUND",
                 "CREDIT",
                 intent.getAmountUnits(),
@@ -365,6 +379,7 @@ public class PaymentService {
             UUID counterpartyUserId,
             UUID invoiceId,
             UUID paymentIntentId,
+            UUID sponsoredMessageId,
             String transactionType,
             String direction,
             long amountUnits,
@@ -375,6 +390,7 @@ public class PaymentService {
         transaction.setCounterpartyUserId(counterpartyUserId);
         transaction.setInvoiceId(invoiceId);
         transaction.setPaymentIntentId(paymentIntentId);
+        transaction.setSponsoredMessageId(sponsoredMessageId);
         transaction.setTransactionType(transactionType);
         transaction.setDirection(direction);
         transaction.setAmountUnits(amountUnits);
@@ -382,6 +398,80 @@ public class PaymentService {
         transaction.setCurrencyCode(wallet.getCurrencyCode());
         transaction.setDescription(description);
         return paymentWalletTransactionRepository.save(transaction);
+    }
+
+    @Transactional
+    public void transferSponsoredRevenue(
+            UUID sponsorUserId,
+            UUID recipientUserId,
+            UUID sponsoredMessageId,
+            long amountUnits,
+            String debitDescription,
+            String creditDescription
+    ) {
+        if (amountUnits <= 0 || sponsorUserId.equals(recipientUserId)) {
+            return;
+        }
+        requireUser(sponsorUserId);
+        requireUser(recipientUserId);
+
+        PaymentWalletAccountEntity sponsorWallet = getOrCreateWallet(sponsorUserId);
+        PaymentWalletAccountEntity recipientWallet = getOrCreateWallet(recipientUserId);
+        if (sponsorWallet.getBalanceUnits() < amountUnits) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Insufficient sponsor wallet balance");
+        }
+
+        sponsorWallet.setBalanceUnits(sponsorWallet.getBalanceUnits() - amountUnits);
+        recipientWallet.setBalanceUnits(recipientWallet.getBalanceUnits() + amountUnits);
+        sponsorWallet = paymentWalletAccountRepository.save(sponsorWallet);
+        recipientWallet = paymentWalletAccountRepository.save(recipientWallet);
+
+        recordTransaction(
+                sponsorWallet,
+                recipientUserId,
+                null,
+                null,
+                sponsoredMessageId,
+                "SPONSORED_MESSAGE",
+                "DEBIT",
+                amountUnits,
+                normalizeOptional(debitDescription, 255)
+        );
+        recordTransaction(
+                recipientWallet,
+                sponsorUserId,
+                null,
+                null,
+                sponsoredMessageId,
+                "SPONSORED_MESSAGE",
+                "CREDIT",
+                amountUnits,
+                normalizeOptional(creditDescription, 255)
+        );
+    }
+
+    @Transactional
+    public void withdrawToExternal(UUID userId, long amountUnits, String description) {
+        requireUser(userId);
+        long normalizedAmount = normalizeAmount(amountUnits, "Withdrawal amount");
+        PaymentWalletAccountEntity wallet = getOrCreateWallet(userId);
+        if (wallet.getBalanceUnits() < normalizedAmount) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Insufficient wallet balance");
+        }
+
+        wallet.setBalanceUnits(wallet.getBalanceUnits() - normalizedAmount);
+        wallet = paymentWalletAccountRepository.save(wallet);
+        recordTransaction(
+                wallet,
+                null,
+                null,
+                null,
+                null,
+                "WITHDRAWAL",
+                "DEBIT",
+                normalizedAmount,
+                normalizeOptional(description, 255)
+        );
     }
 
     private PaymentWalletResponse toWalletResponse(PaymentWalletAccountEntity wallet) {
@@ -400,6 +490,7 @@ public class PaymentService {
                 transaction.getCounterpartyUserId(),
                 transaction.getInvoiceId(),
                 transaction.getPaymentIntentId(),
+                transaction.getSponsoredMessageId(),
                 transaction.getTransactionType(),
                 transaction.getDirection(),
                 transaction.getAmountUnits(),

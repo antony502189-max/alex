@@ -9,12 +9,19 @@ public record ChannelMonetizationStatsResponse(
         int activeCount,
         int pausedCount,
         int completedCount,
+        int canceledCount,
         int publishedCount,
         long totalBudgetUnits,
         long totalSpentUnits,
+        long totalEarnedUnits,
+        long totalSettledUnits,
+        long outstandingPayoutUnits,
         long remainingBudgetUnits,
         long impressionsCount,
         long clicksCount,
+        long totalPayoutUnits,
+        int uniqueSponsorCount,
+        int totalPayouts,
         double clickThroughRatePercent
 ) {
 }

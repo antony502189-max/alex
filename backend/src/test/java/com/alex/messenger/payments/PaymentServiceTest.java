@@ -203,6 +203,60 @@ class PaymentServiceTest {
         assertThat(recipientWallet.getBalanceUnits()).isEqualTo(40L);
     }
 
+    @Test
+    void transferSponsoredRevenueMovesFundsBetweenWallets() {
+        UUID sponsorUserId = UUID.randomUUID();
+        UUID recipientUserId = UUID.randomUUID();
+        UUID sponsoredMessageId = UUID.randomUUID();
+        PaymentWalletAccountEntity sponsorWallet = wallet(sponsorUserId, 35);
+        PaymentWalletAccountEntity recipientWallet = wallet(recipientUserId, 8);
+
+        when(userRepository.findById(sponsorUserId)).thenReturn(Optional.of(user(sponsorUserId, "Sponsor")));
+        when(userRepository.findById(recipientUserId)).thenReturn(Optional.of(user(recipientUserId, "Owner")));
+        when(paymentWalletAccountRepository.findById(sponsorUserId)).thenReturn(Optional.of(sponsorWallet));
+        when(paymentWalletAccountRepository.findById(recipientUserId)).thenReturn(Optional.of(recipientWallet));
+        when(paymentWalletAccountRepository.save(any(PaymentWalletAccountEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(paymentWalletTransactionRepository.save(any(PaymentWalletTransactionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        paymentService.transferSponsoredRevenue(
+                sponsorUserId,
+                recipientUserId,
+                sponsoredMessageId,
+                9L,
+                "Sponsored impression",
+                "Channel revenue"
+        );
+
+        assertThat(sponsorWallet.getBalanceUnits()).isEqualTo(26L);
+        assertThat(recipientWallet.getBalanceUnits()).isEqualTo(17L);
+    }
+
+    @Test
+    void hasAvailableBalanceReflectsWalletBalance() {
+        UUID userId = UUID.randomUUID();
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(user(userId, "Balance holder")));
+        when(paymentWalletAccountRepository.findById(userId)).thenReturn(Optional.of(wallet(userId, 14)));
+
+        assertThat(paymentService.hasAvailableBalance(userId, 10L)).isTrue();
+        assertThat(paymentService.hasAvailableBalance(userId, 20L)).isFalse();
+    }
+
+    @Test
+    void withdrawToExternalDebitsWalletBalance() {
+        UUID userId = UUID.randomUUID();
+        PaymentWalletAccountEntity wallet = wallet(userId, 22);
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(user(userId, "Withdrawer")));
+        when(paymentWalletAccountRepository.findById(userId)).thenReturn(Optional.of(wallet));
+        when(paymentWalletAccountRepository.save(any(PaymentWalletAccountEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(paymentWalletTransactionRepository.save(any(PaymentWalletTransactionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        paymentService.withdrawToExternal(userId, 7L, "Payout withdrawal");
+
+        assertThat(wallet.getBalanceUnits()).isEqualTo(15L);
+    }
+
     private PaymentWalletAccountEntity wallet(UUID userId, long balance) {
         PaymentWalletAccountEntity wallet = new PaymentWalletAccountEntity();
         wallet.setUserId(userId);

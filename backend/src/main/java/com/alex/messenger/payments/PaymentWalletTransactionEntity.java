@@ -36,6 +36,9 @@ public class PaymentWalletTransactionEntity {
     @Column(name = "payment_intent_id")
     private UUID paymentIntentId;
 
+    @Column(name = "sponsored_message_id")
+    private UUID sponsoredMessageId;
+
     @Column(name = "transaction_type", nullable = false, length = 32)
     private String transactionType;
 

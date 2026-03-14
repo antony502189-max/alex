@@ -52,6 +52,12 @@ public class SponsoredMessageEntity {
     @Column(name = "spent_units", nullable = false)
     private Long spentUnits = 0L;
 
+    @Column(name = "earned_units", nullable = false)
+    private Long earnedUnits = 0L;
+
+    @Column(name = "settled_units", nullable = false)
+    private Long settledUnits = 0L;
+
     @Column(name = "cost_per_impression_units", nullable = false)
     private Long costPerImpressionUnits = 1L;
 
@@ -76,6 +82,12 @@ public class SponsoredMessageEntity {
     @Column(name = "active_until")
     private Instant activeUntil;
 
+    @Column(name = "completed_at")
+    private Instant completedAt;
+
+    @Column(name = "canceled_at")
+    private Instant canceledAt;
+
     @PrePersist
     void prePersist() {
         Instant now = Instant.now();
@@ -87,6 +99,12 @@ public class SponsoredMessageEntity {
         }
         if (costPerClickUnits == null) {
             costPerClickUnits = 5L;
+        }
+        if (earnedUnits == null) {
+            earnedUnits = 0L;
+        }
+        if (settledUnits == null) {
+            settledUnits = 0L;
         }
         if (status == null) {
             status = "DRAFT";

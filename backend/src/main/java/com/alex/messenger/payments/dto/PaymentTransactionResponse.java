@@ -9,6 +9,7 @@ public record PaymentTransactionResponse(
         UUID counterpartyUserId,
         UUID invoiceId,
         UUID paymentIntentId,
+        UUID sponsoredMessageId,
         String transactionType,
         String direction,
         long amountUnits,
