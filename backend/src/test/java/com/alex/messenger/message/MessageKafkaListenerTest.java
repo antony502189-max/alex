@@ -13,6 +13,7 @@ import com.alex.messenger.chat.ChatService;
 import com.alex.messenger.chat.forum.ForumTopicService;
 import com.alex.messenger.crypto.ChatEncryptionService;
 import com.alex.messenger.message.dto.ChatMessageResponse;
+import com.alex.messenger.message.dto.MessageLiveLocationPayload;
 import com.alex.messenger.notification.MessagePushNotificationService;
 import com.alex.messenger.poll.PollService;
 import com.alex.messenger.sticker.StickerService;
@@ -373,6 +374,223 @@ class MessageKafkaListenerTest {
         messageKafkaListener.listen(event);
 
         verify(simpMessagingTemplate, never()).convertAndSendToUser(eq(recipientId.toString()), eq("/queue/messages"), any());
+    }
+
+    @Test
+    void listenPublishesActiveLiveLocationPayloadToRecipients() {
+        UUID chatId = UUID.randomUUID();
+        UUID senderId = UUID.randomUUID();
+        UUID recipientId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        Instant expiresAt = Instant.parse("2999-01-01T00:00:00Z");
+        Instant updatedAt = Instant.parse("2026-03-19T16:05:00Z");
+
+        MessageEvent event = new MessageEvent(
+                chatId,
+                messageId,
+                null,
+                senderId,
+                List.of(recipientId),
+                null,
+                null,
+                null,
+                null,
+                null,
+                Instant.parse("2026-03-19T16:00:00Z"),
+                "ciphertext",
+                "nonce",
+                1,
+                null,
+                null,
+                null,
+                null,
+                null,
+                List.of(),
+                "DELIVERED",
+                Instant.parse("2026-03-19T16:00:01Z"),
+                null,
+                null,
+                null,
+                null
+        );
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        when(chatEncryptionService.decrypt(chatId, "ciphertext", "nonce", 1)).thenReturn("decoded");
+        when(messageContentCodec.decode("decoded")).thenReturn(new MessageTextContent(
+                "",
+                List.of(),
+                "LIVE_LOCATION",
+                null,
+                null,
+                new MessageLiveLocationPayload(53.9, 27.56, "Downtown", "Central square", 1800, expiresAt, updatedAt, null, null),
+                null,
+                null,
+                false
+        ));
+        when(messageReactionService.getSummaries(messageId)).thenReturn(List.of());
+        when(attachmentService.getResponses(List.of())).thenReturn(List.of());
+        when(attachmentService.getResponses(recipientId, List.of())).thenReturn(List.of());
+        when(chatService.getOwnedChat(senderId, chatId))
+                .thenThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "Chat access denied"));
+        when(chatService.getOwnedChat(recipientId, chatId)).thenReturn(chat);
+        when(chatService.resolveMessageAuthor(recipientId, chatId, senderId))
+                .thenReturn(new ChatService.MessageAuthorView(senderId, "Author", null, null, false));
+
+        messageKafkaListener.listen(event);
+
+        ArgumentCaptor<ChatMessageResponse> responseCaptor = ArgumentCaptor.forClass(ChatMessageResponse.class);
+        verify(simpMessagingTemplate).convertAndSendToUser(eq(recipientId.toString()), eq("/queue/messages"), responseCaptor.capture());
+        ChatMessageResponse response = responseCaptor.getValue();
+        assertThat(response.messageType()).isEqualTo("LIVE_LOCATION");
+        assertThat(response.location()).isNull();
+        assertThat(response.liveLocation()).isNotNull();
+        assertThat(response.liveLocation().title()).isEqualTo("Downtown");
+        assertThat(response.liveLocation().address()).isEqualTo("Central square");
+        assertThat(response.liveLocation().lastUpdatedAt()).isEqualTo(updatedAt);
+        assertThat(response.liveLocation().active()).isTrue();
+    }
+
+    @Test
+    void listenPublishesExpiredLiveLocationPayloadAsInactive() {
+        UUID chatId = UUID.randomUUID();
+        UUID senderId = UUID.randomUUID();
+        UUID recipientId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        Instant expiresAt = Instant.parse("2020-01-01T00:00:00Z");
+
+        MessageEvent event = new MessageEvent(
+                chatId,
+                messageId,
+                null,
+                senderId,
+                List.of(recipientId),
+                null,
+                null,
+                null,
+                null,
+                null,
+                Instant.parse("2026-03-19T16:10:00Z"),
+                "ciphertext",
+                "nonce",
+                1,
+                null,
+                null,
+                null,
+                null,
+                null,
+                List.of(),
+                "DELIVERED",
+                Instant.parse("2026-03-19T16:10:01Z"),
+                null,
+                null,
+                null,
+                null
+        );
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        when(chatEncryptionService.decrypt(chatId, "ciphertext", "nonce", 1)).thenReturn("decoded");
+        when(messageContentCodec.decode("decoded")).thenReturn(new MessageTextContent(
+                "",
+                List.of(),
+                "LIVE_LOCATION",
+                null,
+                null,
+                new MessageLiveLocationPayload(53.9, 27.56, "Downtown", "Central square", 1800, expiresAt, null, null, null),
+                null,
+                null,
+                false
+        ));
+        when(messageReactionService.getSummaries(messageId)).thenReturn(List.of());
+        when(attachmentService.getResponses(List.of())).thenReturn(List.of());
+        when(attachmentService.getResponses(recipientId, List.of())).thenReturn(List.of());
+        when(chatService.getOwnedChat(senderId, chatId))
+                .thenThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "Chat access denied"));
+        when(chatService.getOwnedChat(recipientId, chatId)).thenReturn(chat);
+        when(chatService.resolveMessageAuthor(recipientId, chatId, senderId))
+                .thenReturn(new ChatService.MessageAuthorView(senderId, "Author", null, null, false));
+
+        messageKafkaListener.listen(event);
+
+        ArgumentCaptor<ChatMessageResponse> responseCaptor = ArgumentCaptor.forClass(ChatMessageResponse.class);
+        verify(simpMessagingTemplate).convertAndSendToUser(eq(recipientId.toString()), eq("/queue/messages"), responseCaptor.capture());
+        assertThat(responseCaptor.getValue().liveLocation()).isNotNull();
+        assertThat(responseCaptor.getValue().liveLocation().active()).isFalse();
+        assertThat(responseCaptor.getValue().liveLocation().stoppedAt()).isNull();
+    }
+
+    @Test
+    void listenPublishesStoppedLiveLocationPayloadAsInactive() {
+        UUID chatId = UUID.randomUUID();
+        UUID senderId = UUID.randomUUID();
+        UUID recipientId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        Instant expiresAt = Instant.parse("2999-01-01T00:00:00Z");
+        Instant stoppedAt = Instant.parse("2026-03-19T16:20:00Z");
+
+        MessageEvent event = new MessageEvent(
+                chatId,
+                messageId,
+                null,
+                senderId,
+                List.of(recipientId),
+                null,
+                null,
+                null,
+                null,
+                null,
+                Instant.parse("2026-03-19T16:15:00Z"),
+                "ciphertext",
+                "nonce",
+                1,
+                null,
+                null,
+                null,
+                null,
+                null,
+                List.of(),
+                "DELIVERED",
+                Instant.parse("2026-03-19T16:15:01Z"),
+                null,
+                null,
+                null,
+                null
+        );
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        when(chatEncryptionService.decrypt(chatId, "ciphertext", "nonce", 1)).thenReturn("decoded");
+        when(messageContentCodec.decode("decoded")).thenReturn(new MessageTextContent(
+                "",
+                List.of(),
+                "LIVE_LOCATION",
+                null,
+                null,
+                new MessageLiveLocationPayload(53.9, 27.56, "Downtown", "Central square", 1800, expiresAt, null, stoppedAt, null),
+                null,
+                null,
+                false
+        ));
+        when(messageReactionService.getSummaries(messageId)).thenReturn(List.of());
+        when(attachmentService.getResponses(List.of())).thenReturn(List.of());
+        when(attachmentService.getResponses(recipientId, List.of())).thenReturn(List.of());
+        when(chatService.getOwnedChat(senderId, chatId))
+                .thenThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "Chat access denied"));
+        when(chatService.getOwnedChat(recipientId, chatId)).thenReturn(chat);
+        when(chatService.resolveMessageAuthor(recipientId, chatId, senderId))
+                .thenReturn(new ChatService.MessageAuthorView(senderId, "Author", null, null, false));
+
+        messageKafkaListener.listen(event);
+
+        ArgumentCaptor<ChatMessageResponse> responseCaptor = ArgumentCaptor.forClass(ChatMessageResponse.class);
+        verify(simpMessagingTemplate).convertAndSendToUser(eq(recipientId.toString()), eq("/queue/messages"), responseCaptor.capture());
+        assertThat(responseCaptor.getValue().liveLocation()).isNotNull();
+        assertThat(responseCaptor.getValue().liveLocation().active()).isFalse();
+        assertThat(responseCaptor.getValue().liveLocation().stoppedAt()).isEqualTo(stoppedAt);
     }
 
     private MessageLookupEntity messageLookup(UUID messageId, UUID chatId, UUID topicId) {

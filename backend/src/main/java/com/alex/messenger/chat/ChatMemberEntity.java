@@ -51,6 +51,12 @@ public class ChatMemberEntity {
     @Column(name = "muted_until")
     private Instant mutedUntil;
 
+    @Column(name = "list_pinned", nullable = false)
+    private Boolean listPinned;
+
+    @Column(name = "list_pin_order")
+    private Integer listPinOrder;
+
     @Column(name = "can_send_messages", nullable = false)
     private Boolean canSendMessages;
 
@@ -103,6 +109,9 @@ public class ChatMemberEntity {
         }
         if (archived == null) {
             archived = false;
+        }
+        if (listPinned == null) {
+            listPinned = false;
         }
         if (canSendMessages == null) {
             canSendMessages = true;

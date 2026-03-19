@@ -1,6 +1,7 @@
 package com.alex.messenger.user;
 
 import com.alex.messenger.shared.CurrentUser;
+import com.alex.messenger.shared.SearchQueryValidationSupport;
 import com.alex.messenger.user.dto.AddContactRequest;
 import com.alex.messenger.user.dto.BlockUserRequest;
 import com.alex.messenger.user.dto.BlockedUserResponse;
@@ -32,6 +33,7 @@ import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -44,6 +46,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/users")
@@ -57,6 +60,7 @@ public class UserController {
 
     @GetMapping("/search")
     public ResponseEntity<List<UserSearchResponse>> search(@RequestParam String query) {
+        SearchQueryValidationSupport.normalize(query);
         return ResponseEntity.ok(userService.search(CurrentUser.id(), query));
     }
 
@@ -72,7 +76,7 @@ public class UserController {
 
     @GetMapping("/presence")
     public ResponseEntity<List<UserPresenceResponse>> presence(@RequestParam List<UUID> userId) {
-        return ResponseEntity.ok(userPresenceService.listPresence(CurrentUser.id(), userId));
+        return ResponseEntity.ok(userPresenceService.listPresence(CurrentUser.id(), requirePresenceUserIds(userId)));
     }
 
     @PatchMapping("/me")
@@ -82,7 +86,7 @@ public class UserController {
 
     @PatchMapping("/me/profile-tab")
     public ResponseEntity<UserProfilePreferencesResponse> updateProfileTab(
-            @RequestBody(required = false) UpdateProfileTabRequest request
+            @Valid @RequestBody(required = false) UpdateProfileTabRequest request
     ) {
         return ResponseEntity.ok(userProfileMetadataService.updateProfileTab(CurrentUser.id(), request));
     }
@@ -99,7 +103,7 @@ public class UserController {
 
     @PutMapping("/me/profile-audio")
     public ResponseEntity<UserProfileAudioResponse> upsertProfileAudio(
-            @RequestBody(required = false) UpsertProfileAudioRequest request
+            @Valid @RequestBody(required = false) UpsertProfileAudioRequest request
     ) {
         return ResponseEntity.ok(userProfileMetadataService.upsertProfileAudio(CurrentUser.id(), request));
     }
@@ -111,7 +115,7 @@ public class UserController {
 
     @PatchMapping("/me/privacy/exceptions")
     public ResponseEntity<UserPrivacyExceptionsResponse> updatePrivacyExceptions(
-            @RequestBody(required = false) UpdatePrivacyExceptionsRequest request
+            @Valid @RequestBody(required = false) UpdatePrivacyExceptionsRequest request
     ) {
         return ResponseEntity.ok(userPrivacyService.updatePrivacyExceptions(CurrentUser.id(), request));
     }
@@ -147,7 +151,7 @@ public class UserController {
     public ResponseEntity<List<UpcomingBirthdayResponse>> upcomingBirthdays(
             @RequestParam(required = false) Integer days
     ) {
-        return ResponseEntity.ok(userService.listUpcomingBirthdays(CurrentUser.id(), days));
+        return ResponseEntity.ok(userService.listUpcomingBirthdays(CurrentUser.id(), requireDays(days)));
     }
 
     @GetMapping("/me/close-friends")
@@ -157,7 +161,7 @@ public class UserController {
 
     @PutMapping("/me/close-friends")
     public ResponseEntity<List<CloseFriendResponse>> replaceCloseFriends(
-            @RequestBody(required = false) ReplaceCloseFriendsRequest request
+            @Valid @RequestBody(required = false) ReplaceCloseFriendsRequest request
     ) {
         return ResponseEntity.ok(userPrivacyService.replaceCloseFriends(CurrentUser.id(), request));
     }
@@ -208,5 +212,19 @@ public class UserController {
     @DeleteMapping("/contacts/{contactUserId}")
     public ResponseEntity<List<ContactResponse>> removeContact(@PathVariable UUID contactUserId) {
         return ResponseEntity.ok(userService.removeContact(CurrentUser.id(), contactUserId));
+    }
+
+    private Integer requireDays(Integer days) {
+        if (days != null && (days < 1 || days > 365)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "days must be between 1 and 365");
+        }
+        return days;
+    }
+
+    private List<UUID> requirePresenceUserIds(List<UUID> userIds) {
+        if (userIds != null && userIds.size() > 100) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "presence lookup supports up to 100 users");
+        }
+        return userIds;
     }
 }

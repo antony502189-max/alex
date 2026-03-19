@@ -7,6 +7,6 @@ import java.util.UUID;
 
 public record VerifyPhoneChangeRequest(
         @NotNull UUID challengeId,
-        @NotBlank @Size(max = 8) String code
+        @NotBlank @Size(min = 4, max = 8) String code
 ) {
 }

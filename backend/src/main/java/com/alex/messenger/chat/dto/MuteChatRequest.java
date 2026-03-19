@@ -1,8 +1,9 @@
 package com.alex.messenger.chat.dto;
 
+import jakarta.validation.constraints.Future;
 import java.time.Instant;
 
 public record MuteChatRequest(
-        Instant mutedUntil
+        @Future Instant mutedUntil
 ) {
 }

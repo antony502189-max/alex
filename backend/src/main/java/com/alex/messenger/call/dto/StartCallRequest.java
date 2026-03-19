@@ -6,8 +6,8 @@ import java.util.UUID;
 
 public record StartCallRequest(
         @NotNull UUID chatId,
-        @Pattern(regexp = "VOICE|VIDEO") String kind,
-        @Pattern(regexp = "DIRECT|PRIVATE|GROUP|VOICE_CHAT|LIVE_STREAM") String mode,
+        @Pattern(regexp = "(?i)^\\s*(VOICE|VIDEO)\\s*$") String kind,
+        @Pattern(regexp = "(?i)^\\s*(DIRECT|PRIVATE|GROUP|VOICE_CHAT|LIVE_STREAM)\\s*$") String mode,
         Boolean recordingEnabled
 ) {
 }

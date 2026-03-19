@@ -121,6 +121,66 @@ class StompOutboundAuthorizationInterceptorTest {
     }
 
     @Test
+    void outboundStoryEventsQueueAllowsActiveSession() {
+        UUID userId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+
+        when(userSessionService.isActive(sessionId, userId)).thenReturn(true);
+
+        Message<?> result = interceptor.preSend(
+                outboundMessage(userId, sessionId, "/user/queue/story-events", new byte[0]),
+                null
+        );
+
+        assertThat(result).isNotNull();
+    }
+
+    @Test
+    void outboundCallsQueueRejectsRevokedSession() {
+        UUID userId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+
+        when(userSessionService.isActive(sessionId, userId)).thenReturn(false);
+
+        Message<?> result = interceptor.preSend(
+                outboundMessage(userId, sessionId, "/user/queue/calls", new byte[0]),
+                null
+        );
+
+        assertThat(result).isNull();
+    }
+
+    @Test
+    void outboundSecretChatsQueueAllowsActiveSession() {
+        UUID userId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+
+        when(userSessionService.isActive(sessionId, userId)).thenReturn(true);
+
+        Message<?> result = interceptor.preSend(
+                outboundMessage(userId, sessionId, "/user/queue/secret-chats", new byte[0]),
+                null
+        );
+
+        assertThat(result).isNotNull();
+    }
+
+    @Test
+    void outboundUnknownUserQueueIsRejected() {
+        UUID userId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+
+        when(userSessionService.isActive(sessionId, userId)).thenReturn(true);
+
+        Message<?> result = interceptor.preSend(
+                outboundMessage(userId, sessionId, "/user/queue/internal-audit", new byte[0]),
+                null
+        );
+
+        assertThat(result).isNull();
+    }
+
+    @Test
     void outboundOtherDestinationPassesThrough() {
         UUID userId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();

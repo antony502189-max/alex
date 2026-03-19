@@ -1,8 +1,10 @@
 package com.alex.messenger.search;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.alex.messenger.chat.ChatEntity;
@@ -26,6 +28,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class PublicPostSearchServiceTest {
@@ -178,6 +182,31 @@ class PublicPostSearchServiceTest {
         assertThat(response.posts().get(0).chatId()).isEqualTo(chatId);
         assertThat(response.posts().get(0).channelPublicUsername()).isEqualTo("channelnews");
         assertThat(response.posts().get(0).excerpt()).isEqualTo("Breaking news");
+    }
+
+    @Test
+    void searchPublicPostsRejectsTooLongQuery() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> publicPostSearchService.searchPublicPosts(UUID.randomUUID(), "a".repeat(256), 20),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verifyNoInteractions(publicPostSearchIndexRepository, chatRepository);
+    }
+
+    @Test
+    void searchPublicPostsRejectsInvalidLimit() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> publicPostSearchService.searchPublicPosts(UUID.randomUUID(), "breaking", 0),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 50");
+        verifyNoInteractions(publicPostSearchIndexRepository, chatRepository);
     }
 
     private ChatEntity publicChannel(UUID chatId, String publicUsername) {

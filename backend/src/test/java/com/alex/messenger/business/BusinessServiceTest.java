@@ -1,6 +1,7 @@
 package com.alex.messenger.business;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
@@ -28,6 +29,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class BusinessServiceTest {
@@ -101,6 +104,41 @@ class BusinessServiceTest {
     }
 
     @Test
+    void updateProfileRejectsMissingRequest() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> businessService.updateProfile(UUID.randomUUID(), null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Business profile payload is required");
+    }
+
+    @Test
+    void updateProfileRejectsNullBusinessHourSlot() {
+        UUID userId = UUID.randomUUID();
+        UserEntity user = user(userId, "Business");
+        BusinessProfileEntity profile = new BusinessProfileEntity();
+        profile.setUserId(userId);
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(user));
+        when(businessProfileRepository.findById(userId)).thenReturn(Optional.of(profile));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> businessService.updateProfile(
+                        userId,
+                        new UpdateBusinessProfileRequest(false, null, false, null, java.util.Arrays.asList((BusinessHourSlotPayload) null), null)
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Business hours must not contain null");
+    }
+
+    @Test
     void sendQuickReplyUsesMessageService() {
         UUID userId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();
@@ -144,6 +182,39 @@ class BusinessServiceTest {
         assertThat(response).hasSize(1);
         assertThat(response.get(0).tagName()).isEqualTo("Lead");
         assertThat(response.get(0).color()).isEqualTo("#ff0000");
+    }
+
+    @Test
+    void replaceChatTagsRejectsMissingRequest() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> businessService.replaceChatTags(UUID.randomUUID(), UUID.randomUUID(), null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Business chat tags payload is required");
+    }
+
+    @Test
+    void replaceChatTagsRejectsNullTagEntry() {
+        UUID userId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        when(chatService.getOwnedChat(userId, chatId)).thenReturn(chat(chatId));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> businessService.replaceChatTags(
+                        userId,
+                        chatId,
+                        new ReplaceBusinessChatTagsRequest(java.util.Arrays.asList((BusinessChatTagPayload) null))
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Business chat tags must not contain null");
     }
 
     @Test

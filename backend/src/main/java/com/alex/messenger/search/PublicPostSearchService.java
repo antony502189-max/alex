@@ -11,6 +11,7 @@ import com.alex.messenger.message.MessageContentCodec;
 import com.alex.messenger.crypto.ChatEncryptionService;
 import com.alex.messenger.search.dto.PublicPostSearchResponse;
 import com.alex.messenger.search.dto.PublicPostSearchResult;
+import com.alex.messenger.shared.SearchQueryValidationSupport;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
@@ -21,8 +22,10 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 @Service
 @RequiredArgsConstructor
@@ -37,12 +40,12 @@ public class PublicPostSearchService {
 
     @Transactional(readOnly = true)
     public PublicPostSearchResponse searchPublicPosts(UUID requesterId, String query, int limit) {
-        String normalizedQuery = query.trim().toLowerCase(Locale.ROOT);
+        String normalizedQuery = SearchQueryValidationSupport.normalize(query).toLowerCase(Locale.ROOT);
         if (normalizedQuery.isBlank()) {
             return new PublicPostSearchResponse(query, List.of());
         }
 
-        int normalizedLimit = Math.min(Math.max(limit, 1), 50);
+        int normalizedLimit = requireLimit(limit, 50);
         List<PublicPostSearchIndexEntity> matches = publicPostSearchIndexRepository.search(
                 normalizedQuery,
                 PageRequest.of(0, normalizedLimit)
@@ -239,5 +242,12 @@ public class PublicPostSearchService {
             return value;
         }
         return value.substring(0, maxLength);
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be between 1 and " + max);
+        }
+        return limit;
     }
 }

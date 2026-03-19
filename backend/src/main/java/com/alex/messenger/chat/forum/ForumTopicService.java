@@ -55,6 +55,12 @@ public class ForumTopicService {
         ensureForumEnabled(chat);
         ForumTopicEntity topic = getTopic(chatId, topicId);
         ensureCanManageTopic(requesterId, topic);
+        if ((request.title() == null || request.title().isBlank())
+                && request.iconEmoji() == null
+                && request.closed() == null
+                && request.hidden() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Provide title, iconEmoji, closed or hidden");
+        }
         if (Boolean.TRUE.equals(topic.getGeneralTopic()) && Boolean.TRUE.equals(request.hidden())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "General topic cannot be hidden");
         }

@@ -1,5 +1,6 @@
 package com.alex.messenger.call;
 
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
@@ -35,6 +36,12 @@ public interface CallSessionRepository extends JpaRepository<CallSessionEntity, 
         """)
     List<CallSessionEntity> findRecentByParticipant(
             @Param("userId") UUID userId,
+            Pageable pageable
+    );
+
+    List<CallSessionEntity> findAllByStatusAndStartedAtBeforeOrderByStartedAtAsc(
+            String status,
+            Instant startedAt,
             Pageable pageable
     );
 }

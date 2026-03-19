@@ -7,6 +7,11 @@ import com.alex.messenger.attachment.dto.TrimAttachmentRequest;
 import com.alex.messenger.attachment.dto.UploadAttachmentChunkRequest;
 import com.alex.messenger.message.dto.MessageAttachmentResponse;
 import com.alex.messenger.shared.CurrentUser;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
 import java.net.URI;
 import java.util.List;
 import java.util.UUID;
@@ -24,10 +29,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.validation.annotation.Validated;
 
 @RestController
 @RequestMapping("/api/attachments")
 @RequiredArgsConstructor
+@Validated
 public class AttachmentController {
 
     private final AttachmentService attachmentService;
@@ -36,14 +43,17 @@ public class AttachmentController {
     @PostMapping("/upload")
     public ResponseEntity<MessageAttachmentResponse> upload(
             @RequestParam UUID chatId,
-            @RequestParam(required = false) String kind,
-            @RequestParam(required = false) Long durationMs,
-            @RequestParam(required = false) Integer width,
-            @RequestParam(required = false) Integer height,
+            @RequestParam(required = false)
+            @Size(max = 16)
+            @Pattern(regexp = "(^\\s*$)|(?i)^\\s*(FILE|VOICE|IMAGE|VIDEO|AUDIO|GIF|VIDEO_NOTE)\\s*$")
+            String kind,
+            @RequestParam(required = false) @Positive Long durationMs,
+            @RequestParam(required = false) @Positive Integer width,
+            @RequestParam(required = false) @Positive Integer height,
             @RequestParam(required = false) Boolean hdPhoto,
-            @RequestParam(required = false) String waveform,
+            @RequestParam(required = false) @Size(max = 383) String waveform,
             @RequestParam(required = false) UUID albumId,
-            @RequestParam(required = false) Integer albumItemIndex,
+            @RequestParam(required = false) @PositiveOrZero Integer albumItemIndex,
             @RequestParam("file") MultipartFile file
     ) {
         return ResponseEntity.ok(
@@ -65,7 +75,7 @@ public class AttachmentController {
 
     @PostMapping("/upload-sessions")
     public ResponseEntity<AttachmentUploadSessionResponse> createUploadSession(
-            @org.springframework.web.bind.annotation.RequestBody CreateAttachmentUploadSessionRequest request
+            @Valid @org.springframework.web.bind.annotation.RequestBody CreateAttachmentUploadSessionRequest request
     ) {
         return ResponseEntity.ok(attachmentUploadSessionService.createSession(CurrentUser.id(), request));
     }
@@ -78,7 +88,7 @@ public class AttachmentController {
     @PostMapping("/upload-sessions/{sessionId}/chunks")
     public ResponseEntity<AttachmentUploadSessionResponse> uploadChunk(
             @PathVariable UUID sessionId,
-            @org.springframework.web.bind.annotation.RequestBody UploadAttachmentChunkRequest request
+            @Valid @org.springframework.web.bind.annotation.RequestBody UploadAttachmentChunkRequest request
     ) {
         return ResponseEntity.ok(attachmentUploadSessionService.uploadChunk(CurrentUser.id(), sessionId, request));
     }
@@ -107,7 +117,7 @@ public class AttachmentController {
     @PostMapping("/{attachmentId}/moderation")
     public ResponseEntity<MessageAttachmentResponse> moderate(
             @PathVariable UUID attachmentId,
-            @org.springframework.web.bind.annotation.RequestBody ModerateAttachmentRequest request
+            @Valid @org.springframework.web.bind.annotation.RequestBody ModerateAttachmentRequest request
     ) {
         return ResponseEntity.ok(attachmentService.reviewModeration(CurrentUser.id(), attachmentId, request));
     }
@@ -115,7 +125,7 @@ public class AttachmentController {
     @PostMapping("/{attachmentId}/trim")
     public ResponseEntity<MessageAttachmentResponse> trim(
             @PathVariable UUID attachmentId,
-            @org.springframework.web.bind.annotation.RequestBody(required = false) TrimAttachmentRequest request
+            @Valid @org.springframework.web.bind.annotation.RequestBody(required = false) TrimAttachmentRequest request
     ) {
         return ResponseEntity.ok(attachmentService.trim(CurrentUser.id(), attachmentId, request));
     }

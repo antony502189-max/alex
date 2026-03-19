@@ -22,10 +22,15 @@ import com.alex.messenger.story.dto.StoryResponse;
 import com.alex.messenger.story.dto.StorySurfaceResponse;
 import com.alex.messenger.story.dto.StoryViewerResponse;
 import com.alex.messenger.story.dto.UpdateStoryHighlightStoriesRequest;
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.ConstraintViolationException;
 import jakarta.validation.Valid;
+import jakarta.validation.Validator;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -38,6 +43,7 @@ import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/stories")
@@ -46,6 +52,7 @@ public class StoryController {
 
     private final FeatureFlagService featureFlagService;
     private final StoryService storyService;
+    private final Validator validator;
 
     @GetMapping("/feed")
     public ResponseEntity<List<StoryFeedItemResponse>> feed() {
@@ -89,7 +96,6 @@ public class StoryController {
             @RequestParam(required = false) Long durationMs,
             @RequestPart("file") MultipartFile file
     ) {
-        featureFlagService.requireStoriesEnabled();
         CreateStoryRequest request = new CreateStoryRequest(
                 text,
                 backgroundFrom,
@@ -99,6 +105,9 @@ public class StoryController {
                 allowedViewerUserIds,
                 ownerChatId
         );
+        validateRequest(request);
+        validateMediaDuration(file, durationMs);
+        featureFlagService.requireStoriesEnabled();
         return ResponseEntity.ok(storyService.createWithMedia(CurrentUser.id(), request, durationMs, file));
     }
 
@@ -179,7 +188,6 @@ public class StoryController {
     @GetMapping("/highlights")
     public ResponseEntity<List<StoryHighlightResponse>> highlights(@RequestParam(required = false) UUID ownerUserId) {
         featureFlagService.requireStoriesEnabled();
-        featureFlagService.requireStoryInteractionsEnabled();
         return ResponseEntity.ok(storyService.listHighlights(CurrentUser.id(), ownerUserId));
     }
 
@@ -188,7 +196,6 @@ public class StoryController {
             @Valid @RequestBody CreateStoryHighlightRequest request
     ) {
         featureFlagService.requireStoriesEnabled();
-        featureFlagService.requireStoryInteractionsEnabled();
         return ResponseEntity.ok(storyService.createHighlight(CurrentUser.id(), request));
     }
 
@@ -210,10 +217,9 @@ public class StoryController {
     @PostMapping("/highlights/{highlightId}/stories")
     public ResponseEntity<StoryHighlightResponse> addStoriesToHighlight(
             @PathVariable UUID highlightId,
-            @RequestBody UpdateStoryHighlightStoriesRequest request
+            @Valid @RequestBody UpdateStoryHighlightStoriesRequest request
     ) {
         featureFlagService.requireStoriesEnabled();
-        featureFlagService.requireStoryInteractionsEnabled();
         return ResponseEntity.ok(storyService.addStoriesToHighlight(CurrentUser.id(), highlightId, request));
     }
 
@@ -223,7 +229,6 @@ public class StoryController {
             @PathVariable UUID storyId
     ) {
         featureFlagService.requireStoriesEnabled();
-        featureFlagService.requireStoryInteractionsEnabled();
         return ResponseEntity.ok(storyService.removeStoryFromHighlight(CurrentUser.id(), highlightId, storyId));
     }
 
@@ -268,5 +273,22 @@ public class StoryController {
         featureFlagService.requireStoriesEnabled();
         storyService.delete(CurrentUser.id(), storyId);
         return ResponseEntity.noContent().build();
+    }
+
+    private void validateRequest(CreateStoryRequest request) {
+        Set<ConstraintViolation<CreateStoryRequest>> violations = validator.validate(request);
+        if (!violations.isEmpty()) {
+            throw new ConstraintViolationException(violations);
+        }
+    }
+
+    private void validateMediaDuration(MultipartFile file, Long durationMs) {
+        String contentType = file != null ? file.getContentType() : null;
+        if (contentType == null || !contentType.startsWith("video/")) {
+            return;
+        }
+        if (durationMs == null || durationMs <= 0 || durationMs > 10 * 60 * 1000L) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Story video duration is invalid");
+        }
     }
 }

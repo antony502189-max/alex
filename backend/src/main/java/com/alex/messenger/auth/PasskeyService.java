@@ -88,7 +88,7 @@ public class PasskeyService {
         entity.setPublicKey(normalizeRequired(request.publicKey(), "Public key", 8192));
         entity.setTransports(normalizeNullable(request.transports(), 255));
         entity.setLabel(normalizeNullable(request.label(), 120));
-        entity.setSignCount(request.signCount() != null ? Math.max(0L, request.signCount()) : 0L);
+        entity.setSignCount(resolveRegistrationSignCount(request.signCount()));
         PasskeyCredentialEntity saved = passkeyCredentialRepository.save(entity);
         challenge.setConsumedAt(Instant.now());
         passkeyChallengeRepository.save(challenge);
@@ -154,7 +154,7 @@ public class PasskeyService {
 
         Instant now = Instant.now();
         credential.setLastUsedAt(now);
-        credential.setSignCount(request.signCount() != null ? Math.max(credential.getSignCount(), request.signCount()) : credential.getSignCount() + 1);
+        credential.setSignCount(resolveLoginSignCount(credential.getSignCount(), request.signCount()));
         passkeyCredentialRepository.save(credential);
 
         challenge.setConsumedAt(now);
@@ -286,5 +286,26 @@ public class PasskeyService {
             return null;
         }
         return normalized.length() > maxLength ? normalized.substring(0, maxLength) : normalized;
+    }
+
+    private long resolveRegistrationSignCount(Long signCount) {
+        if (signCount == null) {
+            return 0L;
+        }
+        if (signCount < 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Sign count must be non-negative");
+        }
+        return signCount;
+    }
+
+    private long resolveLoginSignCount(Long existingSignCount, Long signCount) {
+        long baseline = existingSignCount != null ? existingSignCount : 0L;
+        if (signCount == null) {
+            return baseline + 1;
+        }
+        if (signCount < 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Sign count must be non-negative");
+        }
+        return Math.max(baseline, signCount);
     }
 }

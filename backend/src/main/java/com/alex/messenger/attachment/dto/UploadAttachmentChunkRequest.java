@@ -1,7 +1,10 @@
 package com.alex.messenger.attachment.dto;
 
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.PositiveOrZero;
+
 public record UploadAttachmentChunkRequest(
-        long offset,
-        String base64Chunk
+        @PositiveOrZero long offset,
+        @NotBlank String base64Chunk
 ) {
 }

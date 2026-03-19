@@ -2,6 +2,7 @@ package com.alex.messenger.message;
 
 import com.alex.messenger.message.dto.MessageTextEntityPayload;
 import com.alex.messenger.message.dto.MessageContactCardPayload;
+import com.alex.messenger.message.dto.MessageLiveLocationPayload;
 import com.alex.messenger.message.dto.MessageLocationPayload;
 import com.alex.messenger.message.dto.MessageServicePayload;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -18,7 +19,7 @@ import org.springframework.web.server.ResponseStatusException;
 @Component
 public class MessageContentCodec {
 
-    private static final int PAYLOAD_VERSION = 3;
+    private static final int PAYLOAD_VERSION = 4;
     private static final Set<String> SUPPORTED_TYPES = Set.of(
             "BOLD",
             "ITALIC",
@@ -41,6 +42,7 @@ public class MessageContentCodec {
     private static final Set<String> SUPPORTED_MESSAGE_TYPES = Set.of(
             "TEXT",
             "LOCATION",
+            "LIVE_LOCATION",
             "CONTACT_CARD",
             "SERVICE_MESSAGE"
     );
@@ -56,7 +58,7 @@ public class MessageContentCodec {
     }
 
     public MessageTextContent normalize(String text, List<MessageTextEntityPayload> entities) {
-        return normalize(text, entities, null, null, null, null, null, false);
+        return normalize(text, entities, null, null, null, null, null, null, false);
     }
 
     public MessageTextContent normalize(
@@ -69,10 +71,25 @@ public class MessageContentCodec {
             MessageServicePayload serviceMessage,
             Boolean silent
     ) {
+        return normalize(text, entities, messageType, caption, location, null, contactCard, serviceMessage, silent);
+    }
+
+    public MessageTextContent normalize(
+            String text,
+            List<MessageTextEntityPayload> entities,
+            String messageType,
+            String caption,
+            MessageLocationPayload location,
+            MessageLiveLocationPayload liveLocation,
+            MessageContactCardPayload contactCard,
+            MessageServicePayload serviceMessage,
+            Boolean silent
+    ) {
         String normalizedText = text != null ? text : "";
         List<MessageTextEntityPayload> normalizedEntities = normalizeEntities(normalizedText, entities);
         String normalizedMessageType = normalizeMessageType(messageType);
         MessageLocationPayload normalizedLocation = normalizeLocation(location);
+        MessageLiveLocationPayload normalizedLiveLocation = normalizeLiveLocation(liveLocation);
         MessageContactCardPayload normalizedContactCard = normalizeContactCard(contactCard);
         MessageServicePayload normalizedServiceMessage = normalizeServiceMessage(serviceMessage);
         String normalizedCaption = trimToNull(caption);
@@ -84,6 +101,9 @@ public class MessageContentCodec {
         if ("CONTACT_CARD".equals(normalizedMessageType) && normalizedContactCard == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Contact card payload is required");
         }
+        if ("LIVE_LOCATION".equals(normalizedMessageType) && normalizedLiveLocation == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Live location payload is required");
+        }
         if ("SERVICE_MESSAGE".equals(normalizedMessageType) && normalizedServiceMessage == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Service message payload is required");
         }
@@ -94,6 +114,7 @@ public class MessageContentCodec {
                 normalizedMessageType,
                 normalizedCaption,
                 normalizedLocation,
+                normalizedLiveLocation,
                 normalizedContactCard,
                 normalizedServiceMessage,
                 normalizedSilent
@@ -107,6 +128,7 @@ public class MessageContentCodec {
                 content.messageType(),
                 content.caption(),
                 content.location(),
+                content.liveLocation(),
                 content.contactCard(),
                 content.serviceMessage(),
                 content.silent()
@@ -120,6 +142,7 @@ public class MessageContentCodec {
                             normalized.messageType(),
                             normalized.caption(),
                             normalized.location(),
+                            normalized.liveLocation(),
                             normalized.contactCard(),
                             normalized.serviceMessage(),
                             normalized.silent()
@@ -146,7 +169,7 @@ public class MessageContentCodec {
             }
 
             int version = root.path("version").asInt(-1);
-            if (version != 1 && version != 2 && version != PAYLOAD_VERSION) {
+            if (version != 1 && version != 2 && version != 3 && version != PAYLOAD_VERSION) {
                 return new MessageTextContent(rawPayload, List.of());
             }
 
@@ -183,6 +206,9 @@ public class MessageContentCodec {
             MessageLocationPayload location = root.path("location").isObject()
                     ? objectMapper.treeToValue(root.path("location"), MessageLocationPayload.class)
                     : null;
+            MessageLiveLocationPayload liveLocation = root.path("liveLocation").isObject()
+                    ? objectMapper.treeToValue(root.path("liveLocation"), MessageLiveLocationPayload.class)
+                    : null;
             MessageContactCardPayload contactCard = root.path("contactCard").isObject()
                     ? objectMapper.treeToValue(root.path("contactCard"), MessageContactCardPayload.class)
                     : null;
@@ -190,7 +216,7 @@ public class MessageContentCodec {
                     ? objectMapper.treeToValue(root.path("serviceMessage"), MessageServicePayload.class)
                     : null;
             boolean silent = root.path("silent").asBoolean(false);
-            return normalize(text, entities, messageType, caption, location, contactCard, serviceMessage, silent);
+            return normalize(text, entities, messageType, caption, location, liveLocation, contactCard, serviceMessage, silent);
         } catch (Exception ignored) {
             return new MessageTextContent(rawPayload, List.of());
         }
@@ -213,6 +239,14 @@ public class MessageContentCodec {
             }
             if (content.location().address() != null && !content.location().address().isBlank()) {
                 parts.add(content.location().address());
+            }
+        }
+        if (content.liveLocation() != null) {
+            if (content.liveLocation().title() != null && !content.liveLocation().title().isBlank()) {
+                parts.add(content.liveLocation().title());
+            }
+            if (content.liveLocation().address() != null && !content.liveLocation().address().isBlank()) {
+                parts.add(content.liveLocation().address());
             }
         }
         if (content.contactCard() != null) {
@@ -311,6 +345,31 @@ public class MessageContentCodec {
         );
     }
 
+    private MessageLiveLocationPayload normalizeLiveLocation(MessageLiveLocationPayload liveLocation) {
+        if (liveLocation == null) {
+            return null;
+        }
+        Double latitude = liveLocation.latitude();
+        Double longitude = liveLocation.longitude();
+        if (latitude == null || longitude == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Live location coordinates are required");
+        }
+        if (latitude < -90.0 || latitude > 90.0 || longitude < -180.0 || longitude > 180.0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Live location coordinates are invalid");
+        }
+        return new MessageLiveLocationPayload(
+                latitude,
+                longitude,
+                trimToNull(liveLocation.title()),
+                trimToNull(liveLocation.address()),
+                liveLocation.livePeriodSeconds(),
+                liveLocation.expiresAt(),
+                liveLocation.lastUpdatedAt(),
+                liveLocation.stoppedAt(),
+                liveLocation.active()
+        );
+    }
+
     private MessageContactCardPayload normalizeContactCard(MessageContactCardPayload contactCard) {
         if (contactCard == null) {
             return null;
@@ -355,6 +414,7 @@ public class MessageContentCodec {
             String messageType,
             String caption,
             MessageLocationPayload location,
+            MessageLiveLocationPayload liveLocation,
             MessageContactCardPayload contactCard,
             MessageServicePayload serviceMessage,
             boolean silent

@@ -179,6 +179,71 @@ class ChannelDirectMessageServiceTest {
     }
 
     @Test
+    void openDirectMessageAllowsModeratorToChooseParticipant() {
+        UUID requesterId = UUID.randomUUID();
+        UUID participantUserId = UUID.randomUUID();
+        UUID channelId = UUID.randomUUID();
+        UUID ownerUserId = UUID.randomUUID();
+        UUID directChatId = UUID.randomUUID();
+        UUID linkId = UUID.randomUUID();
+        UUID topicId = UUID.randomUUID();
+
+        ChatEntity channel = channel(channelId, true, "public_channel");
+        ChatEntity directChat = managedChat(directChatId, "Channel public_channel");
+        ChatMemberEntity ownerMembership = ownerMembership(channelId, ownerUserId);
+        UserEntity participant = user(participantUserId, "Participant", "participant");
+
+        when(chatService.getChat(channelId)).thenReturn(channel);
+        when(chatMemberRepository.findByIdChatIdAndRole(channelId, "OWNER")).thenReturn(Optional.of(ownerMembership));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(channelId, requesterId)).thenReturn(true);
+        when(chatService.hasMessageModerationPermission(requesterId, channelId)).thenReturn(true);
+        when(userRepository.findById(participantUserId)).thenReturn(Optional.of(participant));
+        when(channelDirectMessageChatRepository.findByChannelChatIdAndParticipantUserId(channelId, participantUserId))
+                .thenReturn(Optional.empty());
+        when(chatRepository.save(any(ChatEntity.class))).thenAnswer(invocation -> {
+            ChatEntity chat = invocation.getArgument(0);
+            if (chat.getId() == null) {
+                chat.setId(directChatId);
+            }
+            return chat;
+        });
+        when(channelDirectMessageChatRepository.save(any(ChannelDirectMessageChatEntity.class))).thenAnswer(invocation -> {
+            ChannelDirectMessageChatEntity link = invocation.getArgument(0);
+            link.setId(linkId);
+            return link;
+        });
+        when(chatRepository.findById(directChatId)).thenReturn(Optional.of(directChat));
+        when(channelDirectMessageTopicRepository.save(any(ChannelDirectMessageTopicEntity.class))).thenAnswer(invocation -> {
+            ChannelDirectMessageTopicEntity topic = invocation.getArgument(0);
+            topic.setId(topicId);
+            return topic;
+        });
+        when(chatService.getChatSummary(requesterId, directChatId)).thenReturn(summary(directChatId, "Channel public_channel"));
+        when(chatMemberRepository.existsById(new ChatMemberId(directChatId, requesterId))).thenReturn(true);
+
+        ChannelDirectMessageResponse response = channelDirectMessageService.openDirectMessage(
+                requesterId,
+                channelId,
+                new OpenChannelDirectMessageRequest(participantUserId)
+        );
+
+        assertThat(response.participantUserId()).isEqualTo(participantUserId);
+        assertThat(response.participantDisplayName()).isEqualTo("Participant");
+    }
+
+    @Test
+    void listDirectMessagesRejectsInvalidLimit() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> channelDirectMessageService.listDirectMessages(UUID.randomUUID(), UUID.randomUUID(), 0),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 100");
+    }
+
+    @Test
     void listDirectMessagesGrantsModeratorMembershipWhenMissing() {
         UUID requesterId = UUID.randomUUID();
         UUID ownerUserId = UUID.randomUUID();
@@ -214,6 +279,18 @@ class ChannelDirectMessageServiceTest {
         assertThat(response.get(0).directChatId()).isEqualTo(directChatId);
         assertThat(response.get(0).participantDisplayName()).isEqualTo("Participant");
         verify(chatMemberRepository).save(any(ChatMemberEntity.class));
+    }
+
+    @Test
+    void listDirectMessageTopicsRejectsInvalidLimit() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> channelDirectMessageService.listDirectMessageTopics(UUID.randomUUID(), UUID.randomUUID(), 101),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 100");
     }
 
     @Test

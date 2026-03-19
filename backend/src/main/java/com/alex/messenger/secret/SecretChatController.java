@@ -18,6 +18,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -29,6 +30,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/secret-chats")
@@ -77,7 +79,7 @@ public class SecretChatController {
     @PatchMapping("/{secretChatId}/timer")
     public ResponseEntity<SecretChatSummaryResponse> updateSecretChatTimer(
             @PathVariable UUID secretChatId,
-            @RequestBody UpdateSecretChatTimerRequest request
+            @Valid @RequestBody UpdateSecretChatTimerRequest request
     ) {
         featureFlagService.requireSecretChatsEnabled();
         return ResponseEntity.ok(secretChatService.updateTimer(CurrentUser.id(), CurrentSession.id(), secretChatId, request));
@@ -89,8 +91,11 @@ public class SecretChatController {
             @RequestParam(required = false) Instant before,
             @RequestParam(defaultValue = "50") int limit
     ) {
+        int validatedLimit = requireLimit(limit, 100);
         featureFlagService.requireSecretChatsEnabled();
-        return ResponseEntity.ok(secretChatService.getMessages(CurrentUser.id(), CurrentSession.id(), secretChatId, before, limit));
+        return ResponseEntity.ok(
+                secretChatService.getMessages(CurrentUser.id(), CurrentSession.id(), secretChatId, before, validatedLimit)
+        );
     }
 
     @PostMapping("/{secretChatId}/attachments/upload")
@@ -99,9 +104,10 @@ public class SecretChatController {
             @RequestParam(required = false) String kind,
             @RequestParam("file") MultipartFile file
     ) {
+        String validatedKind = requireAttachmentKind(kind);
         featureFlagService.requireSecretChatsEnabled();
         return ResponseEntity.ok(
-                secretAttachmentService.upload(CurrentUser.id(), CurrentSession.id(), secretChatId, kind, file)
+                secretAttachmentService.upload(CurrentUser.id(), CurrentSession.id(), secretChatId, validatedKind, file)
         );
     }
 
@@ -139,5 +145,29 @@ public class SecretChatController {
     ) {
         featureFlagService.requireSecretChatsEnabled();
         return ResponseEntity.ok(secretChatService.sendMessage(CurrentUser.id(), CurrentSession.id(), secretChatId, request));
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "limit must be between 1 and " + max
+            );
+        }
+        return limit;
+    }
+
+    private String requireAttachmentKind(String kind) {
+        if (kind == null) {
+            return null;
+        }
+        String normalizedKind = kind.trim();
+        if (normalizedKind.isBlank()) {
+            return null;
+        }
+        if (!List.of("FILE", "IMAGE", "VOICE", "VIDEO").contains(normalizedKind.toUpperCase())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported secret attachment kind");
+        }
+        return normalizedKind;
     }
 }

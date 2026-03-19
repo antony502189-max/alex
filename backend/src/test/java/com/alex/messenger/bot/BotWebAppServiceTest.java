@@ -1,6 +1,7 @@
 package com.alex.messenger.bot;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -34,6 +35,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 import org.springframework.test.util.ReflectionTestUtils;
 
 @ExtendWith(MockitoExtension.class)
@@ -102,6 +105,23 @@ class BotWebAppServiceTest {
         assertThat(context.chatId()).isEqualTo(chatId);
         assertThat(context.startParameter()).isEqualTo("promo");
         assertThat(context.platform()).isEqualTo("alex-mobile");
+    }
+
+    @Test
+    void createLaunchRejectsInvalidStartParameter() {
+        UUID requesterId = UUID.randomUUID();
+        UUID botUserId = UUID.randomUUID();
+
+        when(userRepository.findByIdAndBotTrue(botUserId)).thenReturn(Optional.of(bot(botUserId, "samplebot")));
+        when(userRepository.findById(requesterId)).thenReturn(Optional.of(user(requesterId, "Alice")));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botWebAppService.createLaunch(requesterId, botUserId, null, "bad value!"),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     @Test
@@ -207,12 +227,110 @@ class BotWebAppServiceTest {
 
         var response = botWebAppService.answerQuery(
                 botUserId,
-                new BotApiAnswerWebAppQueryRequest(queryId, "result", null, null, List.of(), List.of(), null, false)
+                new BotApiAnswerWebAppQueryRequest(queryId, "result", null, null, List.of(), null, null, List.of(), null, false)
         );
 
         assertThat(response.messageId()).isEqualTo(messageId);
         assertThat(query.getAnsweredAt()).isNotNull();
         assertThat(query.getResultMessageId()).isEqualTo(messageId);
+    }
+
+    @Test
+    void answerQueryRejectsMissingPayload() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botWebAppService.answerQuery(
+                        botUserId,
+                        new BotApiAnswerWebAppQueryRequest(
+                                UUID.randomUUID(),
+                                null,
+                                null,
+                                null,
+                                List.of(),
+                                null,
+                                null,
+                                List.of(),
+                                null,
+                                false
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Message must contain text, attachments, sticker, or structured payload");
+    }
+
+    @Test
+    void answerQueryRejectsServiceMessageType() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botWebAppService.answerQuery(
+                        botUserId,
+                        new BotApiAnswerWebAppQueryRequest(
+                                UUID.randomUUID(),
+                                "result",
+                                null,
+                                "SERVICE_MESSAGE",
+                                List.of(),
+                                null,
+                                null,
+                                List.of(),
+                                null,
+                                false
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Service messages cannot be sent from the bot API");
+    }
+
+    @Test
+    void resolveContextRejectsMissingRequest() {
+        UUID requesterId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botWebAppService.resolveContext(requesterId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Mini app context payload is required");
+    }
+
+    @Test
+    void sendDataRejectsMissingRequest() {
+        UUID requesterId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botWebAppService.sendData(requesterId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Mini app data payload is required");
+    }
+
+    @Test
+    void createQueryRejectsMissingRequest() {
+        UUID requesterId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botWebAppService.createQuery(requesterId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Mini app query payload is required");
     }
 
     private UserEntity user(UUID userId, String displayName) {

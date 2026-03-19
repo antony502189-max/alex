@@ -1,6 +1,7 @@
 package com.alex.messenger.bot;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -43,6 +44,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class BotApiServiceTest {
@@ -126,6 +129,119 @@ class BotApiServiceTest {
     }
 
     @Test
+    void sendMessageRejectsMissingTarget() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.sendMessage(
+                        botUserId,
+                        new BotApiSendMessageRequest(
+                                null,
+                                null,
+                                null,
+                                null,
+                                "hello",
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                List.of()
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("chatId or recipientUserId is required");
+    }
+
+    @Test
+    void sendMessageRejectsEmptyPayload() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.sendMessage(
+                        botUserId,
+                        new BotApiSendMessageRequest(
+                                UUID.randomUUID(),
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                List.of()
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Message must contain text, attachments, sticker, or structured payload");
+    }
+
+    @Test
+    void sendMessageRejectsServiceMessageType() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.sendMessage(
+                        botUserId,
+                        new BotApiSendMessageRequest(
+                                UUID.randomUUID(),
+                                null,
+                                null,
+                                null,
+                                "hello",
+                                null,
+                                "SERVICE_MESSAGE",
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                null,
+                                List.of()
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Service messages cannot be sent from the bot API");
+    }
+
+    @Test
+    void sendPhotoRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.sendPhoto(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Attachment message payload is required");
+    }
+
+    @Test
     void sendPhotoMapsToPhotoMessageTypeAndSingleAttachment() {
         UUID botUserId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();
@@ -159,6 +275,48 @@ class BotApiServiceTest {
         assertThat(captured.caption()).isEqualTo("Cover");
         verify(botMessageActionService).saveMessageActions(botUserId, messageId, List.of(action));
         assertThat(response.messageId()).isEqualTo(messageId);
+    }
+
+    @Test
+    void sendMediaGroupRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.sendMediaGroup(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Media group payload is required");
+    }
+
+    @Test
+    void sendPhotoRejectsMissingTarget() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.sendPhoto(
+                        botUserId,
+                        new BotApiSendAttachmentMessageRequest(
+                                null,
+                                null,
+                                null,
+                                null,
+                                "Cover",
+                                List.of(),
+                                UUID.randomUUID(),
+                                false,
+                                null,
+                                List.of()
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("chatId or recipientUserId is required");
     }
 
     @Test
@@ -268,6 +426,20 @@ class BotApiServiceTest {
     }
 
     @Test
+    void editMessageTextRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.editMessageText(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Edit message payload is required");
+    }
+
+    @Test
     void editAndDeleteMessageUseUnderlyingMessageService() {
         UUID botUserId = UUID.randomUUID();
         UUID messageId = UUID.randomUUID();
@@ -286,6 +458,20 @@ class BotApiServiceTest {
     }
 
     @Test
+    void deleteMessageRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.deleteMessage(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Delete message payload is required");
+    }
+
+    @Test
     void setMyCommandsDelegatesToBotCommandService() {
         UUID botUserId = UUID.randomUUID();
         when(botCommandService.replaceCommands(eq(botUserId), any())).thenReturn(List.of(
@@ -299,6 +485,20 @@ class BotApiServiceTest {
 
         assertThat(response).hasSize(1);
         assertThat(response.get(0).command()).isEqualTo("/start");
+    }
+
+    @Test
+    void setMyCommandsRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.setMyCommands(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Commands payload is required");
     }
 
     @Test
@@ -319,6 +519,20 @@ class BotApiServiceTest {
 
         assertThat(response).hasSize(1);
         assertThat(response.get(0).resultId()).isEqualTo("r1");
+    }
+
+    @Test
+    void answerInlineQueryRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.answerInlineQuery(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Inline query answer payload is required");
     }
 
     @Test
@@ -351,6 +565,20 @@ class BotApiServiceTest {
     }
 
     @Test
+    void answerCallbackQueryRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botApiService.answerCallbackQuery(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Callback answer payload is required");
+    }
+
+    @Test
     void answerWebAppQueryDelegatesToWebAppService() {
         UUID botUserId = UUID.randomUUID();
         UUID queryId = UUID.randomUUID();
@@ -360,7 +588,7 @@ class BotApiServiceTest {
 
         var response = botApiService.answerWebAppQuery(
                 botUserId,
-                new BotApiAnswerWebAppQueryRequest(queryId, "result", null, null, List.of(), List.of(), null, false)
+                new BotApiAnswerWebAppQueryRequest(queryId, "result", null, null, List.of(), null, null, List.of(), null, false)
         );
 
         assertThat(response.messageId()).isEqualTo(messageId);

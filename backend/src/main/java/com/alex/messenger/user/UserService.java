@@ -21,10 +21,12 @@ import com.alex.messenger.user.dto.UserSearchResponse;
 import com.alex.messenger.media.PhotoAccess;
 import com.alex.messenger.media.ProfilePhotoService;
 import com.alex.messenger.media.StoredPhotoReference;
+import com.alex.messenger.shared.SearchQueryValidationSupport;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -61,7 +63,7 @@ public class UserService {
 
     @Transactional(readOnly = true)
     public List<UserSearchResponse> search(UUID requesterId, String query) {
-        String normalizedQuery = query.trim();
+        String normalizedQuery = SearchQueryValidationSupport.normalize(query);
         if (normalizedQuery.isBlank()) {
             return List.of();
         }
@@ -312,8 +314,16 @@ public class UserService {
 
     @Transactional
     public ImportContactsResponse importContacts(UUID requesterId, ImportContactsRequest request) {
+        if (request == null || request.contacts() == null || request.contacts().isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No contacts were provided");
+        }
+        if (request.contacts().size() > 1000) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Contact import supports up to 1000 contacts");
+        }
+        if (request.contacts().stream().anyMatch(Objects::isNull)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Contact import payload contains null contact");
+        }
         List<ImportedPhoneContactPayload> importedContacts = request.contacts().stream()
-                .filter(contact -> contact != null)
                 .map(this::normalizeImportedContact)
                 .filter(contact -> contact != null)
                 .toList();
@@ -652,6 +662,9 @@ public class UserService {
         if (days == null) {
             return 30;
         }
-        return Math.max(1, Math.min(days, 365));
+        if (days < 1 || days > 365) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "days must be between 1 and 365");
+        }
+        return days;
     }
 }

@@ -98,6 +98,7 @@ public class DefaultLawfulInterceptionService implements LawfulInterceptionServi
                 content.caption(),
                 content.silent(),
                 content.location(),
+                resolveLiveLocationPayload(content),
                 content.contactCard(),
                 content.serviceMessage(),
                 message.getCreatedAt(),
@@ -114,6 +115,27 @@ public class DefaultLawfulInterceptionService implements LawfulInterceptionServi
                 message.getExpiresAt(),
                 message.getEditedAt(),
                 message.getDeletedAt()
+        );
+    }
+
+    private com.alex.messenger.message.dto.MessageLiveLocationPayload resolveLiveLocationPayload(MessageTextContent content) {
+        if (content == null || content.liveLocation() == null) {
+            return null;
+        }
+        com.alex.messenger.message.dto.MessageLiveLocationPayload liveLocation = content.liveLocation();
+        boolean active = liveLocation.stoppedAt() == null
+                && liveLocation.expiresAt() != null
+                && liveLocation.expiresAt().isAfter(Instant.now());
+        return new com.alex.messenger.message.dto.MessageLiveLocationPayload(
+                liveLocation.latitude(),
+                liveLocation.longitude(),
+                liveLocation.title(),
+                liveLocation.address(),
+                liveLocation.livePeriodSeconds(),
+                liveLocation.expiresAt(),
+                liveLocation.lastUpdatedAt(),
+                liveLocation.stoppedAt(),
+                active
         );
     }
 

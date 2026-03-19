@@ -17,6 +17,7 @@ import com.alex.messenger.story.dto.StoryFeedItemResponse;
 import com.alex.messenger.story.dto.StoryAlbumResponse;
 import com.alex.messenger.story.dto.StoryHighlightResponse;
 import com.alex.messenger.story.dto.StoryInteractionResponse;
+import com.alex.messenger.story.dto.StoryInteractionEventResponse;
 import com.alex.messenger.story.dto.StoryInteractionSummaryResponse;
 import com.alex.messenger.story.dto.StoryLiveCommentResponse;
 import com.alex.messenger.story.dto.StoryLiveSessionResponse;
@@ -79,6 +80,7 @@ public class StoryService {
     private final UserPrivacyService userPrivacyService;
     private final MediaService mediaService;
     private final MediaProcessingService mediaProcessingService;
+    private final StoryInteractionNotificationService storyInteractionNotificationService;
 
     @Value("${alex.storage.stories.max-file-size-bytes}")
     private long maxStoryMediaFileSizeBytes;
@@ -315,10 +317,13 @@ public class StoryService {
                 .toList();
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public List<StoryInteractionResponse> listInteractions(UUID requesterId, UUID storyId) {
-        getOwnedStory(requesterId, storyId);
+        StoryEntity story = getOwnedStory(requesterId, storyId);
         List<StoryInteractionEntity> interactions = storyInteractionRepository.findAllByStoryIdOrderByCreatedAtDesc(storyId);
+        if (interactions == null) {
+            interactions = List.of();
+        }
         Map<UUID, UserEntity> usersById = getUsers(interactions.stream()
                 .flatMap(interaction -> java.util.stream.Stream.of(
                         interaction.getActorUserId(),
@@ -326,27 +331,17 @@ public class StoryService {
                 ))
                 .filter(Objects::nonNull)
                 .toList());
-        return interactions.stream()
+        List<StoryInteractionResponse> responses = interactions.stream()
                 .map(interaction -> toInteractionResponse(interaction, usersById))
                 .toList();
+        markInteractionsSeen(story);
+        return responses;
     }
 
     @Transactional(readOnly = true)
     public StoryInteractionSummaryResponse getInteractionSummary(UUID requesterId, UUID storyId) {
         getOwnedStory(requesterId, storyId);
-        List<StoryInteractionEntity> interactions = storyInteractionRepository.findAllByStoryIdOrderByCreatedAtDesc(storyId);
-        String viewerReaction = storyInteractionRepository
-                .findFirstByStoryIdAndActorUserIdAndInteractionType(storyId, requesterId, "REACTION")
-                .map(StoryInteractionEntity::getReactionCode)
-                .orElse(null);
-        return new StoryInteractionSummaryResponse(
-                storyId,
-                countInteractions(interactions, "REACTION"),
-                countInteractions(interactions, "REPLY"),
-                countInteractions(interactions, "MENTION"),
-                countInteractions(interactions, "RESHARE"),
-                viewerReaction
-        );
+        return buildInteractionSummary(storyId, requesterId);
     }
 
     @Transactional
@@ -362,14 +357,20 @@ public class StoryService {
         interaction.setInteractionType("REACTION");
         interaction.setReactionCode(normalizeReaction(request.reaction()));
         interaction.setMessageText(null);
+        interaction.setSeenAt(resolveInitialSeenAt(story, requesterId, "REACTION"));
         StoryInteractionEntity saved = storyInteractionRepository.save(interaction);
-        return toInteractionResponse(saved, getUsers(nonNullUserIds(requesterId, targetUserId)));
+        StoryInteractionResponse response = toInteractionResponse(saved, getUsers(nonNullUserIds(requesterId, targetUserId)));
+        publishInteractionEvent(story, response, "INTERACTION_UPSERT");
+        return response;
     }
 
     @Transactional
     public void removeReaction(UUID requesterId, UUID storyId) {
-        getAccessibleStory(requesterId, storyId);
-        storyInteractionRepository.deleteByStoryIdAndActorUserIdAndInteractionType(storyId, requesterId, "REACTION");
+        StoryEntity story = getAccessibleStory(requesterId, storyId);
+        long removed = storyInteractionRepository.deleteByStoryIdAndActorUserIdAndInteractionType(storyId, requesterId, "REACTION");
+        if (removed > 0) {
+            publishInteractionEvent(story, null, "INTERACTION_REMOVED");
+        }
     }
 
     @Transactional
@@ -382,8 +383,11 @@ public class StoryService {
         interaction.setTargetUserId(targetUserId);
         interaction.setInteractionType("REPLY");
         interaction.setMessageText(normalizeInteractionText(request.message(), "Reply message is required"));
+        interaction.setSeenAt(resolveInitialSeenAt(story, requesterId, "REPLY"));
         StoryInteractionEntity saved = storyInteractionRepository.save(interaction);
-        return toInteractionResponse(saved, getUsers(nonNullUserIds(requesterId, targetUserId)));
+        StoryInteractionResponse response = toInteractionResponse(saved, getUsers(nonNullUserIds(requesterId, targetUserId)));
+        publishInteractionEvent(story, response, "INTERACTION_UPSERT");
+        return response;
     }
 
     @Transactional
@@ -400,8 +404,11 @@ public class StoryService {
         interaction.setTargetUserId(targetUser.getId());
         interaction.setInteractionType("MENTION");
         interaction.setMessageText(normalizeOptionalText(request.message()));
+        interaction.setSeenAt(resolveInitialSeenAt(story, requesterId, "MENTION"));
         StoryInteractionEntity saved = storyInteractionRepository.save(interaction);
-        return toInteractionResponse(saved, getUsers(List.of(requesterId, targetUser.getId())));
+        StoryInteractionResponse response = toInteractionResponse(saved, getUsers(List.of(requesterId, targetUser.getId())));
+        publishInteractionEvent(story, response, "INTERACTION_UPSERT");
+        return response;
     }
 
     @Transactional
@@ -414,8 +421,11 @@ public class StoryService {
         interaction.setTargetUserId(targetUserId);
         interaction.setInteractionType("RESHARE");
         interaction.setMessageText(normalizeOptionalText(request.note()));
+        interaction.setSeenAt(resolveInitialSeenAt(story, requesterId, "RESHARE"));
         StoryInteractionEntity saved = storyInteractionRepository.save(interaction);
-        return toInteractionResponse(saved, getUsers(nonNullUserIds(requesterId, targetUserId)));
+        StoryInteractionResponse response = toInteractionResponse(saved, getUsers(nonNullUserIds(requesterId, targetUserId)));
+        publishInteractionEvent(story, response, "INTERACTION_UPSERT");
+        return response;
     }
 
     @Transactional(readOnly = true)
@@ -430,7 +440,10 @@ public class StoryService {
 
     @Transactional
     public StoryHighlightResponse createHighlight(UUID requesterId, CreateStoryHighlightRequest request) {
-        List<UUID> storyIds = normalizeStoryIds(request.storyIds());
+        List<UUID> storyIds = normalizeRequiredStoryIds(
+                request.storyIds(),
+                "Story highlight must include at least one story"
+        );
         Map<UUID, StoryEntity> storiesById = loadHighlightStoriesOwnedBy(requesterId, storyIds);
         int nextPosition = storyHighlightRepository.findAllByOwnerUserIdOrderByPositionAscCreatedAtAsc(requesterId).size();
 
@@ -458,6 +471,9 @@ public class StoryService {
     ) {
         StoryHighlightEntity highlight = getOwnedHighlight(requesterId, highlightId);
         List<UUID> requestedStoryIds = normalizeStoryIds(request.storyIds());
+        if (requestedStoryIds.isEmpty() && request.coverStoryId() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Provide storyIds or coverStoryId");
+        }
         Map<UUID, StoryEntity> storiesById = loadHighlightStoriesOwnedBy(requesterId, requestedStoryIds);
         List<StoryHighlightItemEntity> existingItems = storyHighlightItemRepository
                 .findAllByHighlightIdOrderByPositionAscCreatedAtAsc(highlightId);
@@ -670,7 +686,7 @@ public class StoryService {
             MultipartFile file
     ) {
         StoryOwnerScope ownerScope = resolveChannelOrUserOwner(requesterId, request.ownerChatId());
-        String normalizedText = normalizeOptionalText(request.text());
+        String normalizedText = normalizeStoryText(request.text());
         if ((normalizedText == null || normalizedText.isBlank()) && (file == null || file.isEmpty())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Story must include text or media");
         }
@@ -1306,6 +1322,85 @@ public class StoryService {
                 .count();
     }
 
+    private StoryInteractionSummaryResponse buildInteractionSummary(UUID storyId, UUID viewerUserId) {
+        List<StoryInteractionEntity> interactions = storyInteractionRepository.findAllByStoryIdOrderByCreatedAtDesc(storyId);
+        if (interactions == null) {
+            interactions = List.of();
+        }
+        String viewerReaction = storyInteractionRepository
+                .findFirstByStoryIdAndActorUserIdAndInteractionType(storyId, viewerUserId, "REACTION")
+                .map(StoryInteractionEntity::getReactionCode)
+                .orElse(null);
+        return new StoryInteractionSummaryResponse(
+                storyId,
+                countInteractions(interactions, "REACTION"),
+                countInteractions(interactions, "REPLY"),
+                countInteractions(interactions, "MENTION"),
+                countInteractions(interactions, "RESHARE"),
+                viewerReaction
+        );
+    }
+
+    private void publishInteractionEvent(
+            StoryEntity story,
+            StoryInteractionResponse interaction,
+            String eventType
+    ) {
+        if (story.getOwnerUserId() == null) {
+            return;
+        }
+        StoryInteractionSummaryResponse summary = buildInteractionSummary(story.getId(), story.getOwnerUserId());
+        StoryInteractionEventResponse event = new StoryInteractionEventResponse(
+                eventType,
+                story.getId(),
+                story.getOwnerUserId(),
+                story.getOwnerChatId(),
+                interaction,
+                summary,
+                countUnreadInteractionsForOwner(story.getOwnerUserId()),
+                countUnreadInteractions(story.getId())
+        );
+        storyInteractionNotificationService.publish(story.getOwnerUserId(), event);
+    }
+
+    private void markInteractionsSeen(StoryEntity story) {
+        if (story == null || story.getOwnerUserId() == null) {
+            return;
+        }
+        if (storyInteractionRepository.markSeenByStoryId(story.getId(), Instant.now()) > 0) {
+            publishInteractionEvent(story, null, "INTERACTIONS_SEEN");
+        }
+    }
+
+    private int countUnreadInteractions(UUID storyId) {
+        return Math.toIntExact(storyInteractionRepository.countByStoryIdAndSeenAtIsNull(storyId));
+    }
+
+    private int countUnreadInteractionsForOwner(UUID ownerUserId) {
+        List<StoryEntity> stories = storyRepository.findAllByOwnerUserIdAndExpiresAtAfterOrderByCreatedAtDesc(
+                ownerUserId,
+                Instant.now()
+        );
+        if (stories == null || stories.isEmpty()) {
+            return 0;
+        }
+        List<UUID> storyIds = stories.stream().map(StoryEntity::getId).toList();
+        if (storyIds.isEmpty()) {
+            return 0;
+        }
+        return Math.toIntExact(storyInteractionRepository.countByStoryIdInAndSeenAtIsNull(storyIds));
+    }
+
+    private Instant resolveInitialSeenAt(StoryEntity story, UUID actorUserId, String interactionType) {
+        if (story == null || story.getOwnerUserId() == null) {
+            return Instant.now();
+        }
+        if (story.getOwnerUserId().equals(actorUserId) || "MENTION".equals(interactionType)) {
+            return Instant.now();
+        }
+        return null;
+    }
+
     private UUID resolveStoryInteractionTargetUserId(StoryEntity story) {
         return story.getOwnerChatId() == null ? story.getOwnerUserId() : null;
     }
@@ -1509,10 +1604,21 @@ public class StoryService {
         return normalized.isBlank() ? null : normalized;
     }
 
+    private String normalizeStoryText(String text) {
+        String normalized = normalizeOptionalText(text);
+        if (normalized != null && normalized.length() > 500) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Story text is too long");
+        }
+        return normalized;
+    }
+
     private String normalizeAudience(String audience) {
         String normalized = audience != null ? audience.trim().toUpperCase() : "DEFAULT";
         if (normalized.isBlank()) {
             return "DEFAULT";
+        }
+        if ("SELECTED_USERS".equals(normalized)) {
+            return "CUSTOM";
         }
         if (!List.of("DEFAULT", "EVERYBODY", "CONTACTS", "NOBODY", "CLOSE_FRIENDS", "CUSTOM").contains(normalized)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported story audience");

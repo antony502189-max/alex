@@ -1,7 +1,11 @@
 package com.alex.messenger.bot.dto;
 
+import com.alex.messenger.shared.HttpUrlValidationSupport;
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
+import java.util.Locale;
 
 public record CreateDeveloperBotRequest(
         @NotBlank @Size(max = 120) String displayName,
@@ -11,4 +15,20 @@ public record CreateDeveloperBotRequest(
         boolean supportsInline,
         @Size(max = 512) String webAppUrl
 ) {
+
+    @JsonIgnore
+    @AssertTrue(message = "Bot username must end with 'bot' and match [a-z0-9_]{4,64}")
+    public boolean hasValidUsername() {
+        if (username == null) {
+            return true;
+        }
+        String normalized = username.trim().toLowerCase(Locale.ROOT);
+        return normalized.matches("[a-z0-9_]{4,64}") && normalized.endsWith("bot");
+    }
+
+    @JsonIgnore
+    @AssertTrue(message = "Mini app URL must be a valid http(s) URL")
+    public boolean hasValidWebAppUrl() {
+        return HttpUrlValidationSupport.isValidOptionalHttpUrl(webAppUrl);
+    }
 }

@@ -1,6 +1,7 @@
 package com.alex.messenger.account;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -8,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import com.alex.messenger.account.dto.AccountExportResponse;
 import com.alex.messenger.account.dto.RequestAccountExport;
+import com.alex.messenger.account.dto.ScheduleAccountDeletionRequest;
 import com.alex.messenger.auth.session.UserSessionService;
 import com.alex.messenger.lawful.LawfulExportChecksumService;
 import com.alex.messenger.lawful.LawfulInterceptionService;
@@ -25,6 +27,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class AccountServiceTest {
@@ -150,6 +154,55 @@ class AccountServiceTest {
         assertThat(created).isEqualTo(1);
         assertThat(captor.getValue().getUserId()).isEqualTo(dueUserId);
         assertThat(captor.getValue().getTriggerType()).isEqualTo("INACTIVITY");
+    }
+
+    @Test
+    void exportRejectsInvalidRange() {
+        UUID userId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+
+        UserEntity user = new UserEntity();
+        user.setId(userId);
+        user.setPhoneNumber("+375291234567");
+        user.setDisplayName("Alex");
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(user));
+
+        assertThatThrownBy(() -> accountService.export(
+                userId,
+                sessionId,
+                new RequestAccountExport(
+                        "json",
+                        false,
+                        Instant.parse("2026-03-20T12:00:00Z"),
+                        Instant.parse("2026-03-19T12:00:00Z")
+                )
+        ))
+                .isInstanceOf(ResponseStatusException.class)
+                .extracting(exception -> ((ResponseStatusException) exception).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void scheduleDeletionRejectsInvalidDelay() {
+        UUID userId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+
+        UserEntity user = new UserEntity();
+        user.setId(userId);
+        user.setPhoneNumber("+375291234567");
+        user.setDisplayName("Alex");
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(user));
+
+        assertThatThrownBy(() -> accountService.scheduleDeletion(
+                userId,
+                sessionId,
+                new ScheduleAccountDeletionRequest("cleanup", 366)
+        ))
+                .isInstanceOf(ResponseStatusException.class)
+                .extracting(exception -> ((ResponseStatusException) exception).getStatusCode())
+                .isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     private ChatMessageResponse message(UUID userId) {

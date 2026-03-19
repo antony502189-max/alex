@@ -105,7 +105,13 @@ public class BotInlineResultCacheService {
         if (value == null) {
             return DEFAULT_CACHE_SECONDS;
         }
-        return Math.max(0, Math.min(value, MAX_CACHE_SECONDS));
+        if (value < 0 || value > MAX_CACHE_SECONDS) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "cacheTimeSeconds must be between 0 and " + MAX_CACHE_SECONDS
+            );
+        }
+        return value;
     }
 
     private String normalizeResultId(String value) {

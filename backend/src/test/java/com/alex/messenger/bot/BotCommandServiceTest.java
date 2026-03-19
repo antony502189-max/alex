@@ -83,4 +83,34 @@ class BotCommandServiceTest {
                 )
         )).isInstanceOf(ResponseStatusException.class);
     }
+
+    @Test
+    void replaceCommandsRejectsNullEntry() {
+        UUID botUserId = UUID.randomUUID();
+        BotAccountEntity account = new BotAccountEntity();
+        account.setBotUserId(botUserId);
+
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(account));
+
+        assertThatThrownBy(() -> botCommandService.replaceCommands(
+                botUserId,
+                java.util.Arrays.asList(new BotApiCommandRequest("/start", "Open"), null)
+        )).isInstanceOf(ResponseStatusException.class);
+    }
+
+    @Test
+    void replaceCommandsRejectsTooManyCommands() {
+        UUID botUserId = UUID.randomUUID();
+        BotAccountEntity account = new BotAccountEntity();
+        account.setBotUserId(botUserId);
+
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(account));
+
+        assertThatThrownBy(() -> botCommandService.replaceCommands(
+                botUserId,
+                java.util.stream.IntStream.range(0, 101)
+                        .mapToObj(index -> new BotApiCommandRequest("/cmd" + index, "Command " + index))
+                        .toList()
+        )).isInstanceOf(ResponseStatusException.class);
+    }
 }

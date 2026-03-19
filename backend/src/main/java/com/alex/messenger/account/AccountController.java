@@ -23,7 +23,7 @@ public class AccountController {
 
     @PostMapping("/export")
     public ResponseEntity<AccountExportResponse> exportAccount(
-            @RequestBody(required = false) RequestAccountExport request
+            @Valid @RequestBody(required = false) RequestAccountExport request
     ) {
         return ResponseEntity.ok(accountService.export(CurrentUser.id(), CurrentSession.id(), request));
     }

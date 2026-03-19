@@ -9,6 +9,7 @@ import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -17,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/channels/{chatId}/direct-messages")
@@ -43,7 +45,9 @@ public class ChannelDirectMessageController {
             @PathVariable UUID chatId,
             @RequestParam(defaultValue = "50") int limit
     ) {
-        return ResponseEntity.ok(channelDirectMessageService.listDirectMessages(CurrentUser.id(), chatId, limit));
+        return ResponseEntity.ok(
+                channelDirectMessageService.listDirectMessages(CurrentUser.id(), chatId, requireLimit(limit, 100))
+        );
     }
 
     @GetMapping("/topics")
@@ -51,6 +55,18 @@ public class ChannelDirectMessageController {
             @PathVariable UUID chatId,
             @RequestParam(defaultValue = "50") int limit
     ) {
-        return ResponseEntity.ok(channelDirectMessageService.listDirectMessageTopics(CurrentUser.id(), chatId, limit));
+        return ResponseEntity.ok(
+                channelDirectMessageService.listDirectMessageTopics(CurrentUser.id(), chatId, requireLimit(limit, 100))
+        );
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "limit must be between 1 and " + max
+            );
+        }
+        return limit;
     }
 }

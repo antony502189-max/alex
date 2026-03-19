@@ -39,6 +39,7 @@ public class AccountService {
         RequestAccountExport effectiveRequest = request != null
                 ? request
                 : new RequestAccountExport(null, null, null, null);
+        validateExportWindow(effectiveRequest.fromInclusive(), effectiveRequest.toExclusive());
 
         String format = normalizeFormat(effectiveRequest.format());
         boolean includeAttachmentsMetadata = Boolean.TRUE.equals(effectiveRequest.includeAttachmentsMetadata());
@@ -193,7 +194,10 @@ public class AccountService {
         if (request == null || request.delayDays() == null) {
             return defaultDelay;
         }
-        return Math.max(1, request.delayDays());
+        if (request.delayDays() < 1 || request.delayDays() > 365) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Deletion delay must be between 1 and 365 days");
+        }
+        return request.delayDays();
     }
 
     private String normalizeFormat(String format) {
@@ -206,6 +210,12 @@ public class AccountService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported export format");
         }
         return normalized;
+    }
+
+    private void validateExportWindow(Instant fromInclusive, Instant toExclusive) {
+        if (fromInclusive != null && toExclusive != null && fromInclusive.isAfter(toExclusive)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Export range is invalid");
+        }
     }
 
     private String normalizeNullable(String value, int maxLength) {

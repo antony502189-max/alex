@@ -78,6 +78,12 @@ public class UserProfileMetadataService {
         requireUser(requesterId);
         UUID attachmentId = request != null ? request.attachmentId() : null;
         if (attachmentId == null) {
+            if (hasProfileAudioMetadata(request)) {
+                throw new ResponseStatusException(
+                        HttpStatus.BAD_REQUEST,
+                        "Attachment is required when profile audio metadata is provided"
+                );
+            }
             profileAudioRepository.findById(requesterId).ifPresent(profileAudioRepository::delete);
             return emptyAudioResponse(requesterId);
         }
@@ -236,6 +242,15 @@ public class UserProfileMetadataService {
             return null;
         }
         return normalized.toUpperCase(Locale.ROOT);
+    }
+
+    private boolean hasProfileAudioMetadata(UpsertProfileAudioRequest request) {
+        return request != null
+                && (hasText(request.title()) || hasText(request.performer()) || hasText(request.caption()));
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.trim().isBlank();
     }
 
     private String normalizeOptional(String value, int maxLength) {

@@ -442,10 +442,16 @@ public class MonetizationService {
             UUID chatId,
             MonetizationProviderReconciliationRequest request
     ) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Provider reconciliation payload is required");
+        }
         requireChannelChat(chatId);
-        List<MonetizationProviderStatusUpdateRequest> updates = request != null && request.updates() != null
-                ? request.updates().stream().filter(java.util.Objects::nonNull).toList()
+        List<MonetizationProviderStatusUpdateRequest> updates = request.updates() != null
+                ? request.updates()
                 : List.of();
+        if (updates.stream().anyMatch(java.util.Objects::isNull)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Provider reconciliation updates must not contain null");
+        }
         if (updates.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Provider reconciliation requires at least one update");
         }

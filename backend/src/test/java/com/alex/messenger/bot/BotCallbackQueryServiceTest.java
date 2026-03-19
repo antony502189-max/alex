@@ -1,6 +1,7 @@
 package com.alex.messenger.bot;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -15,6 +16,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class BotCallbackQueryServiceTest {
@@ -94,5 +97,19 @@ class BotCallbackQueryServiceTest {
         assertThat(response.showAlert()).isTrue();
         assertThat(response.redirectUrl()).isEqualTo("https://example.com/done");
         assertThat(response.answeredAt()).isNotNull();
+    }
+
+    @Test
+    void answerCallbackQueryRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botCallbackQueryService.answerCallbackQuery(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Callback answer payload is required");
     }
 }

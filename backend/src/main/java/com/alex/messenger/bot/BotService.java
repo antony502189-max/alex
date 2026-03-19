@@ -17,6 +17,7 @@ import com.alex.messenger.message.MessageStorageService;
 import com.alex.messenger.message.MessageTextContent;
 import com.alex.messenger.message.expiration.MessageExpirationEntity;
 import com.alex.messenger.message.expiration.MessageExpirationRepository;
+import com.alex.messenger.shared.SearchQueryValidationSupport;
 import com.alex.messenger.user.UserEntity;
 import com.alex.messenger.user.UserRepository;
 import com.datastax.oss.driver.api.core.uuid.Uuids;
@@ -197,7 +198,7 @@ public class BotService {
     }
 
     private List<BotInlineResultResponse> inlineResultDefinitions(UserEntity bot, String query) {
-        String normalizedQuery = query != null ? query.trim() : "";
+        String normalizedQuery = SearchQueryValidationSupport.normalizeOptional(query);
         if (!isBuiltInBot(bot)) {
             return botInlineResultCacheService.getCachedResults(bot.getId(), normalizedQuery).stream()
                     .map(result -> new BotInlineResultResponse(

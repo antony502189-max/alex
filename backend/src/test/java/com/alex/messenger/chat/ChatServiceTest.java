@@ -3,6 +3,7 @@ package com.alex.messenger.chat;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -26,7 +27,9 @@ import com.alex.messenger.message.MessageLookupEntity;
 import com.alex.messenger.message.MessageLookupRepository;
 import com.alex.messenger.message.MessagePrimaryKey;
 import com.alex.messenger.message.MessageTextContent;
+import com.alex.messenger.chat.dto.AddMembersRequest;
 import com.alex.messenger.chat.dto.ChatSummaryResponse;
+import com.alex.messenger.chat.dto.UpdateMemberPermissionsRequest;
 import com.alex.messenger.chat.dto.ChatReadEventResponse;
 import com.alex.messenger.chat.dto.TransferChatOwnershipResponse;
 import com.alex.messenger.chat.dto.TypingEventResponse;
@@ -44,6 +47,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
@@ -174,6 +178,102 @@ class ChatServiceTest {
         assertThat(exception).isNotNull();
         assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         verify(chatPinEventRepository, never()).save(any(ChatPinEventEntity.class));
+    }
+
+    @Test
+    void updateMemberPermissionsRejectsMissingChanges() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID targetUserId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+
+        ChatMemberEntity requesterMembership = member(chatId, requesterId);
+        requesterMembership.setRole("OWNER");
+        requesterMembership.setCanManageMembers(true);
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId)))
+                .thenReturn(Optional.of(requesterMembership));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.updateMemberPermissions(
+                        requesterId,
+                        chatId,
+                        targetUserId,
+                        new UpdateMemberPermissionsRequest(null, null, null, null, null, null, null)
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(chatMemberRepository, never()).save(any(ChatMemberEntity.class));
+    }
+
+    @Test
+    void muteChatRejectsPastMuteDeadline() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+
+        ChatMemberEntity membership = member(chatId, requesterId);
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId)))
+                .thenReturn(Optional.of(membership));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.muteChat(requesterId, chatId, Instant.parse("2000-01-01T00:00:00Z")),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(chatMemberRepository, never()).save(any(ChatMemberEntity.class));
+    }
+
+    @Test
+    void listChatsPageRejectsInvalidLimit() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.listChatsPage(UUID.randomUUID(), false, null, 0),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 100");
+    }
+
+    @Test
+    void searchChatsRejectsInvalidLimit() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.searchChats(UUID.randomUUID(), "alpha", 0),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 50");
+    }
+
+    @Test
+    void discoverPublicChatsRejectsInvalidLimit() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.discoverPublicChats(UUID.randomUUID(), "alpha", 0),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 20");
     }
 
     @Test
@@ -1014,6 +1114,149 @@ class ChatServiceTest {
     }
 
     @Test
+    void listAllChatsSortsPinnedChatsAheadOfNewerUnpinnedEntries() {
+        UUID requesterId = UUID.randomUUID();
+        UUID pinnedChatId = UUID.randomUUID();
+        UUID unpinnedChatId = UUID.randomUUID();
+
+        ChatMemberEntity unpinnedMembership = member(unpinnedChatId, requesterId);
+        unpinnedMembership.setArchived(false);
+        unpinnedMembership.setListPinned(false);
+
+        ChatMemberEntity pinnedMembership = member(pinnedChatId, requesterId);
+        pinnedMembership.setArchived(false);
+        pinnedMembership.setListPinned(true);
+        pinnedMembership.setListPinOrder(0);
+
+        ChatEntity pinnedChat = new ChatEntity();
+        pinnedChat.setId(pinnedChatId);
+        pinnedChat.setChatType("GROUP");
+        pinnedChat.setTitle("Pinned");
+        pinnedChat.setCreatedAt(Instant.parse("2026-03-19T09:00:00Z"));
+        pinnedChat.setLastMessageAt(Instant.parse("2026-03-19T09:30:00Z"));
+
+        ChatEntity unpinnedChat = new ChatEntity();
+        unpinnedChat.setId(unpinnedChatId);
+        unpinnedChat.setChatType("GROUP");
+        unpinnedChat.setTitle("Unpinned");
+        unpinnedChat.setCreatedAt(Instant.parse("2026-03-19T10:00:00Z"));
+        unpinnedChat.setLastMessageAt(Instant.parse("2026-03-19T11:00:00Z"));
+
+        when(chatMemberRepository.findMembershipsOrderedForUser(requesterId, false))
+                .thenReturn(List.of(unpinnedMembership, pinnedMembership));
+        when(chatMemberRepository.findMembershipsOrderedForUser(requesterId, true)).thenReturn(List.of());
+        when(chatDraftRepository.findAllByIdUserIdAndIdChatIdIn(requesterId, List.of(unpinnedChatId, pinnedChatId)))
+                .thenReturn(List.of());
+        when(chatRepository.findAllById(List.of(unpinnedChatId, pinnedChatId))).thenReturn(List.of(unpinnedChat, pinnedChat));
+        when(chatMemberRepository.countByIdChatId(pinnedChatId)).thenReturn(1L);
+        when(chatMemberRepository.countByIdChatId(unpinnedChatId)).thenReturn(1L);
+        when(messageRepository.findRecentByChatId(pinnedChatId, 1)).thenReturn(List.of());
+        when(messageRepository.findRecentByChatId(unpinnedChatId, 1)).thenReturn(List.of());
+
+        List<ChatSummaryResponse> chats = chatService.listAllChats(requesterId);
+
+        assertThat(chats).extracting(ChatSummaryResponse::chatId)
+                .containsExactly(pinnedChatId, unpinnedChatId);
+        assertThat(chats.get(0).pinned()).isTrue();
+        assertThat(chats.get(0).pinOrder()).isZero();
+        assertThat(chats.get(1).pinned()).isFalse();
+    }
+
+    @Test
+    void pinChatToListAssignsNextPinOrderAfterExistingPins() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID existingPinnedChatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+        chat.setTitle("Target");
+        chat.setCreatedAt(Instant.parse("2026-03-19T10:00:00Z"));
+        chat.setLastMessageAt(Instant.parse("2026-03-19T10:10:00Z"));
+
+        ChatMemberEntity membership = member(chatId, requesterId);
+        membership.setArchived(false);
+        membership.setListPinned(false);
+
+        ChatMemberEntity existingPinnedMembership = member(existingPinnedChatId, requesterId);
+        existingPinnedMembership.setArchived(false);
+        existingPinnedMembership.setListPinned(true);
+        existingPinnedMembership.setListPinOrder(2);
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(membership));
+        when(chatMemberRepository.findAllByIdUserIdAndArchivedOrderByListPinOrderAsc(requesterId, false))
+                .thenReturn(List.of(existingPinnedMembership));
+        when(chatMemberRepository.save(any(ChatMemberEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(chatDraftRepository.findById(any(ChatDraftId.class))).thenReturn(Optional.empty());
+        when(chatMemberRepository.countByIdChatId(chatId)).thenReturn(1L);
+        when(messageRepository.findRecentByChatId(chatId, 1)).thenReturn(List.of());
+
+        ChatSummaryResponse response = chatService.pinChatToList(requesterId, chatId);
+
+        assertThat(response.pinned()).isTrue();
+        assertThat(response.pinOrder()).isEqualTo(3);
+        assertThat(membership.getListPinned()).isTrue();
+        assertThat(membership.getListPinOrder()).isEqualTo(3);
+    }
+
+    @Test
+    void unpinChatFromListRenormalizesRemainingPinnedChats() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID anotherPinnedChatId = UUID.randomUUID();
+        UUID thirdPinnedChatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+        chat.setTitle("Target");
+        chat.setCreatedAt(Instant.parse("2026-03-19T10:00:00Z"));
+        chat.setLastMessageAt(Instant.parse("2026-03-19T10:10:00Z"));
+
+        ChatMemberEntity membership = member(chatId, requesterId);
+        membership.setArchived(false);
+        membership.setListPinned(true);
+        membership.setListPinOrder(1);
+
+        ChatMemberEntity firstRemainingPinned = member(anotherPinnedChatId, requesterId);
+        firstRemainingPinned.setArchived(false);
+        firstRemainingPinned.setListPinned(true);
+        firstRemainingPinned.setListPinOrder(2);
+
+        ChatMemberEntity secondRemainingPinned = member(thirdPinnedChatId, requesterId);
+        secondRemainingPinned.setArchived(false);
+        secondRemainingPinned.setListPinned(true);
+        secondRemainingPinned.setListPinOrder(5);
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(membership));
+        when(chatMemberRepository.save(any(ChatMemberEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(chatMemberRepository.findAllByIdUserIdAndArchivedOrderByListPinOrderAsc(requesterId, false))
+                .thenReturn(List.of(firstRemainingPinned, secondRemainingPinned));
+        when(chatDraftRepository.findById(any(ChatDraftId.class))).thenReturn(Optional.empty());
+        when(chatMemberRepository.countByIdChatId(chatId)).thenReturn(1L);
+        when(messageRepository.findRecentByChatId(chatId, 1)).thenReturn(List.of());
+
+        ChatSummaryResponse response = chatService.unpinChatFromList(requesterId, chatId);
+
+        assertThat(response.pinned()).isFalse();
+        assertThat(response.pinOrder()).isNull();
+        assertThat(membership.getListPinned()).isFalse();
+        assertThat(membership.getListPinOrder()).isNull();
+
+        ArgumentCaptor<List<ChatMemberEntity>> captor = ArgumentCaptor.forClass(List.class);
+        verify(chatMemberRepository).saveAll(captor.capture());
+        List<ChatMemberEntity> normalizedMemberships = captor.getValue();
+        assertThat(normalizedMemberships).containsExactly(firstRemainingPinned, secondRemainingPinned);
+        assertThat(firstRemainingPinned.getListPinOrder()).isEqualTo(0);
+        assertThat(secondRemainingPinned.getListPinOrder()).isEqualTo(1);
+    }
+
+    @Test
     void listChatsPageRejectsMalformedCursor() {
         ResponseStatusException exception = catchThrowableOfType(
                 () -> chatService.listChatsPage(UUID.randomUUID(), false, "%%%not-base64%%%", 10),
@@ -1295,6 +1538,53 @@ class ChatServiceTest {
         assertThat(exception).isNotNull();
         assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
         verify(chatMemberRepository, never()).save(any(ChatMemberEntity.class));
+    }
+
+    @Test
+    void addMembersRejectsRequestsThatOnlyContainRequester() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+
+        ChatMemberEntity requesterMembership = member(chatId, requesterId);
+        requesterMembership.setRole("ADMIN");
+        requesterMembership.setCanManageMembers(true);
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId)))
+                .thenReturn(Optional.of(requesterMembership));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.addMembers(
+                        requesterId,
+                        chatId,
+                        new AddMembersRequest(List.of(requesterId))
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(userRepository, never()).findAllById(any());
+        verify(chatMemberRepository, never()).save(any(ChatMemberEntity.class));
+    }
+
+    @Test
+    void discoverPublicChatsRejectsTooLongQuery() {
+        UUID requesterId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.discoverPublicChats(requesterId, "a".repeat(256), 20),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(chatRepository, never()).searchPublicChats(anyString());
     }
 
     @Test

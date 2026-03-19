@@ -49,6 +49,9 @@ public class StoryInteractionEntity {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    @Column(name = "seen_at")
+    private Instant seenAt;
+
     @PrePersist
     void prePersist() {
         Instant now = Instant.now();

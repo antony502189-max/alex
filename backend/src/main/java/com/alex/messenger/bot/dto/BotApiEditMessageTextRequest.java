@@ -11,6 +11,6 @@ import java.util.UUID;
 public record BotApiEditMessageTextRequest(
         @NotNull UUID messageId,
         @NotBlank @Size(max = 4000) String text,
-        @Valid List<MessageTextEntityPayload> entities
+        List<@NotNull @Valid MessageTextEntityPayload> entities
 ) {
 }

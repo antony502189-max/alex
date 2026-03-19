@@ -1,9 +1,10 @@
 package com.alex.messenger.business.dto;
 
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.NotNull;
 import java.util.List;
 
 public record ReplaceBusinessChatTagsRequest(
-        @Valid List<BusinessChatTagPayload> tags
+        List<@NotNull @Valid BusinessChatTagPayload> tags
 ) {
 }

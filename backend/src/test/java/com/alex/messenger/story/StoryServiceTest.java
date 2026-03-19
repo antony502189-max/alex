@@ -2,11 +2,13 @@ package com.alex.messenger.story;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -34,9 +36,11 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.web.multipart.MultipartFile;
@@ -95,6 +99,9 @@ class StoryServiceTest {
     @Mock
     private MediaProcessingService mediaProcessingService;
 
+    @Mock
+    private StoryInteractionNotificationService storyInteractionNotificationService;
+
     private StoryService storyService;
 
     @BeforeEach
@@ -116,7 +123,8 @@ class StoryServiceTest {
                 contactRepository,
                 userPrivacyService,
                 mediaService,
-                mediaProcessingService
+                mediaProcessingService,
+                storyInteractionNotificationService
         );
 
         Field field = StoryService.class.getDeclaredField("maxStoryMediaFileSizeBytes");
@@ -220,6 +228,36 @@ class StoryServiceTest {
     }
 
     @Test
+    void createWithMediaRejectsTextLongerThanFiveHundredCharacters() {
+        UUID ownerUserId = UUID.randomUUID();
+        UserEntity owner = user(ownerUserId, "Media owner");
+        MultipartFile file = org.mockito.Mockito.mock(MultipartFile.class);
+
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+        when(file.isEmpty()).thenReturn(true);
+
+        assertThatThrownBy(() -> storyService.createWithMedia(
+                ownerUserId,
+                new CreateStoryRequest(
+                        "x".repeat(501),
+                        "#0f172a",
+                        "#2563eb",
+                        "#ffffff",
+                        "DEFAULT",
+                        List.of(),
+                        null
+                ),
+                null,
+                file
+        ))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((org.springframework.web.server.ResponseStatusException) exception)
+                        .getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST));
+
+        verify(storyRepository, never()).save(any(StoryEntity.class));
+    }
+
+    @Test
     void createStoryForChannelUsesChannelOwnershipSurface() {
         UUID ownerUserId = UUID.randomUUID();
         UUID ownerChatId = UUID.randomUUID();
@@ -259,6 +297,75 @@ class StoryServiceTest {
         assertThat(response.ownerChatId()).isEqualTo(ownerChatId);
         assertThat(response.ownerDisplayName()).isEqualTo("Release Notes");
         assertThat(response.ownerUsername()).isEqualTo("release_notes");
+    }
+
+    @Test
+    void createSupportsSelectedUsersAudienceAlias() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID allowedViewerId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+
+        UserEntity owner = user(ownerUserId, "Owner");
+        AtomicReference<StoryEntity> savedStory = new AtomicReference<>();
+
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+        when(contactRepository.existsByIdOwnerUserIdAndIdContactUserId(ownerUserId, allowedViewerId)).thenReturn(true);
+        when(storyRepository.save(any(StoryEntity.class))).thenAnswer(invocation -> {
+            StoryEntity story = invocation.getArgument(0);
+            if (story.getId() == null) {
+                story.setId(storyId);
+            }
+            if (story.getCreatedAt() == null) {
+                story.setCreatedAt(Instant.parse("2026-03-19T11:00:00Z"));
+            }
+            savedStory.set(story);
+            return story;
+        });
+        when(storyViewRepository.findAllByIdStoryId(storyId)).thenReturn(List.of());
+
+        var response = storyService.create(
+                ownerUserId,
+                new CreateStoryRequest(
+                        "Selected",
+                        "#0f172a",
+                        "#2563eb",
+                        "#ffffff",
+                        "SELECTED_USERS",
+                        List.of(allowedViewerId),
+                        null
+                )
+        );
+
+        assertThat(response.storyId()).isEqualTo(storyId);
+        assertThat(savedStory.get()).isNotNull();
+        assertThat(savedStory.get().getAudience()).isEqualTo("CUSTOM");
+        assertThat(savedStory.get().getAllowedViewerUserIds()).isEqualTo(allowedViewerId.toString());
+    }
+
+    @Test
+    void createRejectsCustomAudienceWithoutAllowedViewers() {
+        UUID ownerUserId = UUID.randomUUID();
+        UserEntity owner = user(ownerUserId, "Owner");
+
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+
+        assertThatThrownBy(() -> storyService.create(
+                ownerUserId,
+                new CreateStoryRequest(
+                        "Selected",
+                        "#0f172a",
+                        "#2563eb",
+                        "#ffffff",
+                        "CUSTOM",
+                        List.of(),
+                        null
+                )
+        ))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((org.springframework.web.server.ResponseStatusException) exception)
+                        .getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST));
+
+        verify(storyRepository, never()).save(any(StoryEntity.class));
     }
 
     @Test
@@ -460,6 +567,80 @@ class StoryServiceTest {
     }
 
     @Test
+    void createHighlightRejectsEmptyStorySelection() {
+        UUID ownerUserId = UUID.randomUUID();
+
+        assertThatThrownBy(() -> storyService.createHighlight(
+                ownerUserId,
+                new CreateStoryHighlightRequest("Trips", null, null, List.of())
+        ))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((org.springframework.web.server.ResponseStatusException) exception)
+                        .getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST));
+
+        verify(storyHighlightRepository, org.mockito.Mockito.never()).save(any(StoryHighlightEntity.class));
+    }
+
+    @Test
+    void createHighlightRejectsCoverStoryOutsideSelection() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID firstStoryId = UUID.randomUUID();
+        UUID secondStoryId = UUID.randomUUID();
+        UUID coverStoryId = UUID.randomUUID();
+
+        StoryEntity firstStory = story(
+                firstStoryId,
+                ownerUserId,
+                Instant.parse("2026-03-10T08:00:00Z"),
+                Instant.parse("2026-03-10T20:00:00Z")
+        );
+        StoryEntity secondStory = story(
+                secondStoryId,
+                ownerUserId,
+                Instant.parse("2026-03-11T08:00:00Z"),
+                Instant.parse("2026-03-11T20:00:00Z")
+        );
+
+        when(storyRepository.findAllById(any())).thenReturn(List.of(firstStory, secondStory));
+        when(storyHighlightRepository.findAllByOwnerUserIdOrderByPositionAscCreatedAtAsc(ownerUserId)).thenReturn(List.of());
+
+        assertThatThrownBy(() -> storyService.createHighlight(
+                ownerUserId,
+                new CreateStoryHighlightRequest("Trips", coverStoryId, null, List.of(firstStoryId, secondStoryId))
+        ))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((org.springframework.web.server.ResponseStatusException) exception)
+                        .getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST));
+
+        verify(storyHighlightRepository, never()).save(any(StoryHighlightEntity.class));
+    }
+
+    @Test
+    void addStoriesToHighlightRejectsEmptyUpdate() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID highlightId = UUID.randomUUID();
+
+        StoryHighlightEntity highlight = new StoryHighlightEntity();
+        highlight.setId(highlightId);
+        highlight.setOwnerUserId(ownerUserId);
+        highlight.setTitle("Trips");
+
+        when(storyHighlightRepository.findById(highlightId)).thenReturn(Optional.of(highlight));
+
+        assertThatThrownBy(() -> storyService.addStoriesToHighlight(
+                ownerUserId,
+                highlightId,
+                new UpdateStoryHighlightStoriesRequest(null, null)
+        ))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((org.springframework.web.server.ResponseStatusException) exception)
+                        .getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST));
+
+        verify(storyHighlightItemRepository, never()).findAllByHighlightIdOrderByPositionAscCreatedAtAsc(any());
+        verify(storyHighlightRepository, never()).save(any(StoryHighlightEntity.class));
+    }
+
+    @Test
     void reactToChannelStoryDoesNotRequireTargetUser() {
         UUID requesterId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();
@@ -491,6 +672,117 @@ class StoryServiceTest {
         assertThat(response.storyId()).isEqualTo(storyId);
         assertThat(response.targetUserId()).isNull();
         assertThat(response.reaction()).isEqualTo("fire");
+    }
+
+    @Test
+    void reactPublishesUnreadCountersForOwner() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID viewerUserId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+        UUID interactionId = UUID.randomUUID();
+
+        StoryEntity story = story(
+                storyId,
+                ownerUserId,
+                Instant.parse("2026-03-19T08:00:00Z"),
+                Instant.parse("2026-03-20T08:00:00Z")
+        );
+        UserEntity owner = user(ownerUserId, "Owner");
+        UserEntity viewer = user(viewerUserId, "Viewer");
+        AtomicReference<StoryInteractionEntity> savedInteraction = new AtomicReference<>();
+
+        when(storyRepository.findByIdAndExpiresAtAfter(eq(storyId), any(Instant.class))).thenReturn(Optional.of(story));
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+        when(userPrivacyService.canViewStory(viewerUserId, owner)).thenReturn(true);
+        when(storyInteractionRepository.findFirstByStoryIdAndActorUserIdAndInteractionType(
+                storyId,
+                viewerUserId,
+                "REACTION"
+        )).thenReturn(Optional.empty());
+        when(storyInteractionRepository.findFirstByStoryIdAndActorUserIdAndInteractionType(
+                storyId,
+                ownerUserId,
+                "REACTION"
+        )).thenReturn(Optional.empty());
+        when(storyInteractionRepository.save(any(StoryInteractionEntity.class))).thenAnswer(invocation -> {
+            StoryInteractionEntity interaction = invocation.getArgument(0);
+            interaction.setId(interactionId);
+            if (interaction.getCreatedAt() == null) {
+                interaction.setCreatedAt(Instant.parse("2026-03-19T09:00:00Z"));
+            }
+            savedInteraction.set(interaction);
+            return interaction;
+        });
+        when(storyInteractionRepository.findAllByStoryIdOrderByCreatedAtDesc(storyId)).thenAnswer(invocation -> {
+            StoryInteractionEntity interaction = savedInteraction.get();
+            return interaction != null ? List.of(interaction) : List.of();
+        });
+        when(userRepository.findAllById(anyCollection())).thenReturn(List.of(owner, viewer));
+        when(storyRepository.findAllByOwnerUserIdAndExpiresAtAfterOrderByCreatedAtDesc(eq(ownerUserId), any(Instant.class)))
+                .thenReturn(List.of(story));
+        when(storyInteractionRepository.countByStoryIdInAndSeenAtIsNull(List.of(storyId))).thenReturn(2L);
+        when(storyInteractionRepository.countByStoryIdAndSeenAtIsNull(storyId)).thenReturn(1L);
+
+        var response = storyService.react(viewerUserId, storyId, new StoryReactionRequest("fire"));
+
+        assertThat(response.storyId()).isEqualTo(storyId);
+        ArgumentCaptor<com.alex.messenger.story.dto.StoryInteractionEventResponse> eventCaptor =
+                ArgumentCaptor.forClass(com.alex.messenger.story.dto.StoryInteractionEventResponse.class);
+        verify(storyInteractionNotificationService).publish(eq(ownerUserId), eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("INTERACTION_UPSERT");
+        assertThat(eventCaptor.getValue().unreadInteractionsCount()).isEqualTo(2);
+        assertThat(eventCaptor.getValue().storyUnreadInteractionsCount()).isEqualTo(1);
+        assertThat(eventCaptor.getValue().summary().reactionsCount()).isEqualTo(1);
+    }
+
+    @Test
+    void listInteractionsMarksSeenAndPublishesSeenEvent() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID actorUserId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+        UUID interactionId = UUID.randomUUID();
+
+        StoryEntity story = story(
+                storyId,
+                ownerUserId,
+                Instant.parse("2026-03-19T08:00:00Z"),
+                Instant.parse("2026-03-20T08:00:00Z")
+        );
+        StoryInteractionEntity interaction = new StoryInteractionEntity();
+        interaction.setId(interactionId);
+        interaction.setStoryId(storyId);
+        interaction.setActorUserId(actorUserId);
+        interaction.setTargetUserId(ownerUserId);
+        interaction.setInteractionType("REPLY");
+        interaction.setMessageText("Reply");
+        interaction.setCreatedAt(Instant.parse("2026-03-19T09:00:00Z"));
+        UserEntity owner = user(ownerUserId, "Owner");
+        UserEntity actor = user(actorUserId, "Actor");
+
+        when(storyRepository.findById(storyId)).thenReturn(Optional.of(story));
+        when(storyInteractionRepository.findAllByStoryIdOrderByCreatedAtDesc(storyId)).thenReturn(List.of(interaction));
+        when(userRepository.findAllById(anyCollection())).thenReturn(List.of(owner, actor));
+        when(storyInteractionRepository.markSeenByStoryId(eq(storyId), any(Instant.class))).thenReturn(1);
+        when(storyInteractionRepository.findFirstByStoryIdAndActorUserIdAndInteractionType(
+                storyId,
+                ownerUserId,
+                "REACTION"
+        )).thenReturn(Optional.empty());
+        when(storyRepository.findAllByOwnerUserIdAndExpiresAtAfterOrderByCreatedAtDesc(eq(ownerUserId), any(Instant.class)))
+                .thenReturn(List.of(story));
+        when(storyInteractionRepository.countByStoryIdInAndSeenAtIsNull(List.of(storyId))).thenReturn(0L);
+        when(storyInteractionRepository.countByStoryIdAndSeenAtIsNull(storyId)).thenReturn(0L);
+
+        var response = storyService.listInteractions(ownerUserId, storyId);
+
+        assertThat(response).hasSize(1);
+        ArgumentCaptor<com.alex.messenger.story.dto.StoryInteractionEventResponse> eventCaptor =
+                ArgumentCaptor.forClass(com.alex.messenger.story.dto.StoryInteractionEventResponse.class);
+        verify(storyInteractionNotificationService).publish(eq(ownerUserId), eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("INTERACTIONS_SEEN");
+        assertThat(eventCaptor.getValue().unreadInteractionsCount()).isZero();
+        assertThat(eventCaptor.getValue().storyUnreadInteractionsCount()).isZero();
+        assertThat(eventCaptor.getValue().summary().repliesCount()).isEqualTo(1);
     }
 
     @Test
@@ -555,6 +847,42 @@ class StoryServiceTest {
     }
 
     @Test
+    void createAlbumRejectsCoverStoryOutsideSelection() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID firstStoryId = UUID.randomUUID();
+        UUID secondStoryId = UUID.randomUUID();
+        UUID coverStoryId = UUID.randomUUID();
+
+        UserEntity owner = user(ownerUserId, "Album owner");
+        StoryEntity firstStory = story(
+                firstStoryId,
+                ownerUserId,
+                Instant.parse("2026-03-12T08:00:00Z"),
+                Instant.parse("2026-03-15T08:00:00Z")
+        );
+        StoryEntity secondStory = story(
+                secondStoryId,
+                ownerUserId,
+                Instant.parse("2026-03-11T08:00:00Z"),
+                Instant.parse("2026-03-11T20:00:00Z")
+        );
+
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+        when(storyRepository.findAllById(any())).thenReturn(List.of(firstStory, secondStory));
+        when(storyAlbumRepository.findAllByOwnerUserIdOrderByPositionAscCreatedAtAsc(ownerUserId)).thenReturn(List.of());
+
+        assertThatThrownBy(() -> storyService.createAlbum(
+                ownerUserId,
+                new CreateStoryAlbumRequest("Spring", coverStoryId, null, List.of(firstStoryId, secondStoryId), null)
+        ))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((org.springframework.web.server.ResponseStatusException) exception)
+                        .getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST));
+
+        verify(storyAlbumRepository, never()).save(any(StoryAlbumEntity.class));
+    }
+
+    @Test
     void goLiveCreatesActiveSessionWithDonationMetadata() {
         UUID ownerUserId = UUID.randomUUID();
         UUID storyId = UUID.randomUUID();
@@ -598,6 +926,36 @@ class StoryServiceTest {
         assertThat(response.donationProvider()).isEqualTo("STARS");
         assertThat(response.donationCurrency()).isEqualTo("XTR");
         assertThat(response.donationEventHookUrl()).isEqualTo("https://hooks.example/story-live");
+    }
+
+    @Test
+    void goLiveRejectsEnabledDonationsWithoutCurrency() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+
+        StoryEntity story = story(
+                storyId,
+                ownerUserId,
+                Instant.parse("2026-03-19T08:00:00Z"),
+                Instant.parse("2026-03-20T08:00:00Z")
+        );
+
+        when(storyRepository.findById(storyId)).thenReturn(Optional.of(story));
+        when(storyLiveSessionRepository.findFirstByStoryIdAndStatusOrderByStartedAtDesc(storyId, "ACTIVE"))
+                .thenReturn(Optional.empty());
+
+        var exception = catchThrowableOfType(
+                () -> storyService.goLive(
+                        ownerUserId,
+                        storyId,
+                        new GoLiveStoryRequest(true, "stars", null, "https://hooks.example/story-live")
+                ),
+                org.springframework.web.server.ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST);
+        verify(storyLiveSessionRepository, never()).save(any(StoryLiveSessionEntity.class));
     }
 
     @Test
@@ -653,6 +1011,46 @@ class StoryServiceTest {
         assertThat(response.donationCurrency()).isEqualTo("XTR");
         assertThat(session.getDonationEventsCount()).isEqualTo(1L);
         assertThat(session.getDonationsTotalMinor()).isEqualTo(50L);
+    }
+
+    @Test
+    void commentLiveRejectsEmptyPayload() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+
+        StoryEntity story = story(
+                storyId,
+                ownerUserId,
+                Instant.parse("2026-03-19T08:00:00Z"),
+                Instant.parse("2026-03-20T08:00:00Z")
+        );
+        UserEntity owner = user(ownerUserId, "Live owner");
+
+        StoryLiveSessionEntity session = new StoryLiveSessionEntity();
+        session.setId(UUID.randomUUID());
+        session.setStoryId(storyId);
+        session.setOwnerUserId(ownerUserId);
+        session.setStatus("ACTIVE");
+        session.setDonationsEnabled(true);
+        session.setDonationCurrency("XTR");
+
+        when(storyRepository.findByIdAndExpiresAtAfter(eq(storyId), any(Instant.class))).thenReturn(Optional.of(story));
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+        when(storyLiveSessionRepository.findFirstByStoryIdAndStatusOrderByStartedAtDesc(storyId, "ACTIVE"))
+                .thenReturn(Optional.of(session));
+
+        var exception = catchThrowableOfType(
+                () -> storyService.commentLive(
+                        ownerUserId,
+                        storyId,
+                        new CreateStoryLiveCommentRequest("   ", null, null)
+                ),
+                org.springframework.web.server.ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST);
+        verify(storyLiveCommentRepository, never()).save(any(StoryLiveCommentEntity.class));
     }
 
     @Test

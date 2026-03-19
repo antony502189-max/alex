@@ -111,6 +111,44 @@ class ChecklistServiceTest {
     }
 
     @Test
+    void createChecklistRejectsMissingRequest() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> checklistService.createChecklist(UUID.randomUUID(), null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Checklist payload is required");
+    }
+
+    @Test
+    void createChecklistRejectsNullTaskEntry() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        ChatEntity chat = chat(chatId, "GROUP");
+
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(checklistRepository.save(any(ChecklistEntity.class))).thenAnswer(invocation -> {
+            ChecklistEntity checklist = invocation.getArgument(0);
+            checklist.setId(UUID.randomUUID());
+            return checklist;
+        });
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> checklistService.createChecklist(
+                        requesterId,
+                        new CreateChecklistRequest(chatId, null, "Checklist", null, java.util.Arrays.asList((CreateChecklistTaskRequest) null))
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Checklist tasks must not contain null");
+    }
+
+    @Test
     void updateTaskCompletesAndReordersTask() {
         UUID requesterId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();

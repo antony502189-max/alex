@@ -64,6 +64,9 @@ public class BusinessService {
 
     @Transactional
     public BusinessProfileResponse updateProfile(UUID requesterId, UpdateBusinessProfileRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Business profile payload is required");
+        }
         requireUser(requesterId);
         BusinessProfileEntity profile = getOrCreateProfile(requesterId);
         if (request.greetingEnabled() != null) {
@@ -147,12 +150,18 @@ public class BusinessService {
             UUID chatId,
             ReplaceBusinessChatTagsRequest request
     ) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Business chat tags payload is required");
+        }
         chatService.getOwnedChat(requesterId, chatId);
         List<BusinessChatTagPayload> tags = request.tags() == null ? List.of() : request.tags();
         Set<String> uniqueNames = new LinkedHashSet<>();
         List<BusinessChatTagEntity> entities = new ArrayList<>();
         for (int index = 0; index < tags.size(); index++) {
             BusinessChatTagPayload tag = tags.get(index);
+            if (tag == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Business chat tags must not contain null");
+            }
             String normalizedName = normalizeTagName(tag.tagName());
             if (!uniqueNames.add(normalizedName.toLowerCase(Locale.ROOT))) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Duplicate business chat tag");
@@ -332,8 +341,10 @@ public class BusinessService {
     }
 
     private String serializeBusinessHours(List<BusinessHourSlotPayload> slots) {
+        if (slots.stream().anyMatch(slot -> slot == null)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Business hours must not contain null");
+        }
         List<BusinessHourSlotPayload> normalized = slots.stream()
-                .filter(slot -> slot != null)
                 .map(this::normalizeBusinessHourSlot)
                 .toList();
         try {

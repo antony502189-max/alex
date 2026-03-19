@@ -2,6 +2,7 @@ package com.alex.messenger.auth.dto;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.PositiveOrZero;
 import jakarta.validation.constraints.Size;
 import java.util.UUID;
 
@@ -12,6 +13,6 @@ public record VerifyPasskeyRegistrationRequest(
         @NotBlank @Size(max = 8192) String publicKey,
         @Size(max = 255) String transports,
         @Size(max = 120) String label,
-        Long signCount
+        @PositiveOrZero Long signCount
 ) {
 }

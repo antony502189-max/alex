@@ -65,7 +65,7 @@ alex:
       max-attempts: ${ALEX_AUTH_CODE_MAX_ATTEMPTS:5}
       max-requests-per-window: ${ALEX_AUTH_CODE_MAX_REQUESTS_PER_WINDOW:3}
       request-window: ${ALEX_AUTH_CODE_REQUEST_WINDOW:PT10M}
-      expose-debug-code: ${ALEX_AUTH_CODE_EXPOSE_DEBUG_CODE:true}
+      expose-debug-code: ${ALEX_AUTH_CODE_EXPOSE_DEBUG_CODE:false}
     refresh:
       ttl: ${ALEX_AUTH_REFRESH_TTL:P30D}
     cleanup:
@@ -118,8 +118,8 @@ alex:
     secret-chats: ${ALEX_FEATURE_SECRET_CHATS_ENABLED:true}
     admin-compliance: ${ALEX_FEATURE_ADMIN_COMPLIANCE_ENABLED:true}
     lawful-direct-export: ${ALEX_FEATURE_LAWFUL_DIRECT_EXPORT_ENABLED:false}
-    group-calls: ${ALEX_FEATURE_GROUP_CALLS_ENABLED:false}
-    story-interactions: ${ALEX_FEATURE_STORY_INTERACTIONS_ENABLED:false}
+    group-calls: ${ALEX_FEATURE_GROUP_CALLS_ENABLED:true}
+    story-interactions: ${ALEX_FEATURE_STORY_INTERACTIONS_ENABLED:true}
     bot-api-full: ${ALEX_FEATURE_BOT_API_FULL_ENABLED:false}
     business: ${ALEX_FEATURE_BUSINESS_ENABLED:false}
     payments: ${ALEX_FEATURE_PAYMENTS_ENABLED:false}
@@ -167,6 +167,10 @@ alex:
       dispatch-interval-ms: ${ALEX_MONETIZATION_ALERT_TRIAGE_REMINDERS_DISPATCH_INTERVAL_MS:60000}
       batch-size: ${ALEX_MONETIZATION_ALERT_TRIAGE_REMINDERS_BATCH_SIZE:20}
   calls:
+    lifecycle:
+      ring-timeout: ${ALEX_CALLS_RING_TIMEOUT:PT45S}
+      ring-timeout-batch-size: ${ALEX_CALLS_RING_TIMEOUT_BATCH_SIZE:100}
+      ring-timeout-dispatch-interval-ms: ${ALEX_CALLS_RING_TIMEOUT_DISPATCH_INTERVAL_MS:10000}
     rtc:
       ice-servers:
         - url: ${ALEX_CALLS_STUN_URL:stun:stun.l.google.com:19302}

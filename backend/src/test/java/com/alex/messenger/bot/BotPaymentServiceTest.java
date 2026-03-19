@@ -1,6 +1,7 @@
 package com.alex.messenger.bot;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -36,6 +37,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class BotPaymentServiceTest {
@@ -160,6 +163,141 @@ class BotPaymentServiceTest {
         verify(botMessageActionRepository).save(actionCaptor.capture());
         assertThat(actionCaptor.getValue().getActionType()).isEqualTo("PAY");
         assertThat(actionCaptor.getValue().getPaymentInvoiceId()).isEqualTo(paymentInvoiceId);
+    }
+
+    @Test
+    void sendInvoiceRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(new BotAccountEntity()));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botPaymentService.sendInvoice(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Bot invoice payload is required");
+    }
+
+    @Test
+    void sendInvoiceRejectsPastExpiry() {
+        UUID botUserId = UUID.randomUUID();
+        UUID payerUserId = UUID.randomUUID();
+
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(new BotAccountEntity()));
+        when(userRepository.findById(payerUserId)).thenReturn(Optional.of(user(payerUserId, false)));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botPaymentService.sendInvoice(
+                        botUserId,
+                        new BotApiSendInvoiceRequest(
+                                null,
+                                payerUserId,
+                                "Invoice",
+                                "Desc",
+                                50L,
+                                Instant.parse("2000-01-01T00:00:00Z"),
+                                "payload",
+                                "Pay now",
+                                null,
+                                Map.of(),
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                null,
+                                List.of(),
+                                List.of()
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Invoice expiry must be in the future");
+    }
+
+    @Test
+    void sendInvoiceRejectsSuggestedTipsWithoutMaxTip() {
+        UUID botUserId = UUID.randomUUID();
+        UUID payerUserId = UUID.randomUUID();
+
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(new BotAccountEntity()));
+        when(userRepository.findById(payerUserId)).thenReturn(Optional.of(user(payerUserId, false)));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botPaymentService.sendInvoice(
+                        botUserId,
+                        new BotApiSendInvoiceRequest(
+                                null,
+                                payerUserId,
+                                "Invoice",
+                                "Desc",
+                                50L,
+                                null,
+                                "payload",
+                                "Pay now",
+                                null,
+                                Map.of(),
+                                false,
+                                false,
+                                false,
+                                false,
+                                false,
+                                null,
+                                List.of(3L),
+                                List.of()
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Suggested tip amounts require max tip amount");
+    }
+
+    @Test
+    void sendInvoiceRejectsFlexibleWithoutShippingAddress() {
+        UUID botUserId = UUID.randomUUID();
+        UUID payerUserId = UUID.randomUUID();
+
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(new BotAccountEntity()));
+        when(userRepository.findById(payerUserId)).thenReturn(Optional.of(user(payerUserId, false)));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botPaymentService.sendInvoice(
+                        botUserId,
+                        new BotApiSendInvoiceRequest(
+                                null,
+                                payerUserId,
+                                "Invoice",
+                                "Desc",
+                                50L,
+                                null,
+                                "payload",
+                                "Pay now",
+                                null,
+                                Map.of(),
+                                false,
+                                false,
+                                false,
+                                false,
+                                true,
+                                null,
+                                List.of(),
+                                List.of(new BotPaymentShippingOptionPayload("standard", "Standard", 0L))
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Flexible invoices require shipping address");
     }
 
     @Test
@@ -288,6 +426,49 @@ class BotPaymentServiceTest {
     }
 
     @Test
+    void completePreCheckoutRejectsNegativeTipAmount() {
+        UUID requesterId = UUID.randomUUID();
+        UUID botUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        UUID paymentInvoiceId = UUID.randomUUID();
+        UUID preCheckoutQueryId = UUID.randomUUID();
+
+        BotPreCheckoutQueryEntity query = new BotPreCheckoutQueryEntity();
+        query.setId(preCheckoutQueryId);
+        query.setBotUserId(botUserId);
+        query.setChatId(chatId);
+        query.setMessageId(messageId);
+        query.setPaymentInvoiceId(paymentInvoiceId);
+        query.setFromUserId(requesterId);
+        query.setStatus("APPROVED");
+
+        when(botPreCheckoutQueryRepository.findByIdAndFromUserId(preCheckoutQueryId, requesterId)).thenReturn(Optional.of(query));
+        when(botPaymentInvoiceRepository.findById(paymentInvoiceId))
+                .thenReturn(Optional.of(botInvoice(paymentInvoiceId, botUserId, chatId, messageId, requesterId)));
+        when(paymentInvoiceRepository.findById(paymentInvoiceId)).thenReturn(Optional.of(invoice(paymentInvoiceId, botUserId)));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botPaymentService.completePreCheckout(
+                        requesterId,
+                        preCheckoutQueryId,
+                        new CompleteBotPreCheckoutRequest(
+                                "Alex",
+                                null,
+                                "payer@example.com",
+                                new BotPaymentShippingAddressPayload("BY", null, "Minsk", "Lenina 1", null, "220000"),
+                                "standard",
+                                -1L
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
     void answerPreCheckoutMarksQueryApproved() {
         UUID botUserId = UUID.randomUUID();
         UUID paymentInvoiceId = UUID.randomUUID();
@@ -318,6 +499,39 @@ class BotPaymentServiceTest {
         assertThat(response.status()).isEqualTo("APPROVED");
         assertThat(response.answerText()).isEqualTo("ok");
         assertThat(response.shippingOptions()).hasSize(1);
+    }
+
+    @Test
+    void answerPreCheckoutRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(new BotAccountEntity()));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botPaymentService.answerPreCheckoutQuery(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Pre-checkout answer payload is required");
+    }
+
+    @Test
+    void answerPreCheckoutRejectsDeclineWithoutText() {
+        UUID botUserId = UUID.randomUUID();
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(new BotAccountEntity()));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botPaymentService.answerPreCheckoutQuery(
+                        botUserId,
+                        new BotApiAnswerPreCheckoutQueryRequest(UUID.randomUUID(), false, "   ")
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Declined pre-checkout queries require text");
     }
 
     @Test
@@ -382,6 +596,21 @@ class BotPaymentServiceTest {
         assertThat(response.receiptId()).isEqualTo(receiptId);
         assertThat(response.refundedAt()).isEqualTo(Instant.parse("2026-03-14T12:04:00Z"));
         verify(botUpdateRepository).save(any(BotUpdateEntity.class));
+    }
+
+    @Test
+    void refundPaymentRejectsMissingRequest() {
+        UUID botUserId = UUID.randomUUID();
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(new BotAccountEntity()));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botPaymentService.refundPayment(botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Refund payload is required");
     }
 
     private UserEntity user(UUID userId, boolean bot) {

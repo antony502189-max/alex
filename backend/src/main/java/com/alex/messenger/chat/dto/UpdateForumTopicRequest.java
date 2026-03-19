@@ -1,5 +1,7 @@
 package com.alex.messenger.chat.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.Size;
 
 public record UpdateForumTopicRequest(
@@ -8,4 +10,12 @@ public record UpdateForumTopicRequest(
         Boolean closed,
         Boolean hidden
 ) {
+    @JsonIgnore
+    @AssertTrue(message = "Provide title, iconEmoji, closed or hidden")
+    public boolean hasUpdate() {
+        return (title != null && !title.isBlank())
+                || iconEmoji != null
+                || closed != null
+                || hidden != null;
+    }
 }

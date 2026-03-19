@@ -16,7 +16,6 @@ public record CreateChecklistRequest(
         String title,
         @Size(max = 1000)
         String description,
-        @Valid
-        List<CreateChecklistTaskRequest> tasks
+        List<@NotNull @Valid CreateChecklistTaskRequest> tasks
 ) {
 }

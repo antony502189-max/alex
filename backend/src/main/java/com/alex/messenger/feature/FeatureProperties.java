@@ -15,8 +15,8 @@ public class FeatureProperties {
     private boolean secretChats = true;
     private boolean adminCompliance = true;
     private boolean lawfulDirectExport = false;
-    private boolean groupCalls = false;
-    private boolean storyInteractions = false;
+    private boolean groupCalls = true;
+    private boolean storyInteractions = true;
     private boolean botApiFull = false;
     private boolean business = false;
     private boolean payments = false;

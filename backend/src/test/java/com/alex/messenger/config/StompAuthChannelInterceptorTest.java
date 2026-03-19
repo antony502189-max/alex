@@ -108,6 +108,54 @@ class StompAuthChannelInterceptorTest {
         assertThat(result).isNotNull();
     }
 
+    @Test
+    void subscribeAllowsAuthenticatedStoryEventsQueue() {
+        UUID userId = UUID.randomUUID();
+
+        Message<?> result = interceptor.preSend(
+                subscribeMessage(userId, "/user/queue/story-events"),
+                null
+        );
+
+        assertThat(result).isNotNull();
+    }
+
+    @Test
+    void subscribeAllowsAuthenticatedCallsQueue() {
+        UUID userId = UUID.randomUUID();
+
+        Message<?> result = interceptor.preSend(
+                subscribeMessage(userId, "/user/queue/calls"),
+                null
+        );
+
+        assertThat(result).isNotNull();
+    }
+
+    @Test
+    void subscribeAllowsAuthenticatedSecretChatsQueue() {
+        UUID userId = UUID.randomUUID();
+
+        Message<?> result = interceptor.preSend(
+                subscribeMessage(userId, "/user/queue/secret-chats"),
+                null
+        );
+
+        assertThat(result).isNotNull();
+    }
+
+    @Test
+    void subscribeRejectsUnknownUserQueue() {
+        UUID userId = UUID.randomUUID();
+
+        Message<?> result = interceptor.preSend(
+                subscribeMessage(userId, "/user/queue/internal-audit"),
+                null
+        );
+
+        assertThat(result).isNull();
+    }
+
     private Message<byte[]> subscribeMessage(UUID userId, String destination) {
         StompHeaderAccessor accessor = StompHeaderAccessor.create(StompCommand.SUBSCRIBE);
         accessor.setDestination(destination);

@@ -112,9 +112,9 @@ public class BotUpdateService {
             );
         }
 
-        long normalizedOffset = offset != null ? Math.max(0L, offset) : 0L;
-        int normalizedLimit = Math.max(1, Math.min(limit != null ? limit : 20, Math.max(1, maxLongPollLimit)));
-        int normalizedTimeout = Math.max(0, Math.min(timeoutSeconds != null ? timeoutSeconds : 0, Math.max(1, maxLongPollTimeoutSeconds)));
+        long normalizedOffset = normalizeOffset(offset);
+        int normalizedLimit = normalizeLimit(limit);
+        int normalizedTimeout = normalizeTimeout(timeoutSeconds);
         Instant deadline = Instant.now().plusSeconds(normalizedTimeout);
 
         List<BotUpdateEntity> updates = List.of();
@@ -142,13 +142,14 @@ public class BotUpdateService {
     }
 
     public void deliverWebhookUpdate(BotUpdateEntity update) {
-        BotAccountEntity account = requireBotAccount(update.getBotUserId());
         Instant attemptedAt = Instant.now();
+        BotAccountEntity account = null;
 
         update.setLastDeliveryAttemptAt(attemptedAt);
         update.setDeliveryAttempts(update.getDeliveryAttempts() + 1);
 
         try {
+            account = requireBotAccount(update.getBotUserId());
             BotUpdateResponse payload = toUpdateResponse(update);
             byte[] serializedPayload = objectMapper.writeValueAsBytes(payload);
             HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
@@ -175,12 +176,16 @@ public class BotUpdateService {
                 account.setLastWebhookError(error);
             }
         } catch (Exception exception) {
-            String error = truncateError(exception.getMessage() != null ? exception.getMessage() : exception.getClass().getSimpleName());
+            String error = truncateError(resolveDeliveryError(exception));
             update.setLastError(error);
-            account.setLastWebhookError(error);
+            if (account != null) {
+                account.setLastWebhookError(error);
+            }
         }
 
-        botAccountRepository.save(account);
+        if (account != null) {
+            botAccountRepository.save(account);
+        }
         botUpdateRepository.save(update);
     }
 
@@ -380,11 +385,58 @@ public class BotUpdateService {
         }
     }
 
+    private long normalizeOffset(Long value) {
+        if (value == null) {
+            return 0L;
+        }
+        if (value < 0L) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "offset must be non-negative");
+        }
+        return value;
+    }
+
+    private int normalizeLimit(Integer value) {
+        int maxAllowed = Math.max(1, maxLongPollLimit);
+        if (value == null) {
+            return Math.min(20, maxAllowed);
+        }
+        if (value < 1 || value > maxAllowed) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "limit must be between 1 and " + maxAllowed
+            );
+        }
+        return value;
+    }
+
+    private int normalizeTimeout(Integer value) {
+        int maxAllowed = Math.max(0, maxLongPollTimeoutSeconds);
+        if (value == null) {
+            return 0;
+        }
+        if (value < 0 || value > maxAllowed) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "timeoutSeconds must be between 0 and " + maxAllowed
+            );
+        }
+        return value;
+    }
+
     private String truncateError(String value) {
         if (value == null || value.isBlank()) {
             return "Webhook delivery failed";
         }
         String normalized = value.trim();
         return normalized.length() > 255 ? normalized.substring(0, 255) : normalized;
+    }
+
+    private String resolveDeliveryError(Exception exception) {
+        if (exception instanceof ResponseStatusException responseStatusException
+                && responseStatusException.getReason() != null
+                && !responseStatusException.getReason().isBlank()) {
+            return responseStatusException.getReason();
+        }
+        return exception.getMessage() != null ? exception.getMessage() : exception.getClass().getSimpleName();
     }
 }

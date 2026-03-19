@@ -18,10 +18,12 @@ import com.alex.messenger.bot.dto.ResolveBotWebAppRequest;
 import com.alex.messenger.bot.dto.SendBotWebAppDataRequest;
 import com.alex.messenger.feature.FeatureFlagService;
 import com.alex.messenger.shared.CurrentUser;
+import com.alex.messenger.shared.SearchQueryValidationSupport;
 import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -29,6 +31,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/bots")
@@ -59,6 +62,7 @@ public class BotController {
             @org.springframework.web.bind.annotation.RequestParam(required = false) String query
     ) {
         featureFlagService.requireBotsEnabled();
+        SearchQueryValidationSupport.normalizeOptional(query);
         return ResponseEntity.ok(botService.getInlineResults(username, query));
     }
 
@@ -85,7 +89,7 @@ public class BotController {
     ) {
         featureFlagService.requireBotsEnabled();
         return ResponseEntity.ok(
-                botWebAppService.createLaunch(CurrentUser.id(), botUserId, chatId, startParameter)
+                botWebAppService.createLaunch(CurrentUser.id(), botUserId, chatId, validateStartParameter(startParameter))
         );
     }
 
@@ -142,5 +146,19 @@ public class BotController {
         featureFlagService.requireBotsEnabled();
         featureFlagService.requirePaymentsEnabled();
         return ResponseEntity.ok(botPaymentService.completePreCheckout(CurrentUser.id(), preCheckoutQueryId, request));
+    }
+
+    private String validateStartParameter(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        if (normalized.isBlank()) {
+            return null;
+        }
+        if (normalized.length() > 128 || !normalized.matches("[A-Za-z0-9_\\-]+")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid mini app start parameter");
+        }
+        return normalized;
     }
 }

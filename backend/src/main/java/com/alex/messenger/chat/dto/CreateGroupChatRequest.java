@@ -2,6 +2,7 @@ package com.alex.messenger.chat.dto;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 import java.util.List;
@@ -13,6 +14,6 @@ public record CreateGroupChatRequest(
         @Positive Integer autoDeleteSeconds,
         Boolean forumEnabled,
         Boolean joinRequiresApproval,
-        @NotEmpty List<UUID> memberIds
+        @NotEmpty List<@NotNull UUID> memberIds
 ) {
 }

@@ -1028,6 +1028,32 @@ class MonetizationServiceTest {
     }
 
     @Test
+    void reconcileProviderStatusesRejectsMissingRequest() {
+        assertThatThrownBy(() -> monetizationService.reconcileProviderStatuses(UUID.randomUUID(), null))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception ->
+                        assertThat(exception.getReason()).isEqualTo("Provider reconciliation payload is required")
+                );
+    }
+
+    @Test
+    void reconcileProviderStatusesRejectsNullUpdateEntry() {
+        UUID chatId = UUID.randomUUID();
+        when(chatService.getChat(chatId)).thenReturn(channel(chatId, UUID.randomUUID()));
+
+        assertThatThrownBy(() -> monetizationService.reconcileProviderStatuses(
+                chatId,
+                new MonetizationProviderReconciliationRequest(
+                        java.util.Arrays.asList((MonetizationProviderStatusUpdateRequest) null),
+                        null,
+                        null
+                )
+        ))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception ->
+                        assertThat(exception.getReason()).isEqualTo("Provider reconciliation updates must not contain null")
+                );
+    }
+
+    @Test
     void publishArtifactSendsSummaryMessageAndStoresPublication() {
         UUID requesterId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();

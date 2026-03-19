@@ -1,6 +1,7 @@
 package com.alex.messenger.bot;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
@@ -22,6 +23,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class BotMessageActionServiceTest {
@@ -91,6 +94,52 @@ class BotMessageActionServiceTest {
         assertThat(response.get(0).callbackData()).isEqualTo("payload");
         assertThat(response.get(1).actionType()).isEqualTo("WEB_APP");
         assertThat(response.get(1).webAppStartParameter()).isEqualTo("start");
+    }
+
+    @Test
+    void saveMessageActionsRejectsUnsupportedActionType() {
+        UUID botUserId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        UserEntity bot = bot(botUserId, "https://example.com/app");
+
+        when(messageService.getMessage(botUserId, messageId)).thenReturn(botMessage(messageId, botUserId, null));
+        when(userRepository.findByIdAndBotTrue(botUserId)).thenReturn(Optional.of(bot));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botMessageActionService.saveMessageActions(
+                        botUserId,
+                        messageId,
+                        List.of(new BotApiMessageActionRequest("PAY", "Pay", null, null, null))
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Unsupported bot message action type");
+    }
+
+    @Test
+    void saveMessageActionsRejectsInvalidUrlAction() {
+        UUID botUserId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        UserEntity bot = bot(botUserId, "https://example.com/app");
+
+        when(messageService.getMessage(botUserId, messageId)).thenReturn(botMessage(messageId, botUserId, null));
+        when(userRepository.findByIdAndBotTrue(botUserId)).thenReturn(Optional.of(bot));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> botMessageActionService.saveMessageActions(
+                        botUserId,
+                        messageId,
+                        List.of(new BotApiMessageActionRequest("URL", "Open", null, "ftp://example.com", null))
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Bot action URL must be a valid http(s) URL");
     }
 
     @Test

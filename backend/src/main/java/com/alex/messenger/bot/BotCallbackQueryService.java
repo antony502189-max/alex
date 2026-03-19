@@ -47,6 +47,9 @@ public class BotCallbackQueryService {
 
     @Transactional
     public BotCallbackQueryResponse answerCallbackQuery(UUID botUserId, BotApiAnswerCallbackQueryRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Callback answer payload is required");
+        }
         BotCallbackQueryEntity callbackQuery = botCallbackQueryRepository.findByIdAndBotUserId(
                         request.callbackQueryId(),
                         botUserId

@@ -1,6 +1,7 @@
 package com.alex.messenger.auth;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.when;
@@ -23,6 +24,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class PasskeyServiceTest {
@@ -119,6 +122,57 @@ class PasskeyServiceTest {
         assertThat(credential.getLastUsedAt()).isNotNull();
         assertThat(challenge.getConsumedAt()).isNotNull();
         assertThat(user.getLastSeenAt()).isNotNull();
+    }
+
+    @Test
+    void verifyLoginRejectsNegativeSignCount() {
+        UUID userId = UUID.randomUUID();
+        UUID challengeId = UUID.randomUUID();
+        String rawChallenge = "login-passkey-challenge";
+
+        UserEntity user = new UserEntity();
+        user.setId(userId);
+        user.setPhoneNumber("+375291234567");
+        user.setDisplayName("Alex");
+
+        PasskeyChallengeEntity challenge = new PasskeyChallengeEntity();
+        challenge.setId(challengeId);
+        challenge.setUserId(userId);
+        challenge.setFlowType("LOGIN");
+        challenge.setChallengeHash(hash(rawChallenge));
+        challenge.setExpiresAt(Instant.now().plusSeconds(300));
+
+        PasskeyCredentialEntity credential = new PasskeyCredentialEntity();
+        credential.setId(UUID.randomUUID());
+        credential.setUserId(userId);
+        credential.setCredentialId("credential-1");
+        credential.setPublicKey("public-key");
+        credential.setSignCount(3L);
+
+        when(passkeyChallengeRepository.findByIdAndConsumedAtIsNull(challengeId)).thenReturn(Optional.of(challenge));
+        when(passkeyCredentialRepository.findByCredentialIdAndRevokedAtIsNull("credential-1"))
+                .thenReturn(Optional.of(credential));
+        when(userRepository.findById(userId)).thenReturn(Optional.of(user));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> passkeyService.verifyLogin(
+                        new VerifyPasskeyLoginRequest(
+                                challengeId,
+                                rawChallenge,
+                                "credential-1",
+                                -1L,
+                                "Pixel 10",
+                                "android",
+                                "1.0.0"
+                        ),
+                        "127.0.0.1",
+                        "JUnit"
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     private String hash(String value) {

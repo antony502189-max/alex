@@ -63,6 +63,9 @@ public class DeveloperBotService {
 
     @Transactional
     public IssuedBotTokenResponse createBot(UUID ownerUserId, CreateDeveloperBotRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Bot payload is required");
+        }
         UserEntity owner = requireUser(ownerUserId);
         String apiToken = generateBotApiToken();
 
@@ -103,6 +106,15 @@ public class DeveloperBotService {
     public DeveloperBotResponse updateBot(UUID ownerUserId, UUID botUserId, UpdateDeveloperBotRequest request) {
         ManagedBot managedBot = requireOwnedBot(ownerUserId, botUserId);
         UserEntity bot = managedBot.bot();
+        if (request == null
+                || (request.displayName() == null
+                && request.username() == null
+                && request.description() == null
+                && request.about() == null
+                && request.supportsInline() == null
+                && request.webAppUrl() == null)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "At least one bot field must be provided");
+        }
 
         if (request.displayName() != null) {
             bot.setDisplayName(normalizeRequired(request.displayName(), "Display name", 120));
@@ -198,6 +210,9 @@ public class DeveloperBotService {
     }
 
     private BotAccountEntity updateWebhookInternal(BotAccountEntity account, UpdateBotWebhookRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Webhook payload is required");
+        }
         String webhookUrl = normalizeHttpUrl(request.webhookUrl(), "Webhook URL");
         if (webhookUrl == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Webhook URL is required");

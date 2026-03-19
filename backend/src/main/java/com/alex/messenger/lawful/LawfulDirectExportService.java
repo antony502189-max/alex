@@ -104,6 +104,7 @@ public class LawfulDirectExportService {
                 message.caption(),
                 message.silent(),
                 message.location(),
+                message.liveLocation(),
                 message.contactCard(),
                 message.serviceMessage(),
                 message.createdAt(),

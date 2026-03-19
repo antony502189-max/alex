@@ -1,5 +1,7 @@
 package com.alex.messenger.message.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
@@ -22,4 +24,10 @@ public record CreatePollMessageRequest(
         Instant closeAt,
         UUID clientMessageId
 ) {
+
+    @JsonIgnore
+    @AssertTrue(message = "chatId or recipientUserId is required")
+    public boolean isTargetSpecified() {
+        return MessageRequestValidationSupport.hasTarget(chatId, recipientUserId);
+    }
 }

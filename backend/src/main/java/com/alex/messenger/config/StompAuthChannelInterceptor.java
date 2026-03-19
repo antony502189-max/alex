@@ -74,6 +74,9 @@ public class StompAuthChannelInterceptor implements ChannelInterceptor {
             return null;
         }
         if (destination.startsWith("/user/queue/")) {
+            if (!StompUserQueueDestinationPolicy.isAllowed(destination)) {
+                return null;
+            }
             return message;
         }
 

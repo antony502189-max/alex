@@ -6,14 +6,17 @@ import com.alex.messenger.message.MessageService;
 import com.alex.messenger.message.dto.ChatMessageResponse;
 import com.alex.messenger.search.dto.GlobalMessageSearchResult;
 import com.alex.messenger.search.dto.GlobalSearchResponse;
+import com.alex.messenger.shared.SearchQueryValidationSupport;
 import com.alex.messenger.user.UserService;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 @Service
 @RequiredArgsConstructor
@@ -25,12 +28,12 @@ public class GlobalSearchService {
 
     @Transactional(readOnly = true)
     public GlobalSearchResponse search(UUID requesterId, String query, int limit) {
-        String normalizedQuery = query.trim();
+        String normalizedQuery = SearchQueryValidationSupport.normalize(query);
         if (normalizedQuery.isBlank()) {
             return new GlobalSearchResponse(query, List.of(), List.of(), List.of());
         }
 
-        int normalizedLimit = Math.min(Math.max(limit, 1), 20);
+        int normalizedLimit = requireLimit(limit, 20);
         List<ChatSummaryResponse> allChats = chatService.listAllChats(requesterId);
         Map<UUID, ChatSummaryResponse> chatsById = new LinkedHashMap<>();
         for (ChatSummaryResponse chat : allChats) {
@@ -71,5 +74,12 @@ public class GlobalSearchService {
 
     private boolean containsIgnoreCase(String value, String normalizedQuery) {
         return value != null && value.toLowerCase().contains(normalizedQuery);
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be between 1 and " + max);
+        }
+        return limit;
     }
 }

@@ -7,6 +7,6 @@ import java.util.UUID;
 
 public record VerifyLoginCodeRequest(
         @NotNull UUID challengeId,
-        @NotBlank @Size(max = 16) String code
+        @NotBlank @Size(min = 4, max = 16) String code
 ) {
 }

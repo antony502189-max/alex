@@ -29,6 +29,7 @@ import com.alex.messenger.shared.CurrentUser;
 import jakarta.validation.Valid;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -36,6 +37,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/bot-api")
@@ -78,7 +80,12 @@ public class BotApiController {
             @RequestParam(required = false) Integer timeoutSeconds
     ) {
         featureFlagService.requireBotsEnabled();
-        return ResponseEntity.ok(botUpdateService.getUpdates(CurrentUser.id(), offset, limit, timeoutSeconds));
+        return ResponseEntity.ok(botUpdateService.getUpdates(
+                CurrentUser.id(),
+                requireOffset(offset),
+                requireLimit(limit),
+                requireTimeout(timeoutSeconds)
+        ));
     }
 
     @PostMapping("/send-message")
@@ -249,5 +256,35 @@ public class BotApiController {
         featureFlagService.requireBotApiFullEnabled();
         featureFlagService.requirePaymentsEnabled();
         return ResponseEntity.ok(botApiService.refundPayment(CurrentUser.id(), request));
+    }
+
+    private Long requireOffset(Long offset) {
+        if (offset == null) {
+            return null;
+        }
+        if (offset < 0L) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "offset must be non-negative");
+        }
+        return offset;
+    }
+
+    private Integer requireLimit(Integer limit) {
+        if (limit == null) {
+            return null;
+        }
+        if (limit < 1) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be at least 1");
+        }
+        return limit;
+    }
+
+    private Integer requireTimeout(Integer timeoutSeconds) {
+        if (timeoutSeconds == null) {
+            return null;
+        }
+        if (timeoutSeconds < 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "timeoutSeconds must be non-negative");
+        }
+        return timeoutSeconds;
     }
 }

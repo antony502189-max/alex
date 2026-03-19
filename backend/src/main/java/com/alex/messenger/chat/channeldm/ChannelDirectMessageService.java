@@ -138,8 +138,8 @@ public class ChannelDirectMessageService {
 
     @Transactional
     public List<ChannelDirectMessageResponse> listDirectMessages(UUID requesterId, UUID channelChatId, int limit) {
+        int normalizedLimit = requireLimit(limit, 100);
         ChannelAccess access = resolveChannelAccess(requesterId, channelChatId, true);
-        int normalizedLimit = Math.min(Math.max(limit, 1), 100);
         UUID participantFilter = access.moderator() ? null : requesterId;
 
         List<ChannelDirectMessageChatEntity> links = channelDirectMessageChatRepository.findVisible(
@@ -187,8 +187,8 @@ public class ChannelDirectMessageService {
             UUID channelChatId,
             int limit
     ) {
+        int normalizedLimit = requireLimit(limit, 100);
         ChannelAccess access = resolveChannelAccess(requesterId, channelChatId, true);
-        int normalizedLimit = Math.min(Math.max(limit, 1), 100);
         UUID participantFilter = access.moderator() ? null : requesterId;
 
         List<ChannelDirectMessageTopicEntity> topics = channelDirectMessageTopicRepository.findVisible(
@@ -261,7 +261,7 @@ public class ChannelDirectMessageService {
             return requesterId;
         }
 
-        UUID participantUserId = requestedParticipantUserId != null ? requestedParticipantUserId() : requesterId;
+        UUID participantUserId = requestedParticipantUserId != null ? requestedParticipantUserId : requesterId;
         if (participantUserId.equals(access.ownerUserId())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Channel owner cannot open a direct message with themselves");
         }
@@ -481,5 +481,12 @@ public class ChannelDirectMessageService {
             return value;
         }
         return value.substring(0, maxLength);
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be between 1 and " + max);
+        }
+        return limit;
     }
 }

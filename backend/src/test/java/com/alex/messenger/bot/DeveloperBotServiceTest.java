@@ -87,22 +87,80 @@ class DeveloperBotServiceTest {
     }
 
     @Test
+    void createBotRejectsMissingRequest() {
+        UUID ownerUserId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> developerBotService.createBot(ownerUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Bot payload is required");
+    }
+
+    @Test
+    void createBotRejectsInvalidWebAppUrl() {
+        UUID ownerUserId = UUID.randomUUID();
+        UserEntity owner = new UserEntity();
+        owner.setId(ownerUserId);
+        owner.setDisplayName("Owner");
+
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> developerBotService.createBot(
+                        ownerUserId,
+                        new CreateDeveloperBotRequest(
+                                "Weather Bot",
+                                "weatherbot",
+                                null,
+                                null,
+                                true,
+                                "ftp://example.com/app"
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Mini app URL must be a valid http(s) URL");
+    }
+
+    @Test
+    void updateBotRejectsMissingChanges() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID botUserId = UUID.randomUUID();
+
+        UserEntity bot = createBotUser(botUserId, "samplebot");
+        BotAccountEntity account = createBotAccount(ownerUserId, botUserId);
+
+        when(botAccountRepository.findByBotUserIdAndOwnerUserId(botUserId, ownerUserId)).thenReturn(Optional.of(account));
+        when(userRepository.findByIdAndBotTrue(botUserId)).thenReturn(Optional.of(bot));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> developerBotService.updateBot(
+                        ownerUserId,
+                        botUserId,
+                        new UpdateDeveloperBotRequest(null, null, null, null, null, null)
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("At least one bot field must be provided");
+    }
+
+    @Test
     void updateBotRejectsUsernameWithoutBotSuffix() {
         UUID ownerUserId = UUID.randomUUID();
         UUID botUserId = UUID.randomUUID();
 
-        UserEntity bot = new UserEntity();
-        bot.setId(botUserId);
-        bot.setBot(true);
-        bot.setDisplayName("Bot");
-        bot.setUsername("samplebot");
-
-        BotAccountEntity account = new BotAccountEntity();
-        account.setBotUserId(botUserId);
-        account.setOwnerUserId(ownerUserId);
-        account.setApiTokenHash("hash");
-        account.setApiTokenPrefix("alexbot_abcd");
-        account.setTokenRotatedAt(Instant.now());
+        UserEntity bot = createBotUser(botUserId, "samplebot");
+        BotAccountEntity account = createBotAccount(ownerUserId, botUserId);
 
         when(botAccountRepository.findByBotUserIdAndOwnerUserId(botUserId, ownerUserId)).thenReturn(Optional.of(account));
         when(userRepository.findByIdAndBotTrue(botUserId)).thenReturn(Optional.of(bot));
@@ -125,18 +183,8 @@ class DeveloperBotServiceTest {
         UUID ownerUserId = UUID.randomUUID();
         UUID botUserId = UUID.randomUUID();
 
-        UserEntity bot = new UserEntity();
-        bot.setId(botUserId);
-        bot.setBot(true);
-        bot.setDisplayName("Bot");
-        bot.setUsername("samplebot");
-
-        BotAccountEntity account = new BotAccountEntity();
-        account.setBotUserId(botUserId);
-        account.setOwnerUserId(ownerUserId);
-        account.setApiTokenHash("hash");
-        account.setApiTokenPrefix("alexbot_abcd");
-        account.setTokenRotatedAt(Instant.now());
+        UserEntity bot = createBotUser(botUserId, "samplebot");
+        BotAccountEntity account = createBotAccount(ownerUserId, botUserId);
 
         when(botAccountRepository.findByBotUserIdAndOwnerUserId(botUserId, ownerUserId)).thenReturn(Optional.of(account));
         when(userRepository.findByIdAndBotTrue(botUserId)).thenReturn(Optional.of(bot));
@@ -152,5 +200,95 @@ class DeveloperBotServiceTest {
         assertThat(response.webhookEnabled()).isTrue();
         assertThat(response.webhookUrl()).isEqualTo("https://example.com/webhook");
         assertThat(response.hasWebhookSecret()).isTrue();
+    }
+
+    @Test
+    void updateWebhookRejectsMissingRequest() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID botUserId = UUID.randomUUID();
+
+        UserEntity bot = createBotUser(botUserId, "samplebot");
+        BotAccountEntity account = createBotAccount(ownerUserId, botUserId);
+
+        when(botAccountRepository.findByBotUserIdAndOwnerUserId(botUserId, ownerUserId)).thenReturn(Optional.of(account));
+        when(userRepository.findByIdAndBotTrue(botUserId)).thenReturn(Optional.of(bot));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> developerBotService.updateWebhook(ownerUserId, botUserId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Webhook payload is required");
+    }
+
+    @Test
+    void updateWebhookRejectsBlankUrl() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID botUserId = UUID.randomUUID();
+
+        UserEntity bot = createBotUser(botUserId, "samplebot");
+        BotAccountEntity account = createBotAccount(ownerUserId, botUserId);
+
+        when(botAccountRepository.findByBotUserIdAndOwnerUserId(botUserId, ownerUserId)).thenReturn(Optional.of(account));
+        when(userRepository.findByIdAndBotTrue(botUserId)).thenReturn(Optional.of(bot));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> developerBotService.updateWebhook(
+                        ownerUserId,
+                        botUserId,
+                        new UpdateBotWebhookRequest("   ", null)
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Webhook URL is required");
+    }
+
+    @Test
+    void updateWebhookRejectsInvalidUrl() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID botUserId = UUID.randomUUID();
+
+        UserEntity bot = createBotUser(botUserId, "samplebot");
+        BotAccountEntity account = createBotAccount(ownerUserId, botUserId);
+
+        when(botAccountRepository.findByBotUserIdAndOwnerUserId(botUserId, ownerUserId)).thenReturn(Optional.of(account));
+        when(userRepository.findByIdAndBotTrue(botUserId)).thenReturn(Optional.of(bot));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> developerBotService.updateWebhook(
+                        ownerUserId,
+                        botUserId,
+                        new UpdateBotWebhookRequest("ftp://example.com/hook", null)
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Webhook URL must be a valid http(s) URL");
+    }
+
+    private UserEntity createBotUser(UUID botUserId, String username) {
+        UserEntity bot = new UserEntity();
+        bot.setId(botUserId);
+        bot.setBot(true);
+        bot.setDisplayName("Bot");
+        bot.setUsername(username);
+        return bot;
+    }
+
+    private BotAccountEntity createBotAccount(UUID ownerUserId, UUID botUserId) {
+        BotAccountEntity account = new BotAccountEntity();
+        account.setBotUserId(botUserId);
+        account.setOwnerUserId(ownerUserId);
+        account.setApiTokenHash("hash");
+        account.setApiTokenPrefix("alexbot_abcd");
+        account.setTokenRotatedAt(Instant.now());
+        return account;
     }
 }

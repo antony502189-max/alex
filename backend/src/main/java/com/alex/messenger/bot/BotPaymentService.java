@@ -65,6 +65,9 @@ public class BotPaymentService {
     public BotPaymentInvoiceResponse sendInvoice(UUID botUserId, BotApiSendInvoiceRequest request) {
         featureFlagService.requirePaymentsEnabled();
         requireBot(botUserId);
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Bot invoice payload is required");
+        }
 
         UUID payerUserId = resolvePayerUserId(botUserId, request.chatId(), request.recipientUserId());
         String invoicePayload = normalizeRequired(request.invoicePayload(), "Invoice payload", 255);
@@ -80,6 +83,7 @@ public class BotPaymentService {
         List<Long> suggestedTipAmounts = normalizeSuggestedTipAmounts(request.suggestedTipAmounts(), maxTipAmountUnits);
         List<BotPaymentShippingOptionPayload> shippingOptions = normalizeShippingOptions(request.shippingOptions());
         validateCheckoutRequirements(needShippingAddress, flexible, shippingOptions, maxTipAmountUnits, suggestedTipAmounts);
+        Instant expiresAt = normalizeFutureExpiry(request.expiresAt());
         if (payButtonText == null) {
             payButtonText = "Pay";
         }
@@ -89,7 +93,7 @@ public class BotPaymentService {
                 request.title(),
                 request.description(),
                 request.amountUnits(),
-                request.expiresAt(),
+                expiresAt,
                 Map.of(
                         "kind", "BOT_PAYMENT",
                         "invoicePayload", invoicePayload
@@ -187,6 +191,9 @@ public class BotPaymentService {
     public BotPaymentReceiptResponse refundPayment(UUID botUserId, BotApiRefundPaymentRequest request) {
         featureFlagService.requirePaymentsEnabled();
         requireBot(botUserId);
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Refund payload is required");
+        }
         BotPaymentReceiptEntity receipt = botPaymentReceiptRepository.findById(request.receiptId())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Bot payment receipt not found"));
         if (!botUserId.equals(receipt.getBotUserId())) {
@@ -249,6 +256,12 @@ public class BotPaymentService {
     public BotPreCheckoutQueryResponse answerPreCheckoutQuery(UUID botUserId, BotApiAnswerPreCheckoutQueryRequest request) {
         featureFlagService.requirePaymentsEnabled();
         requireBot(botUserId);
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Pre-checkout answer payload is required");
+        }
+        if (Boolean.FALSE.equals(request.ok()) && normalizeOptional(request.text(), 255) == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Declined pre-checkout queries require text");
+        }
         BotPreCheckoutQueryEntity query = botPreCheckoutQueryRepository.findByIdAndBotUserId(
                         request.preCheckoutQueryId(),
                         botUserId
@@ -762,6 +775,16 @@ public class BotPaymentService {
             normalized.put(key, value);
         }
         return normalized;
+    }
+
+    private Instant normalizeFutureExpiry(Instant value) {
+        if (value == null) {
+            return null;
+        }
+        if (!value.isAfter(Instant.now())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invoice expiry must be in the future");
+        }
+        return value;
     }
 
     private String serializeProviderData(Map<String, String> providerData) {

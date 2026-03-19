@@ -19,6 +19,7 @@ import jakarta.validation.Valid;
 import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -27,6 +28,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/calls")
@@ -53,8 +55,9 @@ public class CallController {
     public ResponseEntity<List<CallHistoryEntryResponse>> getRecentCalls(
             @RequestParam(defaultValue = "50") int limit
     ) {
+        int validatedLimit = requireLimit(limit, 100);
         featureFlagService.requireCallsEnabled();
-        return ResponseEntity.ok(callService.getRecentCalls(CurrentUser.id(), limit));
+        return ResponseEntity.ok(callService.getRecentCalls(CurrentUser.id(), validatedLimit));
     }
 
     @GetMapping("/links")
@@ -115,14 +118,15 @@ public class CallController {
             @PathVariable UUID callId,
             @RequestParam(defaultValue = "50") int limit
     ) {
+        int validatedLimit = requireLimit(limit, 100);
         featureFlagService.requireCallsEnabled();
-        return ResponseEntity.ok(callService.listComments(CurrentUser.id(), callId, limit));
+        return ResponseEntity.ok(callService.listComments(CurrentUser.id(), callId, validatedLimit));
     }
 
     @PostMapping("/{callId}/comments")
     public ResponseEntity<CallCommentResponse> comment(
             @PathVariable UUID callId,
-            @RequestBody(required = false) CreateCallCommentRequest request
+            @Valid @RequestBody(required = false) CreateCallCommentRequest request
     ) {
         featureFlagService.requireCallsEnabled();
         return ResponseEntity.ok(callService.createComment(CurrentUser.id(), callId, request));
@@ -133,14 +137,15 @@ public class CallController {
             @PathVariable UUID callId,
             @RequestParam(defaultValue = "50") int limit
     ) {
+        int validatedLimit = requireLimit(limit, 100);
         featureFlagService.requireCallsEnabled();
-        return ResponseEntity.ok(callService.listReactions(CurrentUser.id(), callId, limit));
+        return ResponseEntity.ok(callService.listReactions(CurrentUser.id(), callId, validatedLimit));
     }
 
     @PostMapping("/{callId}/reactions")
     public ResponseEntity<CallReactionResponse> react(
             @PathVariable UUID callId,
-            @RequestBody(required = false) CreateCallReactionRequest request
+            @Valid @RequestBody(required = false) CreateCallReactionRequest request
     ) {
         featureFlagService.requireCallsEnabled();
         return ResponseEntity.ok(callService.createReaction(CurrentUser.id(), callId, request));
@@ -150,7 +155,7 @@ public class CallController {
     public ResponseEntity<CallSessionResponse> moderateParticipant(
             @PathVariable UUID callId,
             @PathVariable UUID userId,
-            @RequestBody UpdateCallParticipantModerationRequest request
+            @Valid @RequestBody UpdateCallParticipantModerationRequest request
     ) {
         featureFlagService.requireCallsEnabled();
         return ResponseEntity.ok(callService.moderateParticipant(CurrentUser.id(), callId, userId, request));
@@ -202,5 +207,15 @@ public class CallController {
     public ResponseEntity<CallSessionResponse> stopRecording(@PathVariable UUID callId) {
         featureFlagService.requireCallsEnabled();
         return ResponseEntity.ok(callService.setRecording(CurrentUser.id(), callId, false));
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "limit must be between 1 and " + max
+            );
+        }
+        return limit;
     }
 }

@@ -166,6 +166,25 @@ class UserProfileMetadataServiceTest {
         verify(profileAudioRepository).delete(existing);
     }
 
+    @Test
+    void upsertProfileAudioRejectsMetadataWithoutAttachment() {
+        UUID requesterId = UUID.randomUUID();
+        UserEntity user = activeUser(requesterId);
+
+        when(userRepository.findById(requesterId)).thenReturn(Optional.of(user));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> userProfileMetadataService.upsertProfileAudio(
+                        requesterId,
+                        new UpsertProfileAudioRequest(null, "Intro", null, null)
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
     private UserEntity activeUser(UUID userId) {
         UserEntity user = new UserEntity();
         user.setId(userId);

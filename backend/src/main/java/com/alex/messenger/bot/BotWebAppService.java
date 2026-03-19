@@ -114,6 +114,9 @@ public class BotWebAppService {
 
     @Transactional(readOnly = true)
     public BotWebAppContextResponse resolveContext(UUID requesterId, ResolveBotWebAppRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Mini app context payload is required");
+        }
         LaunchInitData payload = decodeAndValidate(request.initData(), request.signature(), requesterId);
         return new BotWebAppContextResponse(
                 payload.userId(),
@@ -131,6 +134,9 @@ public class BotWebAppService {
 
     @Transactional
     public BotWebAppDataResponse sendData(UUID requesterId, SendBotWebAppDataRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Mini app data payload is required");
+        }
         LaunchInitData payload = decodeAndValidate(request.initData(), request.signature(), requesterId);
         if (payload.chatId() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Mini app launch is not bound to a chat");
@@ -186,6 +192,9 @@ public class BotWebAppService {
 
     @Transactional
     public BotWebAppQueryResponse createQuery(UUID requesterId, CreateBotWebAppQueryRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Mini app query payload is required");
+        }
         LaunchInitData payload = decodeAndValidate(request.initData(), request.signature(), requesterId);
         if (payload.chatId() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Mini app launch is not bound to a chat");
@@ -220,6 +229,7 @@ public class BotWebAppService {
             UUID botUserId,
             BotApiAnswerWebAppQueryRequest request
     ) {
+        requireValidAnswerQueryRequest(request);
         BotWebAppQueryEntity query = botWebAppQueryRepository.findByIdAndBotUserId(request.webAppQueryId(), botUserId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Mini app query not found"));
         if (query.getAnsweredAt() != null) {
@@ -237,8 +247,8 @@ public class BotWebAppService {
                         request.caption(),
                         request.messageType(),
                         request.entities(),
-                        null,
-                        null,
+                        request.location(),
+                        request.contactCard(),
                         request.attachmentIds(),
                         request.stickerId(),
                         request.silent(),
@@ -249,6 +259,36 @@ public class BotWebAppService {
         query.setResultMessageId(response.messageId());
         botWebAppQueryRepository.save(query);
         return response;
+    }
+
+    private void requireValidAnswerQueryRequest(BotApiAnswerWebAppQueryRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Mini app answer payload is required");
+        }
+        if (!request.hasPayload()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Message must contain text, attachments, sticker, or structured payload"
+            );
+        }
+        if (!request.hasAtMostOneStructuredPayload()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Location and contact card payloads cannot be combined"
+            );
+        }
+        if (!request.isPublicMessageType()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Service messages cannot be sent from the bot API"
+            );
+        }
+        if (!request.hasValidStructuredPayloadUsage()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Structured message payload and messageType combination is invalid"
+            );
+        }
     }
 
     private String encodePayload(LaunchInitData payload) {

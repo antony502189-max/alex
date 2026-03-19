@@ -29,6 +29,9 @@ public class UserPresenceService {
         if (userIds == null || userIds.isEmpty()) {
             return List.of();
         }
+        if (userIds.size() > 100) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "presence lookup supports up to 100 users");
+        }
         return userRepository.findAllById(userIds).stream()
                 .filter(user -> user.getDeletedAt() == null)
                 .map(user -> toResponse(user, requesterId))

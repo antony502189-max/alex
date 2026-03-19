@@ -46,6 +46,7 @@ import com.alex.messenger.message.MessageReactionRepository;
 import com.alex.messenger.message.MessageRepository;
 import com.alex.messenger.message.MessageTextContent;
 import com.alex.messenger.search.PublicPostSearchService;
+import com.alex.messenger.shared.SearchQueryValidationSupport;
 import com.alex.messenger.user.BlockedUserRepository;
 import com.alex.messenger.user.UserEntity;
 import com.alex.messenger.user.UserPresenceService;
@@ -152,7 +153,7 @@ public class ChatService {
 
     @Transactional(readOnly = true)
     public ChatListSlice listChatsPage(UUID userId, boolean archived, String cursor, Integer limit) {
-        int normalizedLimit = Math.min(Math.max(limit != null ? limit : 50, 1), 100);
+        int normalizedLimit = requireOptionalLimit(limit, 50, 100);
         int offset = decodeChatCursor(cursor);
         List<ChatSummaryResponse> chats = listChats(userId, archived);
         if (offset > chats.size()) {
@@ -178,28 +179,17 @@ public class ChatService {
             chatsById.putIfAbsent(chat.chatId(), chat);
         }
         return chatsById.values().stream()
-                .sorted((left, right) -> {
-                    if (left.lastMessageAt() == null && right.lastMessageAt() == null) {
-                        return 0;
-                    }
-                    if (left.lastMessageAt() == null) {
-                        return 1;
-                    }
-                    if (right.lastMessageAt() == null) {
-                        return -1;
-                    }
-                    return right.lastMessageAt().compareTo(left.lastMessageAt());
-                })
+                .sorted(this::compareChatListEntries)
                 .toList();
     }
 
     @Transactional(readOnly = true)
     public List<ChatSummaryResponse> searchChats(UUID requesterId, String query, int limit) {
-        String normalizedQuery = query.trim().toLowerCase();
+        String normalizedQuery = SearchQueryValidationSupport.normalize(query).toLowerCase();
         if (normalizedQuery.isBlank()) {
             return List.of();
         }
-        int normalizedLimit = Math.min(Math.max(limit, 1), 50);
+        int normalizedLimit = requireLimit(limit, 50);
         return listAllChats(requesterId).stream()
                 .filter(chat -> matchesChatQuery(chat, normalizedQuery))
                 .limit(normalizedLimit)
@@ -399,6 +389,9 @@ public class ChatService {
 
         Set<UUID> userIds = new LinkedHashSet<>(request.userIds());
         userIds.remove(requesterId);
+        if (userIds.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Add members request must include at least one other user");
+        }
         ensureUsersExist(userIds);
 
         for (UUID userId : userIds) {
@@ -494,6 +487,17 @@ public class ChatService {
     ) {
         ChatEntity chat = getOwnedChat(requesterId, chatId);
         ensureCanManageMembers(chat, requesterId);
+
+        if (request == null
+                || (request.canManageMembers() == null
+                && request.canManageInviteLinks() == null
+                && request.canManageMessages() == null
+                && request.canPinMessages() == null
+                && request.canApproveJoinRequests() == null
+                && request.canPostMessages() == null
+                && request.anonymousAdmin() == null)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "No member permission changes were provided");
+        }
 
         if (requesterId.equals(userId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "You cannot update your own permissions");
@@ -596,8 +600,49 @@ public class ChatService {
     public ChatSummaryResponse muteChat(UUID requesterId, UUID chatId, Instant mutedUntil) {
         ChatEntity chat = getOwnedChat(requesterId, chatId);
         ChatMemberEntity membership = getMembership(chatId, requesterId);
+        if (mutedUntil != null && !mutedUntil.isAfter(Instant.now())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Mute end must be in the future");
+        }
         membership.setMutedUntil(mutedUntil);
         chatMemberRepository.save(membership);
+        return buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+    }
+
+    @Transactional
+    public ChatSummaryResponse pinChatToList(UUID requesterId, UUID chatId) {
+        ChatEntity chat = getOwnedChat(requesterId, chatId);
+        ChatMemberEntity membership = getMembership(chatId, requesterId);
+        if (Boolean.TRUE.equals(membership.getListPinned())) {
+            return buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        }
+
+        boolean archived = Boolean.TRUE.equals(membership.getArchived());
+        int nextPinOrder = chatMemberRepository.findAllByIdUserIdAndArchivedOrderByListPinOrderAsc(requesterId, archived).stream()
+                .filter(candidate -> Boolean.TRUE.equals(candidate.getListPinned()))
+                .map(ChatMemberEntity::getListPinOrder)
+                .filter(Objects::nonNull)
+                .max(Integer::compareTo)
+                .orElse(-1) + 1;
+
+        membership.setListPinned(true);
+        membership.setListPinOrder(nextPinOrder);
+        chatMemberRepository.save(membership);
+        return buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+    }
+
+    @Transactional
+    public ChatSummaryResponse unpinChatFromList(UUID requesterId, UUID chatId) {
+        ChatEntity chat = getOwnedChat(requesterId, chatId);
+        ChatMemberEntity membership = getMembership(chatId, requesterId);
+        if (!Boolean.TRUE.equals(membership.getListPinned())) {
+            return buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        }
+
+        boolean archived = Boolean.TRUE.equals(membership.getArchived());
+        membership.setListPinned(false);
+        membership.setListPinOrder(null);
+        chatMemberRepository.save(membership);
+        normalizePinnedOrder(requesterId, archived);
         return buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
     }
 
@@ -799,12 +844,12 @@ public class ChatService {
 
     @Transactional(readOnly = true)
     public List<PublicChatDiscoveryResponse> discoverPublicChats(UUID requesterId, String query, int limit) {
-        String normalizedQuery = query.trim();
+        String normalizedQuery = SearchQueryValidationSupport.normalize(query);
         if (normalizedQuery.isBlank()) {
             return List.of();
         }
 
-        int normalizedLimit = Math.min(Math.max(limit, 1), 20);
+        int normalizedLimit = requireLimit(limit, 20);
         Set<UUID> joinedChatIds = chatMemberRepository.findAllByIdUserId(requesterId).stream()
                 .map(member -> member.getId().getChatId())
                 .collect(Collectors.toSet());
@@ -1307,6 +1352,44 @@ public class ChatService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN, "Chat access denied"));
     }
 
+    private int compareChatListEntries(ChatSummaryResponse left, ChatSummaryResponse right) {
+        if (left.pinned() != right.pinned()) {
+            return left.pinned() ? -1 : 1;
+        }
+        if (left.pinned()) {
+            int leftPinOrder = left.pinOrder() != null ? left.pinOrder() : Integer.MAX_VALUE;
+            int rightPinOrder = right.pinOrder() != null ? right.pinOrder() : Integer.MAX_VALUE;
+            if (leftPinOrder != rightPinOrder) {
+                return Integer.compare(leftPinOrder, rightPinOrder);
+            }
+        }
+        if (left.lastMessageAt() == null && right.lastMessageAt() == null) {
+            return 0;
+        }
+        if (left.lastMessageAt() == null) {
+            return 1;
+        }
+        if (right.lastMessageAt() == null) {
+            return -1;
+        }
+        return right.lastMessageAt().compareTo(left.lastMessageAt());
+    }
+
+    private void normalizePinnedOrder(UUID requesterId, boolean archived) {
+        List<ChatMemberEntity> pinnedMemberships = chatMemberRepository.findAllByIdUserIdAndArchivedOrderByListPinOrderAsc(
+                        requesterId,
+                        archived
+                ).stream()
+                .filter(candidate -> Boolean.TRUE.equals(candidate.getListPinned()))
+                .toList();
+        for (int index = 0; index < pinnedMemberships.size(); index++) {
+            pinnedMemberships.get(index).setListPinOrder(index);
+        }
+        if (!pinnedMemberships.isEmpty()) {
+            chatMemberRepository.saveAll(pinnedMemberships);
+        }
+    }
+
     @Transactional(readOnly = true)
     public MessageAuthorView resolveMessageAuthor(UUID requesterId, UUID chatId, UUID senderId) {
         if (senderId == null) {
@@ -1390,6 +1473,8 @@ public class ChatService {
                     draft != null ? draft.getDraftText() : null,
                     draft != null ? draft.getUpdatedAt() : null,
                     membership.getMutedUntil(),
+                    Boolean.TRUE.equals(membership.getListPinned()),
+                    membership.getListPinOrder(),
                     pinnedMessageId,
                     false,
                     false,
@@ -1433,6 +1518,8 @@ public class ChatService {
                     draft != null ? draft.getDraftText() : null,
                     draft != null ? draft.getUpdatedAt() : null,
                     membership.getMutedUntil(),
+                    Boolean.TRUE.equals(membership.getListPinned()),
+                    membership.getListPinOrder(),
                     pinnedMessageId,
                     Boolean.TRUE.equals(chat.getJoinRequiresApproval()),
                     "CHANNEL".equals(chat.getChatType()) && Boolean.TRUE.equals(chat.getCommentsEnabled()),
@@ -1480,6 +1567,8 @@ public class ChatService {
                 draft != null ? draft.getDraftText() : null,
                 draft != null ? draft.getUpdatedAt() : null,
                 membership.getMutedUntil(),
+                Boolean.TRUE.equals(membership.getListPinned()),
+                membership.getListPinOrder(),
                 pinnedMessageId,
                 false,
                 false,
@@ -2175,6 +2264,20 @@ public class ChatService {
         return Base64.getUrlEncoder()
                 .withoutPadding()
                 .encodeToString(String.valueOf(offset).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private int requireOptionalLimit(Integer limit, int defaultValue, int max) {
+        if (limit == null) {
+            return defaultValue;
+        }
+        return requireLimit(limit, max);
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be between 1 and " + max);
+        }
+        return limit;
     }
 
     private Integer normalizeAutoDeleteSeconds(Integer value) {

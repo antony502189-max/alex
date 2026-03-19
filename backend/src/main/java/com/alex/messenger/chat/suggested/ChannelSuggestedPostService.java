@@ -81,9 +81,9 @@ public class ChannelSuggestedPostService {
             String status,
             int limit
     ) {
+        int normalizedLimit = requireLimit(limit, 100);
         ChannelAccess access = resolveAccess(chatId, requesterId);
         String normalizedStatus = normalizeStatus(status);
-        int normalizedLimit = Math.min(Math.max(limit, 1), 100);
         UUID submittedByUserId = access.canModerate() ? null : requesterId;
 
         List<SuggestedPostEntity> posts = suggestedPostRepository.findVisible(
@@ -104,19 +104,22 @@ public class ChannelSuggestedPostService {
             UUID chatId,
             CreateSuggestedPostRequest request
     ) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Suggested post payload is required");
+        }
         ChannelAccess access = resolveAccess(chatId, requesterId);
         MessageTextContent content = messageContentCodec.normalize(
-                request != null ? request.text() : null,
-                request != null && request.entities() != null ? request.entities() : List.<MessageTextEntityPayload>of(),
-                request != null ? request.messageType() : null,
-                request != null ? request.caption() : null,
-                request != null ? request.location() : null,
-                request != null ? request.contactCard() : null,
+                request.text(),
+                request.entities() != null ? request.entities() : List.<MessageTextEntityPayload>of(),
+                request.messageType(),
+                request.caption(),
+                request.location(),
+                request.contactCard(),
                 null,
-                request != null ? request.silent() : null
+                request.silent()
         );
-        List<UUID> requestedAttachmentIds = normalizeAttachmentIds(request != null ? request.attachmentIds() : null);
-        UUID stickerId = request != null ? request.stickerId() : null;
+        List<UUID> requestedAttachmentIds = normalizeAttachmentIds(request.attachmentIds());
+        UUID stickerId = request.stickerId();
         stickerService.assertStickerExists(stickerId);
         ensureMessageIsPresent(content, requestedAttachmentIds, stickerId);
 
@@ -128,7 +131,7 @@ public class ChannelSuggestedPostService {
                 messageContentCodec.encode(content)
         );
 
-        Long requestedAmountUnits = normalizeRequestedAmount(request != null ? request.requestedAmountUnits() : null);
+        Long requestedAmountUnits = normalizeRequestedAmount(request.requestedAmountUnits());
         SuggestedPostEntity suggestedPost = new SuggestedPostEntity();
         suggestedPost.setChatId(access.chat().getId());
         suggestedPost.setSubmittedByUserId(requesterId);
@@ -516,6 +519,9 @@ public class ChannelSuggestedPostService {
         if (attachmentIds == null || attachmentIds.isEmpty()) {
             return List.of();
         }
+        if (attachmentIds.stream().anyMatch(Objects::isNull)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Suggested post attachment ids must not contain null");
+        }
         return List.copyOf(new LinkedHashSet<>(attachmentIds));
     }
 
@@ -576,5 +582,12 @@ public class ChannelSuggestedPostService {
             return value;
         }
         return value.substring(0, maxLength);
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be between 1 and " + max);
+        }
+        return limit;
     }
 }

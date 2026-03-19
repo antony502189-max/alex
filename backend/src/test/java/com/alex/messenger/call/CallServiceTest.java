@@ -19,10 +19,12 @@ import com.alex.messenger.chat.ChatMemberId;
 import com.alex.messenger.chat.ChatMemberRepository;
 import com.alex.messenger.chat.ChatRepository;
 import com.alex.messenger.chat.ChatService;
+import com.alex.messenger.feature.FeatureFlagService;
 import com.alex.messenger.media.PhotoAccess;
 import com.alex.messenger.media.ProfilePhotoService;
 import com.alex.messenger.user.UserEntity;
 import com.alex.messenger.user.UserRepository;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -73,10 +75,20 @@ class CallServiceTest {
     @Mock
     private CallRealtimeService callRealtimeService;
 
+    @Mock
+    private CallNotificationService callNotificationService;
+
+    @Mock
+    private FeatureFlagService featureFlagService;
+
+    private CallLifecycleProperties callLifecycleProperties;
     private CallService callService;
 
     @BeforeEach
     void setUp() {
+        callLifecycleProperties = new CallLifecycleProperties();
+        callLifecycleProperties.setRingTimeout(Duration.ofSeconds(45));
+        callLifecycleProperties.setRingTimeoutBatchSize(100);
         callService = new CallService(
                 callSessionRepository,
                 callParticipantRepository,
@@ -88,7 +100,10 @@ class CallServiceTest {
                 chatMemberRepository,
                 userRepository,
                 profilePhotoService,
-                callRealtimeService
+                callRealtimeService,
+                callNotificationService,
+                featureFlagService,
+                callLifecycleProperties
         );
     }
 
@@ -175,6 +190,36 @@ class CallServiceTest {
         ))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN));
+
+        verify(callSessionRepository, never()).save(any(CallSessionEntity.class));
+    }
+
+    @Test
+    void startCallRejectsGroupModeWhenGroupCallsFeatureIsDisabled() {
+        UUID requesterId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "GROUP");
+        List<ChatMemberEntity> members = List.of(
+                member(chatId, requesterId),
+                member(chatId, secondUserId)
+        );
+
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(callSessionRepository.existsByChatIdAndStatusIn(eq(chatId), anyCollection())).thenReturn(false);
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(members);
+        org.mockito.Mockito.doThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "Group calls is disabled"))
+                .when(featureFlagService)
+                .requireGroupCallsEnabled();
+
+        assertThatThrownBy(() -> callService.startCall(
+                requesterId,
+                new com.alex.messenger.call.dto.StartCallRequest(chatId, "VOICE", "GROUP", false)
+        ))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode())
+                        .isEqualTo(HttpStatus.NOT_FOUND));
 
         verify(callSessionRepository, never()).save(any(CallSessionEntity.class));
     }
@@ -285,6 +330,46 @@ class CallServiceTest {
 
         assertThat(response.mode()).isEqualTo("VOICE_CHAT");
         assertThat(response.shareUrl()).startsWith("alex://call/");
+    }
+
+    @Test
+    void expireStaleRingingCallsMarksInviteesMissedAndCallerLeft() {
+        UUID requesterId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = session(callId, chatId, requesterId, "RINGING", "DIRECT");
+        session.setStartedAt(Instant.parse("2026-03-14T09:00:00Z"));
+        CallParticipantEntity requesterParticipant = participant(callId, requesterId, "JOINED");
+        CallParticipantEntity secondParticipant = participant(callId, secondUserId, "RINGING");
+        ChatEntity chat = chat(chatId, "DIRECT");
+        UserEntity requester = user(requesterId, "Requester");
+        UserEntity secondUser = user(secondUserId, "Second");
+
+        when(callSessionRepository.findAllByStatusAndStartedAtBeforeOrderByStartedAtAsc(eq("RINGING"), any(), any()))
+                .thenReturn(List.of(session));
+        when(callParticipantRepository.findAllByIdCallId(callId)).thenReturn(List.of(requesterParticipant, secondParticipant));
+        when(callParticipantRepository.saveAll(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(callSessionRepository.save(any(CallSessionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(
+                member(chatId, requesterId),
+                member(chatId, secondUserId)
+        ));
+        when(userRepository.findAllById(any())).thenReturn(List.of(requester, secondUser));
+
+        int expiredCount = callService.expireStaleRingingCalls();
+
+        assertThat(expiredCount).isEqualTo(1);
+        assertThat(session.getStatus()).isEqualTo("ENDED");
+        assertThat(session.getEndedAt()).isNotNull();
+        assertThat(requesterParticipant.getState()).isEqualTo("LEFT");
+        assertThat(requesterParticipant.getLeftAt()).isEqualTo(session.getEndedAt());
+        assertThat(secondParticipant.getState()).isEqualTo("MISSED");
+        assertThat(secondParticipant.getLeftAt()).isEqualTo(session.getEndedAt());
+        verify(callRealtimeService).publishSessionEvent(eq(requesterId), eq("UPDATED"), any());
+        verify(callRealtimeService).publishSessionEvent(eq(secondUserId), eq("UPDATED"), any());
     }
 
     @Test
@@ -411,6 +496,40 @@ class CallServiceTest {
         ))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode().value()).isEqualTo(409));
+    }
+
+    @Test
+    void moderateParticipantRejectsMissingChanges() {
+        UUID requesterId = UUID.randomUUID();
+        UUID targetUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(callId);
+        session.setChatId(chatId);
+        session.setCreatedByUserId(requesterId);
+        session.setMode("GROUP");
+        session.setStatus("ACTIVE");
+
+        ChatMemberEntity requesterMembership = member(chatId, requesterId);
+        requesterMembership.setRole("OWNER");
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "GROUP"));
+        when(chatService.getMembership(chatId, requesterId)).thenReturn(requesterMembership);
+
+        assertThatThrownBy(() -> callService.moderateParticipant(
+                requesterId,
+                callId,
+                targetUserId,
+                new UpdateCallParticipantModerationRequest(null, null, null, null, null)
+        ))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode().value()).isEqualTo(400));
+
+        verify(callParticipantRepository, never()).findByIdCallIdAndIdUserId(callId, targetUserId);
     }
 
     @Test
@@ -1129,6 +1248,29 @@ class CallServiceTest {
     }
 
     @Test
+    void createCommentRejectsMissingRequestBody() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = session(callId, chatId, requesterId, "ACTIVE", "VOICE_CHAT");
+        CallParticipantEntity requesterParticipant = participant(callId, requesterId, "JOINED");
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "GROUP"));
+        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId)))
+                .thenReturn(Optional.of(requesterParticipant));
+
+        assertThatThrownBy(() -> callService.createComment(requesterId, callId, null))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode())
+                        .isEqualTo(HttpStatus.BAD_REQUEST));
+
+        verify(callCommentRepository, never()).save(any(CallCommentEntity.class));
+    }
+
+    @Test
     void createReactionPublishesToActiveParticipants() {
         UUID requesterId = UUID.randomUUID();
         UUID secondUserId = UUID.randomUUID();
@@ -1193,6 +1335,29 @@ class CallServiceTest {
                 callId,
                 new CreateCallReactionRequest("🔥")
         ))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode())
+                        .isEqualTo(HttpStatus.BAD_REQUEST));
+
+        verify(callReactionRepository, never()).save(any(CallReactionEntity.class));
+    }
+
+    @Test
+    void createReactionRejectsMissingRequestBody() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = session(callId, chatId, requesterId, "ACTIVE", "VOICE_CHAT");
+        CallParticipantEntity requesterParticipant = participant(callId, requesterId, "JOINED");
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "GROUP"));
+        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId)))
+                .thenReturn(Optional.of(requesterParticipant));
+
+        assertThatThrownBy(() -> callService.createReaction(requesterId, callId, null))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode())
                         .isEqualTo(HttpStatus.BAD_REQUEST));

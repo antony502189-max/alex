@@ -19,6 +19,7 @@ import com.alex.messenger.message.dto.EditMessageRequest;
 import com.alex.messenger.message.dto.ForwardMessageRequest;
 import com.alex.messenger.message.dto.MessageAttachmentResponse;
 import com.alex.messenger.message.dto.MessageContactCardPayload;
+import com.alex.messenger.message.dto.MessageLiveLocationPayload;
 import com.alex.messenger.message.dto.MessageLocationPayload;
 import com.alex.messenger.message.dto.MessageReactionSummary;
 import com.alex.messenger.message.dto.MessageServicePayload;
@@ -29,6 +30,7 @@ import com.alex.messenger.message.dto.ScheduledMessageResponse;
 import com.alex.messenger.message.dto.SearchMessagesResponse;
 import com.alex.messenger.message.dto.SendMessageRequest;
 import com.alex.messenger.message.dto.SendInlineBotResultRequest;
+import com.alex.messenger.message.dto.UpdateLiveLocationRequest;
 import com.alex.messenger.message.dto.VotePollRequest;
 import com.alex.messenger.message.idempotency.MessageIdempotencyService;
 import com.alex.messenger.message.expiration.MessageExpirationEntity;
@@ -40,6 +42,7 @@ import com.alex.messenger.message.scheduled.ScheduledMessageRepository;
 import com.alex.messenger.poll.PollEntity;
 import com.alex.messenger.poll.PollService;
 import com.alex.messenger.search.PublicPostSearchService;
+import com.alex.messenger.shared.SearchQueryValidationSupport;
 import com.alex.messenger.sticker.StickerService;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -91,6 +94,7 @@ public class MessageService {
     private final ChatAdminLogService chatAdminLogService;
     private final ChatService chatService;
     private final ForumTopicService forumTopicService;
+    private final MessageLiveLocationService messageLiveLocationService;
     private final ChatEncryptionService chatEncryptionService;
     private final MessageContentCodec messageContentCodec;
     private final MessageSearchCorpusService messageSearchCorpusService;
@@ -114,6 +118,7 @@ public class MessageService {
                 request.entities(),
                 request.messageType(),
                 request.location(),
+                request.liveLocation(),
                 request.contactCard(),
                 request.silent(),
                 attachmentIds,
@@ -163,6 +168,7 @@ public class MessageService {
             }
         }
         List<UUID> recipientIds = chatService.getRecipientIds(chat, senderId);
+        content = activateLiveLocationIfNeeded(lookup, content);
 
         persistMessage(lookup);
         chatService.recordMessageSent(chat.getId(), senderId, lookup.getCreatedAt());
@@ -345,6 +351,7 @@ public class MessageService {
                 request.entities(),
                 request.messageType(),
                 request.location(),
+                request.liveLocation(),
                 request.contactCard(),
                 request.silent(),
                 attachmentIds,
@@ -392,6 +399,7 @@ public class MessageService {
                 request.entities(),
                 request.messageType(),
                 request.location(),
+                request.liveLocation(),
                 request.contactCard(),
                 request.silent(),
                 attachmentIds,
@@ -472,6 +480,7 @@ public class MessageService {
                 request.entities(),
                 request.messageType(),
                 request.location(),
+                request.liveLocation(),
                 request.contactCard(),
                 request.silent(),
                 attachmentIds,
@@ -618,23 +627,24 @@ public class MessageService {
             );
             applyThreadMetadata(lookup, replyTarget, null, null);
             List<UUID> recipientIds = chatService.getRecipientIds(chat, scheduledMessage.getSenderId());
+            MessageTextContent content = activateLiveLocationIfNeeded(lookup, decodeMessageContent(lookup));
 
             persistMessage(lookup);
             chatService.recordMessageSent(chat.getId(), scheduledMessage.getSenderId(), lookup.getCreatedAt());
             linkDiscussionThreadIfNeeded(chat, scheduledMessage.getSenderId(), lookup);
             chatService.updateLastMessageAt(chat, lookup.getCreatedAt());
             forumTopicService.touchTopic(lookup.getTopicId(), lookup.getCreatedAt());
-        chatService.incrementUnreadCounts(
-                chat.getId(),
-                scheduledMessage.getSenderId(),
-                decodeMessageContent(lookup),
-                resolveReplyTargetSenderId(scheduledMessage.getReplyToMessageId()),
-                lookup.getTopicId()
-        );
-        publish(lookup, recipientIds);
-        botUpdateService.maybeEnqueueIncomingMessage(chat, scheduledMessage.getSenderId(), lookup);
-        botService.maybeReplyToDirectMessage(chat, scheduledMessage.getSenderId(), lookup);
-        publishDirectMessageCreatedEvent(chat, scheduledMessage.getSenderId(), lookup);
+            chatService.incrementUnreadCounts(
+                    chat.getId(),
+                    scheduledMessage.getSenderId(),
+                    content,
+                    resolveReplyTargetSenderId(scheduledMessage.getReplyToMessageId()),
+                    lookup.getTopicId()
+            );
+            publish(lookup, recipientIds);
+            botUpdateService.maybeEnqueueIncomingMessage(chat, scheduledMessage.getSenderId(), lookup);
+            botService.maybeReplyToDirectMessage(chat, scheduledMessage.getSenderId(), lookup);
+            publishDirectMessageCreatedEvent(chat, scheduledMessage.getSenderId(), lookup);
 
             scheduledMessage.setStatus("DELIVERED");
             scheduledMessage.setDeliveredMessageId(lookup.getMessageId());
@@ -764,6 +774,7 @@ public class MessageService {
                 source.getNonce(),
                 source.getKeyVersion()
         ));
+        MessageTextContent forwardedContent = normalizeForwardedContent(sourceContent);
 
         UUID reservedMessageId = request.clientMessageId() != null ? Uuids.timeBased() : null;
         if (request.clientMessageId() != null) {
@@ -793,7 +804,7 @@ public class MessageService {
         MessageLookupEntity lookup = buildNewMessage(
                 targetChat,
                 senderId,
-                sourceContent,
+                forwardedContent,
                 topic != null ? topic.getId() : null,
                 request.replyToMessageId(),
                 source.getChatId(),
@@ -806,6 +817,7 @@ public class MessageService {
         lookup.setViaBotUserId(source.getViaBotUserId());
         applyThreadMetadata(lookup, replyTarget, null, null);
         List<UUID> recipientIds = chatService.getRecipientIds(targetChat, senderId);
+        forwardedContent = activateLiveLocationIfNeeded(lookup, forwardedContent);
 
         persistMessage(lookup);
         chatService.recordMessageSent(targetChat.getId(), senderId, lookup.getCreatedAt());
@@ -815,7 +827,7 @@ public class MessageService {
         chatService.incrementUnreadCounts(
                 targetChat.getId(),
                 senderId,
-                sourceContent,
+                forwardedContent,
                 replyTarget != null ? replyTarget.getSenderId() : null,
                 lookup.getTopicId()
         );
@@ -837,14 +849,17 @@ public class MessageService {
 
     @Transactional
     public ChatMessageResponse editMessage(UUID senderId, UUID messageId, EditMessageRequest request) {
-        MessageTextContent content = messageContentCodec.normalize(request.text().trim(), request.entities());
-        if (content.text().isBlank()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message text is blank");
-        }
-
         MessageLookupEntity lookup = getOwnedMessage(senderId, messageId);
         if (lookup.getDeletedAt() != null) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Deleted message cannot be edited");
+        }
+        if ("LIVE_LOCATION".equals(decodeMessageContent(lookup).messageType())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Use live location update endpoints for this message");
+        }
+
+        MessageTextContent content = messageContentCodec.normalize(request.text().trim(), request.entities());
+        if (content.text().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message text is blank");
         }
 
         EncryptedPayload encryptedPayload = chatEncryptionService.encrypt(
@@ -878,9 +893,63 @@ public class MessageService {
     }
 
     @Transactional
+    public ChatMessageResponse updateLiveLocation(UUID senderId, UUID messageId, UpdateLiveLocationRequest request) {
+        MessageLookupEntity lookup = getOwnedMessage(senderId, messageId);
+        if (lookup.getDeletedAt() != null) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Deleted message cannot be updated");
+        }
+
+        MessageTextContent content = requireLiveLocationContent(lookup);
+        MessageLiveLocationPayload liveLocation = messageLiveLocationService.update(lookup, request);
+        syncLiveLocationState(lookup, content, liveLocation);
+        lookup.setEditedAt(Instant.now());
+
+        persistMessage(lookup);
+        publishToChatMembers(senderId, lookup);
+        botUpdateService.maybeEnqueueMessageEdited(chatService.getOwnedChat(senderId, lookup.getChatId()), senderId, lookup);
+        return toResponse(
+                senderId,
+                lookup,
+                messageReactionService.getSummaries(lookup.getMessageId()),
+                getAttachmentResponses(senderId, lookup.getAttachmentIds())
+        );
+    }
+
+    @Transactional
+    public ChatMessageResponse stopLiveLocation(UUID senderId, UUID messageId) {
+        MessageLookupEntity lookup = getOwnedMessage(senderId, messageId);
+        if (lookup.getDeletedAt() != null) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Deleted message cannot be updated");
+        }
+
+        MessageTextContent content = requireLiveLocationContent(lookup);
+        MessageLiveLocationPayload liveLocation = messageLiveLocationService.stop(lookup);
+        syncLiveLocationState(lookup, content, liveLocation);
+        lookup.setEditedAt(Instant.now());
+
+        persistMessage(lookup);
+        publishToChatMembers(senderId, lookup);
+        botUpdateService.maybeEnqueueMessageEdited(chatService.getOwnedChat(senderId, lookup.getChatId()), senderId, lookup);
+        return toResponse(
+                senderId,
+                lookup,
+                messageReactionService.getSummaries(lookup.getMessageId()),
+                getAttachmentResponses(senderId, lookup.getAttachmentIds())
+        );
+    }
+
+    @Transactional
     public ChatMessageResponse deleteMessage(UUID senderId, UUID messageId) {
         MessageLookupEntity lookup = getOwnedMessage(senderId, messageId);
         if (lookup.getDeletedAt() == null) {
+            MessageTextContent content = decodeMessageContent(lookup);
+            if ("LIVE_LOCATION".equals(content.messageType()) && content.liveLocation() != null) {
+                try {
+                    messageLiveLocationService.stop(lookup);
+                } catch (ResponseStatusException ignored) {
+                    // Deletion should still succeed even if the live-location state is already gone.
+                }
+            }
             lookup.setDeletedAt(Instant.now());
             persistMessage(lookup);
             publishToChatMembers(senderId, lookup);
@@ -962,9 +1031,9 @@ public class MessageService {
             Instant before,
             int limit
     ) {
+        int normalizedLimit = requireLimit(limit, 100);
         ChatEntity chat = chatService.getOwnedChat(requesterId, chatId);
         ResolvedReadScope readScope = resolveReadScope(chat, requesterId, topicId, threadRootMessageId);
-        int normalizedLimit = Math.min(Math.max(limit, 1), 100);
 
         if (readScope.threadRootMessageId() != null) {
             List<MessageThreadEntity> messages = new ArrayList<>(before == null
@@ -1032,14 +1101,14 @@ public class MessageService {
             String query,
             int limit
     ) {
+        int normalizedLimit = requireLimit(limit, 100);
         ChatEntity chat = chatService.getOwnedChat(requesterId, chatId);
         ResolvedReadScope readScope = resolveReadScope(chat, requesterId, topicId, threadRootMessageId);
-        String normalizedQuery = query.trim().toLowerCase();
+        String normalizedQuery = SearchQueryValidationSupport.normalize(query).toLowerCase();
         if (normalizedQuery.isBlank()) {
             return new SearchMessagesResponse(query, List.of());
         }
 
-        int normalizedLimit = Math.min(Math.max(limit, 1), 100);
         if (readScope.threadRootMessageId() != null) {
             List<MessageThreadEntity> threadMessages = messageThreadRepository.findAllByThreadRootMessageId(readScope.threadRootMessageId()).stream()
                     .filter(message -> message.getDeletedAt() == null)
@@ -1136,12 +1205,12 @@ public class MessageService {
             String query,
             int limit
     ) {
-        String normalizedQuery = query.trim().toLowerCase();
+        int normalizedLimit = requireLimit(limit, 50);
+        String normalizedQuery = SearchQueryValidationSupport.normalize(query).toLowerCase();
         if (normalizedQuery.isBlank() || chatIds.isEmpty()) {
             return List.of();
         }
 
-        int normalizedLimit = Math.min(Math.max(limit, 1), 50);
         List<UUID> uniqueChatIds = new ArrayList<>(new LinkedHashSet<>(chatIds));
         Map<UUID, ChatEntity> chatsById = new LinkedHashMap<>();
         for (UUID chatId : uniqueChatIds) {
@@ -1185,6 +1254,13 @@ public class MessageService {
                 messageReactionService.getSummaries(lookup.getMessageId()),
                 getAttachmentResponses(requesterId, lookup.getAttachmentIds())
         );
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be between 1 and " + max);
+        }
+        return limit;
     }
 
     private MessageLookupEntity buildNewMessage(
@@ -1720,6 +1796,7 @@ public class MessageService {
                 content.caption(),
                 content.silent(),
                 content.location(),
+                content.liveLocation(),
                 content.contactCard(),
                 content.serviceMessage(),
                 references.replyToMessageId(),
@@ -1971,6 +2048,7 @@ public class MessageService {
                 content.caption(),
                 content.silent(),
                 content.location(),
+                resolveLiveLocationPayload(content),
                 content.contactCard(),
                 content.serviceMessage(),
                 lookup.getCreatedAt(),
@@ -2035,6 +2113,7 @@ public class MessageService {
                 content.caption(),
                 content.silent(),
                 content.location(),
+                resolveLiveLocationPayload(content),
                 content.contactCard(),
                 content.serviceMessage(),
                 message.getCreatedAt(),
@@ -2099,6 +2178,7 @@ public class MessageService {
                 content.caption(),
                 content.silent(),
                 content.location(),
+                resolveLiveLocationPayload(content),
                 content.contactCard(),
                 content.serviceMessage(),
                 message.getCreatedAt(),
@@ -2163,6 +2243,7 @@ public class MessageService {
                 content.caption(),
                 content.silent(),
                 content.location(),
+                resolveLiveLocationPayload(content),
                 content.contactCard(),
                 content.serviceMessage(),
                 message.getCreatedAt(),
@@ -2316,26 +2397,193 @@ public class MessageService {
         );
     }
 
+    private MessageTextContent activateLiveLocationIfNeeded(MessageLookupEntity lookup, MessageTextContent content) {
+        if (!"LIVE_LOCATION".equals(content.messageType()) || content.liveLocation() == null) {
+            return content;
+        }
+        MessageLiveLocationPayload liveLocation = messageLiveLocationService.activate(
+                lookup.getMessageId(),
+                lookup.getChatId(),
+                lookup.getSenderId(),
+                content.liveLocation()
+        );
+        return syncLiveLocationState(lookup, content, liveLocation);
+    }
+
+    private MessageTextContent syncLiveLocationState(
+            MessageLookupEntity lookup,
+            MessageTextContent content,
+            MessageLiveLocationPayload liveLocation
+    ) {
+        MessageTextContent updatedContent = toLiveLocationContent(
+                content,
+                mergeLiveLocationPayload(content.liveLocation(), liveLocation)
+        );
+        EncryptedPayload encryptedPayload = chatEncryptionService.encrypt(
+                lookup.getChatId(),
+                messageContentCodec.encode(updatedContent)
+        );
+        lookup.setCiphertext(encryptedPayload.ciphertext());
+        lookup.setNonce(encryptedPayload.nonce());
+        lookup.setKeyVersion(encryptedPayload.keyVersion());
+        return updatedContent;
+    }
+
+    private MessageTextContent requireLiveLocationContent(MessageLookupEntity lookup) {
+        MessageTextContent content = decodeMessageContent(lookup);
+        if (!"LIVE_LOCATION".equals(content.messageType()) || content.liveLocation() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message is not a live location");
+        }
+        return content;
+    }
+
+    private MessageTextContent normalizeForwardedContent(MessageTextContent sourceContent) {
+        if (!"LIVE_LOCATION".equals(sourceContent.messageType()) || sourceContent.liveLocation() == null) {
+            return sourceContent;
+        }
+        MessageLiveLocationPayload liveLocation = sourceContent.liveLocation();
+        return toLiveLocationContent(
+                sourceContent,
+                new MessageLiveLocationPayload(
+                        liveLocation.latitude(),
+                        liveLocation.longitude(),
+                        liveLocation.title(),
+                        liveLocation.address(),
+                        resolveForwardedLiveLocationDurationSeconds(liveLocation),
+                        null,
+                        null,
+                        null,
+                        null
+                )
+        );
+    }
+
+    private int resolveForwardedLiveLocationDurationSeconds(MessageLiveLocationPayload liveLocation) {
+        if (liveLocation.livePeriodSeconds() != null
+                && liveLocation.livePeriodSeconds() >= 60
+                && liveLocation.livePeriodSeconds() <= 86_400) {
+            return liveLocation.livePeriodSeconds();
+        }
+        if (liveLocation.expiresAt() != null) {
+            long remainingSeconds = java.time.Duration.between(Instant.now(), liveLocation.expiresAt()).getSeconds();
+            if (remainingSeconds > 0) {
+                return (int) Math.max(60L, Math.min(86_400L, remainingSeconds));
+            }
+        }
+        return 3_600;
+    }
+
+    private MessageTextContent toLiveLocationContent(
+            MessageTextContent content,
+            MessageLiveLocationPayload liveLocation
+    ) {
+        return new MessageTextContent(
+                content.text(),
+                content.entities(),
+                content.messageType(),
+                content.caption(),
+                content.location(),
+                liveLocation,
+                content.contactCard(),
+                content.serviceMessage(),
+                content.silent()
+        );
+    }
+
+    private MessageLiveLocationPayload resolveLiveLocationPayload(MessageTextContent content) {
+        if (content == null || content.liveLocation() == null) {
+            return null;
+        }
+        MessageLiveLocationPayload liveLocation = content.liveLocation();
+        boolean active = liveLocation.stoppedAt() == null
+                && liveLocation.expiresAt() != null
+                && liveLocation.expiresAt().isAfter(Instant.now());
+        return new MessageLiveLocationPayload(
+                liveLocation.latitude(),
+                liveLocation.longitude(),
+                liveLocation.title(),
+                liveLocation.address(),
+                liveLocation.livePeriodSeconds(),
+                liveLocation.expiresAt(),
+                liveLocation.lastUpdatedAt(),
+                liveLocation.stoppedAt(),
+                active
+        );
+    }
+
+    private MessageLiveLocationPayload mergeLiveLocationPayload(
+            MessageLiveLocationPayload base,
+            MessageLiveLocationPayload state
+    ) {
+        if (base == null) {
+            return state;
+        }
+        if (state == null) {
+            return base;
+        }
+        return new MessageLiveLocationPayload(
+                state.latitude() != null ? state.latitude() : base.latitude(),
+                state.longitude() != null ? state.longitude() : base.longitude(),
+                state.title() != null ? state.title() : base.title(),
+                state.address() != null ? state.address() : base.address(),
+                base.livePeriodSeconds() != null ? base.livePeriodSeconds() : state.livePeriodSeconds(),
+                state.expiresAt() != null ? state.expiresAt() : base.expiresAt(),
+                state.lastUpdatedAt() != null ? state.lastUpdatedAt() : base.lastUpdatedAt(),
+                state.stoppedAt() != null ? state.stoppedAt() : base.stoppedAt(),
+                state.active() != null ? state.active() : base.active()
+        );
+    }
+
+    private void validateLiveLocationRequestPayload(MessageLiveLocationPayload liveLocation) {
+        if (liveLocation == null) {
+            return;
+        }
+        Integer livePeriodSeconds = liveLocation.livePeriodSeconds();
+        if (livePeriodSeconds == null || livePeriodSeconds < 60 || livePeriodSeconds > 86_400) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Live location duration is invalid");
+        }
+    }
+
     private MessageTextContent buildUserMessageContent(
             String text,
             String caption,
             List<MessageTextEntityPayload> entities,
             String requestedMessageType,
             MessageLocationPayload location,
+            MessageLiveLocationPayload liveLocation,
             MessageContactCardPayload contactCard,
             Boolean silent,
             List<UUID> attachmentIds,
             UUID stickerId
     ) {
-        if (location != null && contactCard != null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Location and contact card cannot be combined");
+        int structuredPayloadCount = 0;
+        structuredPayloadCount += location != null ? 1 : 0;
+        structuredPayloadCount += liveLocation != null ? 1 : 0;
+        structuredPayloadCount += contactCard != null ? 1 : 0;
+        if (structuredPayloadCount > 1) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Location, live location, and contact card payloads cannot be combined"
+            );
         }
+        validateLiveLocationRequestPayload(liveLocation);
         String normalizedText = text != null ? text.trim() : "";
         String normalizedCaption = caption != null ? caption.trim() : "";
         String effectiveText = !normalizedText.isBlank() ? normalizedText : normalizedCaption;
-        String resolvedMessageType = resolveUserMessageType(requestedMessageType, location, contactCard, attachmentIds, stickerId);
+        String resolvedMessageType = resolveUserMessageType(
+                requestedMessageType,
+                location,
+                liveLocation,
+                contactCard,
+                attachmentIds,
+                stickerId
+        );
         String effectiveCaption = normalizedCaption;
-        if (effectiveCaption.isBlank() && (!attachmentIds.isEmpty() || "LOCATION".equals(resolvedMessageType) || "CONTACT_CARD".equals(resolvedMessageType))) {
+        if (effectiveCaption.isBlank()
+                && (!attachmentIds.isEmpty()
+                || "LOCATION".equals(resolvedMessageType)
+                || "LIVE_LOCATION".equals(resolvedMessageType)
+                || "CONTACT_CARD".equals(resolvedMessageType))) {
             effectiveCaption = effectiveText;
         }
         return messageContentCodec.normalize(
@@ -2344,6 +2592,7 @@ public class MessageService {
                 resolvedMessageType,
                 effectiveCaption,
                 location,
+                liveLocation,
                 contactCard,
                 null,
                 silent
@@ -2353,6 +2602,7 @@ public class MessageService {
     private String resolveUserMessageType(
             String requestedMessageType,
             MessageLocationPayload location,
+            MessageLiveLocationPayload liveLocation,
             MessageContactCardPayload contactCard,
             List<UUID> attachmentIds,
             UUID stickerId
@@ -2365,16 +2615,24 @@ public class MessageService {
             if (!"LOCATION".equals(normalizedRequestedType) && location != null) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Location payload requires LOCATION messageType");
             }
+            if (!"LIVE_LOCATION".equals(normalizedRequestedType) && liveLocation != null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Live location payload requires LIVE_LOCATION messageType");
+            }
             if (!"CONTACT_CARD".equals(normalizedRequestedType) && contactCard != null) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Contact card payload requires CONTACT_CARD messageType");
             }
             if ("LOCATION".equals(normalizedRequestedType) && location == null) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Location payload is required");
             }
+            if ("LIVE_LOCATION".equals(normalizedRequestedType) && liveLocation == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Live location payload is required");
+            }
             if ("CONTACT_CARD".equals(normalizedRequestedType) && contactCard == null) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Contact card payload is required");
             }
-            if (("LOCATION".equals(normalizedRequestedType) || "CONTACT_CARD".equals(normalizedRequestedType))
+            if (("LOCATION".equals(normalizedRequestedType)
+                    || "LIVE_LOCATION".equals(normalizedRequestedType)
+                    || "CONTACT_CARD".equals(normalizedRequestedType))
                     && (!attachmentIds.isEmpty() || stickerId != null)) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Structured messages cannot be combined with stickers or attachments");
             }
@@ -2385,6 +2643,12 @@ public class MessageService {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Location messages cannot be combined with stickers or attachments");
             }
             return "LOCATION";
+        }
+        if (liveLocation != null) {
+            if (!attachmentIds.isEmpty() || stickerId != null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Live location messages cannot be combined with stickers or attachments");
+            }
+            return "LIVE_LOCATION";
         }
         if (contactCard != null) {
             if (!attachmentIds.isEmpty() || stickerId != null) {
@@ -2398,6 +2662,7 @@ public class MessageService {
     private boolean isMessageEmpty(MessageTextContent content, List<UUID> attachmentIds, UUID stickerId) {
         return content.text().isBlank()
                 && content.location() == null
+                && content.liveLocation() == null
                 && content.contactCard() == null
                 && content.serviceMessage() == null
                 && attachmentIds.isEmpty()

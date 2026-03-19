@@ -96,4 +96,40 @@ class BotInlineResultCacheServiceTest {
                 )
         )).isInstanceOf(ResponseStatusException.class);
     }
+
+    @Test
+    void replaceCachedResultsRejectsNegativeCacheTime() {
+        UUID botUserId = UUID.randomUUID();
+        BotAccountEntity account = new BotAccountEntity();
+        account.setBotUserId(botUserId);
+
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(account));
+
+        assertThatThrownBy(() -> botInlineResultCacheService.replaceCachedResults(
+                botUserId,
+                new BotApiAnswerInlineQueryRequest(
+                        "weather",
+                        -1,
+                        List.of(new BotApiInlineResultRequest("forecast", "Forecast", "Today", "Sunny"))
+                )
+        )).isInstanceOf(ResponseStatusException.class);
+    }
+
+    @Test
+    void replaceCachedResultsRejectsTooLargeCacheTime() {
+        UUID botUserId = UUID.randomUUID();
+        BotAccountEntity account = new BotAccountEntity();
+        account.setBotUserId(botUserId);
+
+        when(botAccountRepository.findById(botUserId)).thenReturn(Optional.of(account));
+
+        assertThatThrownBy(() -> botInlineResultCacheService.replaceCachedResults(
+                botUserId,
+                new BotApiAnswerInlineQueryRequest(
+                        "weather",
+                        3601,
+                        List.of(new BotApiInlineResultRequest("forecast", "Forecast", "Today", "Sunny"))
+                )
+        )).isInstanceOf(ResponseStatusException.class);
+    }
 }

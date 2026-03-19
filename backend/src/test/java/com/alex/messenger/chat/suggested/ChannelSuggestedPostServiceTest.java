@@ -189,6 +189,71 @@ class ChannelSuggestedPostServiceTest {
     }
 
     @Test
+    void createSuggestedPostRejectsMissingRequest() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> channelSuggestedPostService.createSuggestedPost(requesterId, chatId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Suggested post payload is required");
+    }
+
+    @Test
+    void createSuggestedPostRejectsNullAttachmentId() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = channel(chatId, "public_channel");
+        MessageTextContent content = new MessageTextContent("Promoted post", List.of());
+
+        when(chatService.getChat(chatId)).thenReturn(chat);
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(false);
+        when(messageContentCodec.normalize(any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(content);
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> channelSuggestedPostService.createSuggestedPost(
+                        requesterId,
+                        chatId,
+                        new CreateSuggestedPostRequest(
+                                "Promoted post",
+                                null,
+                                null,
+                                List.of(),
+                                null,
+                                null,
+                                java.util.Arrays.asList(UUID.randomUUID(), null),
+                                null,
+                                false,
+                                null
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("Suggested post attachment ids must not contain null");
+    }
+
+    @Test
+    void listSuggestedPostsRejectsInvalidLimit() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> channelSuggestedPostService.listSuggestedPosts(UUID.randomUUID(), UUID.randomUUID(), null, 101),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 100");
+    }
+
+    @Test
     void approveSuggestedPostPublishesMessageWhenInvoiceIsPaid() {
         UUID reviewerId = UUID.randomUUID();
         UUID submitterId = UUID.randomUUID();

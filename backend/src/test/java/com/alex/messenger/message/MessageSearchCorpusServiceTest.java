@@ -5,7 +5,9 @@ import static org.mockito.Mockito.when;
 
 import com.alex.messenger.attachment.AttachmentEntity;
 import com.alex.messenger.attachment.AttachmentRepository;
+import com.alex.messenger.message.dto.MessageLiveLocationPayload;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
@@ -69,5 +71,41 @@ class MessageSearchCorpusServiceTest {
         assertThat(corpus).contains("urlaub");
         assertThat(corpus).contains("strand");
         assertThat(corpus).contains("de");
+    }
+
+    @Test
+    void buildSearchCorpusIncludesLiveLocationMetadata() {
+        UUID messageId = UUID.randomUUID();
+
+        when(messageTranslationCacheRepository.findAllByMessageId(messageId)).thenReturn(List.of());
+
+        String corpus = messageSearchCorpusService.buildSearchCorpus(
+                messageId,
+                new MessageTextContent(
+                        "",
+                        List.of(),
+                        "LIVE_LOCATION",
+                        null,
+                        null,
+                        new MessageLiveLocationPayload(
+                                53.9,
+                                27.56,
+                                "Downtown route",
+                                "Near river station",
+                                1_800,
+                                Instant.parse("2999-01-01T00:00:00Z"),
+                                Instant.parse("2026-03-19T16:00:00Z"),
+                                null,
+                                true
+                        ),
+                        null,
+                        null,
+                        false
+                ),
+                List.of()
+        );
+
+        assertThat(corpus).contains("downtown route");
+        assertThat(corpus).contains("near river station");
     }
 }

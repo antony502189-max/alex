@@ -19,6 +19,7 @@ import com.alex.messenger.chat.ChatMemberId;
 import com.alex.messenger.chat.ChatMemberRepository;
 import com.alex.messenger.chat.ChatRepository;
 import com.alex.messenger.chat.ChatService;
+import com.alex.messenger.feature.FeatureFlagService;
 import com.alex.messenger.media.PhotoAccess;
 import com.alex.messenger.media.ProfilePhotoService;
 import com.alex.messenger.user.UserEntity;
@@ -47,7 +48,9 @@ import org.springframework.web.server.ResponseStatusException;
 public class CallService {
 
     private static final List<String> LIVE_STATUSES = List.of("RINGING", "ACTIVE");
+    private static final List<String> GROUP_CALL_MODES = List.of("GROUP", "VOICE_CHAT", "LIVE_STREAM");
     private static final List<String> TERMINAL_PARTICIPANT_STATES = List.of("LEFT", "DECLINED", "MISSED");
+    private static final List<String> UNANSWERED_PARTICIPANT_STATES = List.of("RINGING", "INVITED");
 
     private final CallSessionRepository callSessionRepository;
     private final CallParticipantRepository callParticipantRepository;
@@ -60,6 +63,9 @@ public class CallService {
     private final UserRepository userRepository;
     private final ProfilePhotoService profilePhotoService;
     private final CallRealtimeService callRealtimeService;
+    private final CallNotificationService callNotificationService;
+    private final FeatureFlagService featureFlagService;
+    private final CallLifecycleProperties callLifecycleProperties;
     private final SecureRandom secureRandom = new SecureRandom();
 
     @Transactional(readOnly = true)
@@ -200,6 +206,7 @@ public class CallService {
             ensureCanStartManagedLiveCall(chat, requesterId, link.getMode());
             session = createCallSession(chat, requesterId, link.getKind(), link.getMode(), false, now);
             publishSessionUpdate(session, "STARTED");
+            callNotificationService.notifyStartedCall(session);
         } else {
             ensureJoinLinkMatchesSession(link, session);
             joinParticipantState(session, requesterId, now);
@@ -234,7 +241,26 @@ public class CallService {
                 Instant.now()
         );
         publishSessionUpdate(savedSession, "STARTED");
+        callNotificationService.notifyStartedCall(savedSession);
         return toResponse(savedSession, requesterId);
+    }
+
+    @Transactional
+    public int expireStaleRingingCalls() {
+        Instant now = Instant.now();
+        Instant timeoutThreshold = now.minus(callLifecycleProperties.getRingTimeout());
+        List<CallSessionEntity> sessions = callSessionRepository.findAllByStatusAndStartedAtBeforeOrderByStartedAtAsc(
+                "RINGING",
+                timeoutThreshold,
+                PageRequest.of(0, Math.max(1, callLifecycleProperties.getRingTimeoutBatchSize()))
+        );
+        int expiredCount = 0;
+        for (CallSessionEntity session : sessions) {
+            if (expireRingingSession(session, now)) {
+                expiredCount++;
+            }
+        }
+        return expiredCount;
     }
 
     @Transactional
@@ -258,7 +284,7 @@ public class CallService {
         if (TERMINAL_PARTICIPANT_STATES.contains(participant.getState())) {
             return toResponse(session, requesterId);
         }
-        if (!List.of("RINGING", "INVITED").contains(participant.getState())) {
+        if (!UNANSWERED_PARTICIPANT_STATES.contains(participant.getState())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Only invited participants can decline the call");
         }
         Instant now = Instant.now();
@@ -687,6 +713,44 @@ public class CallService {
         return !LIVE_STATUSES.contains(session.getStatus()) || !isActiveForViewer(participant);
     }
 
+    private boolean expireRingingSession(CallSessionEntity session, Instant endedAt) {
+        if (!"RINGING".equals(session.getStatus())) {
+            return false;
+        }
+
+        List<CallParticipantEntity> participants = callParticipantRepository.findAllByIdCallId(session.getId());
+        boolean participantsChanged = false;
+        for (CallParticipantEntity participant : participants) {
+            if ("JOINED".equals(participant.getState())) {
+                participant.setState("LEFT");
+                participant.setLeftAt(endedAt);
+                participant.setScreenSharing(false);
+                participant.setHandRaised(false);
+                participantsChanged = true;
+                continue;
+            }
+            if (!UNANSWERED_PARTICIPANT_STATES.contains(participant.getState())) {
+                continue;
+            }
+            participant.setState("MISSED");
+            participant.setLeftAt(endedAt);
+            participant.setScreenSharing(false);
+            participant.setHandRaised(false);
+            participantsChanged = true;
+        }
+        if (participantsChanged) {
+            callParticipantRepository.saveAll(participants);
+        }
+
+        session.setStatus("ENDED");
+        if (session.getEndedAt() == null) {
+            session.setEndedAt(endedAt);
+        }
+        callSessionRepository.save(session);
+        publishSessionUpdate(session, "UPDATED");
+        return true;
+    }
+
     private CallParticipantEntity findParticipant(List<CallParticipantEntity> participants, UUID userId) {
         if (participants == null || participants.isEmpty()) {
             return null;
@@ -713,7 +777,7 @@ public class CallService {
         List<CallParticipantEntity> participants = callParticipantRepository.findAllByIdCallId(callId);
         boolean changed = false;
         for (CallParticipantEntity participant : participants) {
-            if (!List.of("RINGING", "INVITED").contains(participant.getState())) {
+            if (!UNANSWERED_PARTICIPANT_STATES.contains(participant.getState())) {
                 continue;
             }
             participant.setState("MISSED");
@@ -763,6 +827,7 @@ public class CallService {
                     "This call mode is available only in group and channel chats"
             );
         }
+        requireModeEnabled(normalized);
         return normalized;
     }
 
@@ -881,6 +946,13 @@ public class CallService {
     private void ensureLiveJoinLinkMode(String mode) {
         if (!List.of("VOICE_CHAT", "LIVE_STREAM").contains(mode)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Call links support live call modes only");
+        }
+        requireModeEnabled(mode);
+    }
+
+    private void requireModeEnabled(String mode) {
+        if (GROUP_CALL_MODES.contains(mode)) {
+            featureFlagService.requireGroupCallsEnabled();
         }
     }
 

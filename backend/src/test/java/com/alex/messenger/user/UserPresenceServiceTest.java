@@ -1,16 +1,20 @@
 package com.alex.messenger.user;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.Mockito.when;
 
 import com.alex.messenger.auth.session.UserSessionService;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class UserPresenceServiceTest {
@@ -71,5 +75,22 @@ class UserPresenceServiceTest {
         assertThat(presence.online()).isFalse();
         assertThat(presence.lastSeenAt()).isNull();
         assertThat(presence.visibility()).isEqualTo("HIDDEN");
+    }
+
+    @Test
+    void listPresenceRejectsTooManyUsers() {
+        UUID requesterId = UUID.randomUUID();
+        var userIds = new ArrayList<UUID>();
+        for (int index = 0; index < 101; index++) {
+            userIds.add(UUID.randomUUID());
+        }
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> userPresenceService.listPresence(requesterId, userIds),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 }

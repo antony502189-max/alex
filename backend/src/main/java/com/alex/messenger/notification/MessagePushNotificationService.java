@@ -103,8 +103,9 @@ public class MessagePushNotificationService {
     }
 
     private String buildTitle(ChatEntity chat, UserEntity sender) {
+        String senderName = resolveSenderName(sender);
         if ("DIRECT".equals(chat.getChatType())) {
-            return sender.getDisplayName();
+            return senderName;
         }
         return chat.getTitle() != null && !chat.getTitle().isBlank()
                 ? chat.getTitle()
@@ -112,8 +113,9 @@ public class MessagePushNotificationService {
     }
 
     private String buildBody(ChatEntity chat, UserEntity sender, String preview) {
+        String senderName = resolveSenderName(sender);
         if ("GROUP".equals(chat.getChatType())) {
-            return sender.getDisplayName() + ": " + preview;
+            return senderName + ": " + preview;
         }
         if ("CHANNEL".equals(chat.getChatType())) {
             return preview;
@@ -122,12 +124,20 @@ public class MessagePushNotificationService {
     }
 
     private String buildPreview(MessageEvent event, MessageTextContent content, List<MessageAttachmentResponse> attachments) {
-        String normalizedText = content != null ? content.text().trim() : "";
+        String normalizedText = content != null && content.text() != null ? content.text().trim() : "";
         if (!normalizedText.isBlank()) {
             return normalizedText.length() > 120 ? normalizedText.substring(0, 120) + "..." : normalizedText;
         }
         if (content != null && "LOCATION".equals(content.messageType())) {
             return "shared a location";
+        }
+        if (content != null && "LIVE_LOCATION".equals(content.messageType())) {
+            String label = content.liveLocation() != null && content.liveLocation().title() != null
+                    ? content.liveLocation().title().trim()
+                    : "";
+            return label.isBlank()
+                    ? "is sharing live location"
+                    : "is sharing live location: " + label;
         }
         if (content != null && "CONTACT_CARD".equals(content.messageType())) {
             return "shared a contact";
@@ -159,5 +169,12 @@ public class MessagePushNotificationService {
             return "sent an attachment";
         }
         return "sent a message";
+    }
+
+    private String resolveSenderName(UserEntity sender) {
+        if (sender == null || sender.getDisplayName() == null || sender.getDisplayName().isBlank()) {
+            return "Someone";
+        }
+        return sender.getDisplayName().trim();
     }
 }

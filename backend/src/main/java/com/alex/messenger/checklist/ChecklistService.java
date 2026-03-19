@@ -61,6 +61,9 @@ public class ChecklistService {
 
     @Transactional
     public ChecklistResponse createChecklist(UUID requesterId, CreateChecklistRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Checklist payload is required");
+        }
         ChatEntity chat = chatService.getOwnedChat(requesterId, request.chatId());
         chatService.ensureCanPost(chat, requesterId);
         UUID normalizedTopicId = validateTopic(chat, requesterId, request.topicId(), true);
@@ -210,6 +213,9 @@ public class ChecklistService {
     ) {
         if (requests.isEmpty()) {
             return List.of();
+        }
+        if (requests.stream().anyMatch(Objects::isNull)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Checklist tasks must not contain null");
         }
 
         List<ChecklistTaskEntity> tasks = new ArrayList<>();

@@ -29,8 +29,10 @@ import com.alex.messenger.message.dto.SendMessageRequest;
 import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 @Service
 @RequiredArgsConstructor
@@ -48,6 +50,11 @@ public class BotApiService {
 
     @Transactional
     public ChatMessageResponse sendMessage(UUID botUserId, BotApiSendMessageRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Send message payload is required");
+        }
+        requireTarget(request.chatId(), request.recipientUserId());
+        requireValidSendMessageRequest(request);
         ChatMessageResponse response = messageService.sendMessage(
                 botUserId,
                 new SendMessageRequest(
@@ -108,6 +115,9 @@ public class BotApiService {
 
     @Transactional
     public ChatMessageResponse sendMediaGroup(UUID botUserId, BotApiSendMediaGroupRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Media group payload is required");
+        }
         ChatEntity targetChat = resolveTargetChat(botUserId, request.chatId(), request.recipientUserId());
         List<UUID> clonedAttachmentIds = attachmentService.cloneAttachmentsToChatAsAlbum(
                 botUserId,
@@ -139,6 +149,9 @@ public class BotApiService {
 
     @Transactional
     public ChatMessageResponse editMessageText(UUID botUserId, BotApiEditMessageTextRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Edit message payload is required");
+        }
         return messageService.editMessage(
                 botUserId,
                 request.messageId(),
@@ -148,6 +161,9 @@ public class BotApiService {
 
     @Transactional
     public BotApiDeleteMessageResponse deleteMessage(UUID botUserId, BotApiDeleteMessageRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Delete message payload is required");
+        }
         ChatMessageResponse response = messageService.deleteMessage(botUserId, request.messageId());
         return new BotApiDeleteMessageResponse(response.messageId(), response.deletedAt() != null);
     }
@@ -159,16 +175,25 @@ public class BotApiService {
 
     @Transactional
     public List<BotCommandResponse> setMyCommands(UUID botUserId, BotApiSetMyCommandsRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Commands payload is required");
+        }
         return botCommandService.replaceCommands(botUserId, request.commands());
     }
 
     @Transactional
     public List<BotInlineResultResponse> answerInlineQuery(UUID botUserId, BotApiAnswerInlineQueryRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Inline query answer payload is required");
+        }
         return botInlineResultCacheService.replaceCachedResults(botUserId, request);
     }
 
     @Transactional
     public BotCallbackQueryResponse answerCallbackQuery(UUID botUserId, BotApiAnswerCallbackQueryRequest request) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Callback answer payload is required");
+        }
         return botCallbackQueryService.answerCallbackQuery(botUserId, request);
     }
 
@@ -200,6 +225,10 @@ public class BotApiService {
             BotApiSendAttachmentMessageRequest request,
             String messageType
     ) {
+        if (request == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Attachment message payload is required");
+        }
+        requireTarget(request.chatId(), request.recipientUserId());
         ChatMessageResponse response = messageService.sendMessage(
                 botUserId,
                 new SendMessageRequest(
@@ -234,5 +263,38 @@ public class BotApiService {
                 org.springframework.http.HttpStatus.BAD_REQUEST,
                 "chatId or recipientUserId is required"
         );
+    }
+
+    private void requireTarget(UUID chatId, UUID recipientUserId) {
+        if (chatId == null && recipientUserId == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "chatId or recipientUserId is required");
+        }
+    }
+
+    private void requireValidSendMessageRequest(BotApiSendMessageRequest request) {
+        if (!request.hasPayload()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Message must contain text, attachments, sticker, or structured payload"
+            );
+        }
+        if (!request.hasAtMostOneStructuredPayload()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Location and contact card payloads cannot be combined"
+            );
+        }
+        if (!request.isPublicMessageType()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Service messages cannot be sent from the bot API"
+            );
+        }
+        if (!request.hasValidStructuredPayloadUsage()) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Structured message payload and messageType combination is invalid"
+            );
+        }
     }
 }

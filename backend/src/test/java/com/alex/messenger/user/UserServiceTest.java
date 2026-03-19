@@ -10,6 +10,8 @@ import static org.mockito.Mockito.when;
 import com.alex.messenger.media.PhotoAccess;
 import com.alex.messenger.media.ProfilePhotoService;
 import com.alex.messenger.user.dto.BlockUserRequest;
+import com.alex.messenger.user.dto.ImportContactsRequest;
+import com.alex.messenger.user.dto.ImportedPhoneContactPayload;
 import com.alex.messenger.user.dto.ReportUserRequest;
 import com.alex.messenger.user.dto.UpdateLanguagePreferencesRequest;
 import com.alex.messenger.user.dto.UpsertContactNoteRequest;
@@ -97,6 +99,20 @@ class UserServiceTest {
 
         assertThat(results).extracting(UserSearchResponse::userId)
                 .containsExactly(visibleUser.getId());
+    }
+
+    @Test
+    void searchRejectsTooLongQuery() {
+        UUID requesterId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> userService.search(requesterId, "a".repeat(256)),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verify(userRepository, never()).search(any());
     }
 
     @Test
@@ -223,6 +239,49 @@ class UserServiceTest {
         assertThat(birthdays.get(0).contactUserId()).isEqualTo(soonContactId);
         assertThat(birthdays.get(0).contactName()).isEqualTo("Soon");
         assertThat(birthdays.get(0).daysUntil()).isEqualTo(3);
+    }
+
+    @Test
+    void listUpcomingBirthdaysRejectsInvalidWindow() {
+        UUID requesterId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> userService.listUpcomingBirthdays(requesterId, 366),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void importContactsRejectsOversizedBatch() {
+        UUID requesterId = UUID.randomUUID();
+        var contacts = new java.util.ArrayList<ImportedPhoneContactPayload>();
+        for (int index = 0; index < 1001; index++) {
+            contacts.add(new ImportedPhoneContactPayload("+375290000" + index, "User " + index));
+        }
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> userService.importContacts(requesterId, new ImportContactsRequest(contacts, true)),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void importContactsRejectsMissingPayload() {
+        UUID requesterId = UUID.randomUUID();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> userService.importContacts(requesterId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     private UserEntity user(String displayName, UUID userId) {

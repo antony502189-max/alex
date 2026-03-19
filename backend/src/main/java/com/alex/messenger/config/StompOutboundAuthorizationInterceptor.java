@@ -47,6 +47,9 @@ public class StompOutboundAuthorizationInterceptor implements ChannelInterceptor
 
         UUID userId = extractAuthenticatedUserId(accessor);
         if (destination.startsWith("/user/queue/")) {
+            if (!StompUserQueueDestinationPolicy.isAllowed(destination)) {
+                return null;
+            }
             return userId != null && hasActiveSession(accessor, userId) ? message : null;
         }
 

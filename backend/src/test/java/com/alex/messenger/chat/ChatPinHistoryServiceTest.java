@@ -1,6 +1,7 @@
 package com.alex.messenger.chat;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -133,6 +134,18 @@ class ChatPinHistoryServiceTest {
         assertThat(response.get(0).message().messageId()).isEqualTo(visibleMessageId);
         assertThat(response.get(0).message().text()).isEqualTo("Older visible pin");
         verify(chatPinEventRepository).findAllByChatIdOrderByPinnedAtDesc(eq(chatId), eq(org.springframework.data.domain.PageRequest.of(1, 6)));
+    }
+
+    @Test
+    void listPinnedMessagesRejectsInvalidLimit() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatPinHistoryService.listPinnedMessages(UUID.randomUUID(), UUID.randomUUID(), 0),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 50");
     }
 
     private ChatPinEventEntity pinEvent(

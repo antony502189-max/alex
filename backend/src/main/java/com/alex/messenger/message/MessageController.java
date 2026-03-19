@@ -14,13 +14,16 @@ import com.alex.messenger.message.dto.SendInlineBotResultRequest;
 import com.alex.messenger.message.dto.ToggleReactionRequest;
 import com.alex.messenger.message.dto.TranslateMessageRequest;
 import com.alex.messenger.message.dto.TranslatedMessageResponse;
+import com.alex.messenger.message.dto.UpdateLiveLocationRequest;
 import com.alex.messenger.message.dto.VotePollRequest;
 import com.alex.messenger.shared.CurrentUser;
+import com.alex.messenger.shared.SearchQueryValidationSupport;
 import jakarta.validation.Valid;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -32,6 +35,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestController
 @RequestMapping("/api/messages")
@@ -83,7 +87,7 @@ public class MessageController {
     @PostMapping("/{messageId}/poll/vote")
     public ResponseEntity<ChatMessageResponse> votePoll(
             @PathVariable UUID messageId,
-            @RequestBody VotePollRequest request
+            @Valid @RequestBody VotePollRequest request
     ) {
         return ResponseEntity.ok(messageService.votePoll(CurrentUser.id(), messageId, request));
     }
@@ -109,6 +113,19 @@ public class MessageController {
         return ResponseEntity.ok(messageService.editMessage(CurrentUser.id(), messageId, request));
     }
 
+    @PatchMapping("/{messageId}/live-location")
+    public ResponseEntity<ChatMessageResponse> updateLiveLocation(
+            @PathVariable UUID messageId,
+            @Valid @RequestBody UpdateLiveLocationRequest request
+    ) {
+        return ResponseEntity.ok(messageService.updateLiveLocation(CurrentUser.id(), messageId, request));
+    }
+
+    @PostMapping("/{messageId}/live-location/stop")
+    public ResponseEntity<ChatMessageResponse> stopLiveLocation(@PathVariable UUID messageId) {
+        return ResponseEntity.ok(messageService.stopLiveLocation(CurrentUser.id(), messageId));
+    }
+
     @DeleteMapping("/{messageId}")
     public ResponseEntity<ChatMessageResponse> deleteMessage(@PathVariable UUID messageId) {
         return ResponseEntity.ok(messageService.deleteMessage(CurrentUser.id(), messageId));
@@ -123,7 +140,14 @@ public class MessageController {
             @RequestParam(defaultValue = "50") int limit
     ) {
         return ResponseEntity.ok(
-                messageService.getHistory(CurrentUser.id(), chatId, topicId, threadRootMessageId, before, limit)
+                messageService.getHistory(
+                        CurrentUser.id(),
+                        chatId,
+                        topicId,
+                        threadRootMessageId,
+                        before,
+                        requireLimit(limit, 100)
+                )
         );
     }
 
@@ -146,8 +170,16 @@ public class MessageController {
             @RequestParam String query,
             @RequestParam(defaultValue = "20") int limit
     ) {
+        SearchQueryValidationSupport.normalize(query);
         return ResponseEntity.ok(
-                messageService.searchMessages(CurrentUser.id(), chatId, topicId, threadRootMessageId, query, limit)
+                messageService.searchMessages(
+                        CurrentUser.id(),
+                        chatId,
+                        topicId,
+                        threadRootMessageId,
+                        query,
+                        requireLimit(limit, 100)
+                )
         );
     }
 
@@ -168,5 +200,15 @@ public class MessageController {
     public ResponseEntity<Void> cancelScheduledMessage(@PathVariable UUID scheduledMessageId) {
         messageService.cancelScheduledMessage(CurrentUser.id(), scheduledMessageId);
         return ResponseEntity.noContent().build();
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "limit must be between 1 and " + max
+            );
+        }
+        return limit;
     }
 }

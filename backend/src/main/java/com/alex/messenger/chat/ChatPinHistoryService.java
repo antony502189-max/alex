@@ -30,9 +30,9 @@ public class ChatPinHistoryService {
 
     @Transactional(readOnly = true)
     public List<PinnedMessageHistoryResponse> listPinnedMessages(UUID requesterId, UUID chatId, int limit) {
+        int normalizedLimit = requireLimit(limit, 50);
         chatService.getOwnedChat(requesterId, chatId);
 
-        int normalizedLimit = Math.min(Math.max(limit, 1), 50);
         int pageSize = Math.min(Math.max(normalizedLimit * 2, normalizedLimit + 5), 50);
         int scanLimit = Math.min(Math.max(normalizedLimit * 4, pageSize * 2), 200);
         List<PinnedMessageHistoryResponse> visiblePins = new ArrayList<>();
@@ -90,5 +90,12 @@ public class ChatPinHistoryService {
                 pinEvent.getUnpinnedAt(),
                 message
         );
+    }
+
+    private int requireLimit(int limit, int max) {
+        if (limit < 1 || limit > max) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "limit must be between 1 and " + max);
+        }
+        return limit;
     }
 }

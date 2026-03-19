@@ -1,6 +1,8 @@
 package com.alex.messenger.search;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.alex.messenger.chat.ChatService;
@@ -19,6 +21,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class GlobalSearchServiceTest {
@@ -215,5 +219,30 @@ class GlobalSearchServiceTest {
         GlobalSearchResponse response = globalSearchService.search(requesterId, "alpha", 10);
 
         assertThat(response.chats()).extracting(ChatSummaryResponse::chatId).containsExactly(chatId);
+    }
+
+    @Test
+    void searchRejectsTooLongQuery() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> globalSearchService.search(UUID.randomUUID(), "a".repeat(256), 10),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        verifyNoInteractions(userService, chatService, messageService);
+    }
+
+    @Test
+    void searchRejectsInvalidLimit() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> globalSearchService.search(UUID.randomUUID(), "alex", 0),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 20");
+        verifyNoInteractions(userService, chatService, messageService);
     }
 }

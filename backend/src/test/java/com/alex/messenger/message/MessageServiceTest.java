@@ -26,10 +26,12 @@ import com.alex.messenger.message.dto.ChatMessageResponse;
 import com.alex.messenger.message.dto.CreateRepeatingMessageRequest;
 import com.alex.messenger.message.dto.ForwardMessageRequest;
 import com.alex.messenger.message.dto.MessageAttachmentResponse;
+import com.alex.messenger.message.dto.MessageLiveLocationPayload;
 import com.alex.messenger.message.dto.RepeatingMessageResponse;
 import com.alex.messenger.message.dto.SendMessageRequest;
 import com.alex.messenger.message.dto.ScheduledMessageResponse;
 import com.alex.messenger.message.dto.SearchMessagesResponse;
+import com.alex.messenger.message.dto.UpdateLiveLocationRequest;
 import com.alex.messenger.message.expiration.MessageExpirationRepository;
 import com.alex.messenger.message.idempotency.MessageIdempotencyService;
 import com.alex.messenger.message.repeating.RepeatingMessageRuleEntity;
@@ -53,6 +55,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
+import org.springframework.web.server.ResponseStatusException;
 
 import static org.mockito.Mockito.lenient;
 
@@ -97,6 +100,9 @@ class MessageServiceTest {
 
     @Mock
     private ForumTopicService forumTopicService;
+
+    @Mock
+    private MessageLiveLocationService messageLiveLocationService;
 
     @Mock
     private ChatEncryptionService chatEncryptionService;
@@ -155,6 +161,7 @@ class MessageServiceTest {
                 chatAdminLogService,
                 chatService,
                 forumTopicService,
+                messageLiveLocationService,
                 chatEncryptionService,
                 messageContentCodec,
                 messageSearchCorpusService,
@@ -196,7 +203,7 @@ class MessageServiceTest {
 
         when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
         when(forumTopicService.resolveTopicForWrite(chat, senderId, null)).thenReturn(null);
-        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any()))
+        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new MessageTextContent("Reminder", List.of()));
         when(messageContentCodec.encode(any(MessageTextContent.class))).thenReturn("encoded-repeat");
         when(chatEncryptionService.encrypt(chatId, "encoded-repeat"))
@@ -364,6 +371,76 @@ class MessageServiceTest {
     }
 
     @Test
+    void searchMessagesRejectsInvalidLimit() {
+        assertThatThrownBy(() -> messageService.searchMessages(
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                null,
+                null,
+                "hello",
+                0
+        ))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception -> {
+                    assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 100");
+                });
+    }
+
+    @Test
+    void getHistoryRejectsInvalidLimit() {
+        assertThatThrownBy(() -> messageService.getHistory(
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                null,
+                null,
+                null,
+                0
+        ))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception -> {
+                    assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 100");
+                });
+    }
+
+    @Test
+    void searchMessagesRejectsTooLongQuery() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "GROUP");
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(forumTopicService.resolveTopicForRead(chat, requesterId, null)).thenReturn(null);
+
+        assertThatThrownBy(() -> messageService.searchMessages(
+                requesterId,
+                chatId,
+                null,
+                null,
+                "a".repeat(256),
+                20
+        ))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception ->
+                        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST)
+                );
+
+        verify(messageRepository, never()).findAllByChatId(chatId);
+    }
+
+    @Test
+    void searchGlobalMessagesRejectsInvalidLimit() {
+        assertThatThrownBy(() -> messageService.searchGlobalMessages(
+                UUID.randomUUID(),
+                List.of(UUID.randomUUID()),
+                "hello",
+                0
+        ))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception -> {
+                    assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 50");
+                });
+    }
+
+    @Test
     void getMessageUsesRequesterScopedAttachmentResponses() {
         UUID requesterId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();
@@ -463,7 +540,7 @@ class MessageServiceTest {
         when(chatService.getRecipientIdsForSystem(discussionChat, senderId)).thenReturn(List.of(discussionRecipientId));
         when(chatService.isCrossPostingEnabled(channelChatId)).thenReturn(true);
         when(forumTopicService.resolveTopicForWrite(channelChat, senderId, null)).thenReturn(null);
-        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any()))
+        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new MessageTextContent("Channel post", List.of()));
         when(messageContentCodec.encode(any(MessageTextContent.class))).thenReturn("encoded-message");
         when(chatEncryptionService.encrypt(channelChatId, "encoded-message"))
@@ -617,6 +694,21 @@ class MessageServiceTest {
         );
 
         assertThat(response).extracting(ChatMessageResponse::messageId).containsExactly(messageId);
+    }
+
+    @Test
+    void searchGlobalMessagesRejectsTooLongQuery() {
+        assertThatThrownBy(() -> messageService.searchGlobalMessages(
+                UUID.randomUUID(),
+                List.of(UUID.randomUUID()),
+                "a".repeat(256),
+                20
+        ))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception ->
+                        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST)
+                );
+
+        verify(chatService, never()).getOwnedChat(any(), any());
     }
 
     @Test
@@ -1000,7 +1092,7 @@ class MessageServiceTest {
         deletedReplyTarget.setChatId(chatId);
         deletedReplyTarget.setDeletedAt(Instant.parse("2026-03-14T09:59:00Z"));
 
-        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any()))
+        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new MessageTextContent("Hello", List.of()));
         when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
         when(forumTopicService.resolveTopicForWrite(chat, senderId, null)).thenReturn(null);
@@ -1280,12 +1372,228 @@ class MessageServiceTest {
         verify(publicPostSearchService).syncMessage(lookup);
         assertThat(lookup.getDeletedAt()).isNotNull();
     }
+
+    @Test
+    void updateLiveLocationPublishesUpdatedMessageEvent() {
+        UUID senderId = UUID.randomUUID();
+        UUID recipientId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        Instant expiresAt = Instant.parse("2999-01-01T00:00:00Z");
+        Instant updatedAt = Instant.parse("2026-03-19T16:05:00Z");
+
+        ChatEntity chat = chat(chatId, "DIRECT");
+        MessageLookupEntity lookup = new MessageLookupEntity();
+        lookup.setMessageId(messageId);
+        lookup.setChatId(chatId);
+        lookup.setSenderId(senderId);
+        lookup.setCreatedAt(Instant.parse("2026-03-19T16:00:00Z"));
+        lookup.setCiphertext("cipher-live-original");
+        lookup.setNonce("nonce-live-original");
+        lookup.setKeyVersion(1);
+        lookup.setAttachmentIds(List.of());
+        lookup.setDeliveryStatus("READ");
+
+        MessageLiveLocationPayload originalLiveLocation = new MessageLiveLocationPayload(
+                53.9,
+                27.56,
+                "Downtown",
+                "Old address",
+                3_600,
+                expiresAt,
+                Instant.parse("2026-03-19T16:00:00Z"),
+                null,
+                true
+        );
+        MessageLiveLocationPayload updatedLiveLocation = new MessageLiveLocationPayload(
+                54.1,
+                27.7,
+                "Updated point",
+                "New address",
+                3_600,
+                expiresAt,
+                updatedAt,
+                null,
+                true
+        );
+        MessageTextContent originalContent = liveLocationContent(originalLiveLocation);
+        MessageTextContent updatedContent = liveLocationContent(updatedLiveLocation);
+        UpdateLiveLocationRequest request = new UpdateLiveLocationRequest(54.1, 27.7, "Updated point", "New address");
+
+        when(messageLookupRepository.findById(messageId)).thenReturn(Optional.of(lookup));
+        when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
+        when(chatService.getRecipientIds(chat, senderId)).thenReturn(List.of(recipientId));
+        when(chatEncryptionService.decrypt(chatId, "cipher-live-original", "nonce-live-original", 1))
+                .thenReturn("decoded-live-original");
+        when(chatEncryptionService.decrypt(chatId, "cipher-live-updated", "nonce-live-updated", 2))
+                .thenReturn("decoded-live-updated");
+        when(messageContentCodec.decode("decoded-live-original")).thenReturn(originalContent);
+        when(messageContentCodec.decode("decoded-live-updated")).thenReturn(updatedContent);
+        when(messageLiveLocationService.update(lookup, request)).thenReturn(updatedLiveLocation);
+        when(messageContentCodec.encode(updatedContent)).thenReturn("encoded-live-updated");
+        when(chatEncryptionService.encrypt(chatId, "encoded-live-updated"))
+                .thenReturn(new EncryptedPayload("cipher-live-updated", "nonce-live-updated", 2));
+        when(attachmentService.getResponses(senderId, List.of())).thenReturn(List.of());
+
+        ChatMessageResponse response = messageService.updateLiveLocation(senderId, messageId, request);
+
+        ArgumentCaptor<MessageEvent> eventCaptor = ArgumentCaptor.forClass(MessageEvent.class);
+        verify(chatMessagePublisher).publish(eventCaptor.capture());
+        MessageEvent event = eventCaptor.getValue();
+        assertThat(event.messageId()).isEqualTo(messageId);
+        assertThat(event.recipientIds()).containsExactly(recipientId);
+        assertThat(event.ciphertext()).isEqualTo("cipher-live-updated");
+        assertThat(event.nonce()).isEqualTo("nonce-live-updated");
+        assertThat(event.keyVersion()).isEqualTo(2);
+        assertThat(event.editedAt()).isNotNull();
+
+        verify(publicPostSearchService).syncMessage(lookup);
+        verify(botUpdateService).maybeEnqueueMessageEdited(chat, senderId, lookup);
+        assertThat(lookup.getCiphertext()).isEqualTo("cipher-live-updated");
+        assertThat(lookup.getNonce()).isEqualTo("nonce-live-updated");
+        assertThat(lookup.getKeyVersion()).isEqualTo(2);
+        assertThat(lookup.getEditedAt()).isNotNull();
+
+        assertThat(response.messageId()).isEqualTo(messageId);
+        assertThat(response.messageType()).isEqualTo("LIVE_LOCATION");
+        assertThat(response.location()).isNull();
+        assertThat(response.liveLocation()).isNotNull();
+        assertThat(response.liveLocation().title()).isEqualTo("Updated point");
+        assertThat(response.liveLocation().address()).isEqualTo("New address");
+        assertThat(response.liveLocation().lastUpdatedAt()).isEqualTo(updatedAt);
+        assertThat(response.liveLocation().active()).isTrue();
+        assertThat(response.editedAt()).isNotNull();
+    }
+
+    @Test
+    void stopLiveLocationPublishesStoppedMessageEvent() {
+        UUID senderId = UUID.randomUUID();
+        UUID recipientId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        Instant expiresAt = Instant.parse("2999-01-01T00:00:00Z");
+        Instant stoppedAt = Instant.parse("2026-03-19T16:07:00Z");
+
+        ChatEntity chat = chat(chatId, "DIRECT");
+        MessageLookupEntity lookup = new MessageLookupEntity();
+        lookup.setMessageId(messageId);
+        lookup.setChatId(chatId);
+        lookup.setSenderId(senderId);
+        lookup.setCreatedAt(Instant.parse("2026-03-19T16:00:00Z"));
+        lookup.setCiphertext("cipher-live-original");
+        lookup.setNonce("nonce-live-original");
+        lookup.setKeyVersion(1);
+        lookup.setAttachmentIds(List.of());
+        lookup.setDeliveryStatus("READ");
+
+        MessageLiveLocationPayload originalLiveLocation = new MessageLiveLocationPayload(
+                53.9,
+                27.56,
+                "Downtown",
+                "Address",
+                3_600,
+                expiresAt,
+                Instant.parse("2026-03-19T16:00:00Z"),
+                null,
+                true
+        );
+        MessageLiveLocationPayload stoppedLiveLocation = new MessageLiveLocationPayload(
+                53.9,
+                27.56,
+                "Downtown",
+                "Address",
+                3_600,
+                expiresAt,
+                Instant.parse("2026-03-19T16:06:30Z"),
+                stoppedAt,
+                false
+        );
+        MessageTextContent originalContent = liveLocationContent(originalLiveLocation);
+        MessageTextContent stoppedContent = liveLocationContent(stoppedLiveLocation);
+
+        when(messageLookupRepository.findById(messageId)).thenReturn(Optional.of(lookup));
+        when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
+        when(chatService.getRecipientIds(chat, senderId)).thenReturn(List.of(recipientId));
+        when(chatEncryptionService.decrypt(chatId, "cipher-live-original", "nonce-live-original", 1))
+                .thenReturn("decoded-live-original");
+        when(chatEncryptionService.decrypt(chatId, "cipher-live-stopped", "nonce-live-stopped", 2))
+                .thenReturn("decoded-live-stopped");
+        when(messageContentCodec.decode("decoded-live-original")).thenReturn(originalContent);
+        when(messageContentCodec.decode("decoded-live-stopped")).thenReturn(stoppedContent);
+        when(messageLiveLocationService.stop(lookup)).thenReturn(stoppedLiveLocation);
+        when(messageContentCodec.encode(stoppedContent)).thenReturn("encoded-live-stopped");
+        when(chatEncryptionService.encrypt(chatId, "encoded-live-stopped"))
+                .thenReturn(new EncryptedPayload("cipher-live-stopped", "nonce-live-stopped", 2));
+        when(attachmentService.getResponses(senderId, List.of())).thenReturn(List.of());
+
+        ChatMessageResponse response = messageService.stopLiveLocation(senderId, messageId);
+
+        ArgumentCaptor<MessageEvent> eventCaptor = ArgumentCaptor.forClass(MessageEvent.class);
+        verify(chatMessagePublisher).publish(eventCaptor.capture());
+        MessageEvent event = eventCaptor.getValue();
+        assertThat(event.messageId()).isEqualTo(messageId);
+        assertThat(event.recipientIds()).containsExactly(recipientId);
+        assertThat(event.ciphertext()).isEqualTo("cipher-live-stopped");
+        assertThat(event.editedAt()).isNotNull();
+
+        verify(publicPostSearchService).syncMessage(lookup);
+        verify(botUpdateService).maybeEnqueueMessageEdited(chat, senderId, lookup);
+        assertThat(response.messageType()).isEqualTo("LIVE_LOCATION");
+        assertThat(response.liveLocation()).isNotNull();
+        assertThat(response.liveLocation().active()).isFalse();
+        assertThat(response.liveLocation().stoppedAt()).isEqualTo(stoppedAt);
+        assertThat(response.editedAt()).isNotNull();
+    }
+
+    @Test
+    void updateLiveLocationRejectsMessagesOwnedByAnotherSender() {
+        UUID requesterId = UUID.randomUUID();
+        UUID actualSenderId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "DIRECT");
+        MessageLookupEntity lookup = new MessageLookupEntity();
+        lookup.setMessageId(messageId);
+        lookup.setChatId(chatId);
+        lookup.setSenderId(actualSenderId);
+
+        when(messageLookupRepository.findById(messageId)).thenReturn(Optional.of(lookup));
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+
+        assertThatThrownBy(() -> messageService.updateLiveLocation(
+                requesterId,
+                messageId,
+                new UpdateLiveLocationRequest(54.1, 27.7, "Updated point", "New address")
+        ))
+                .isInstanceOf(org.springframework.web.server.ResponseStatusException.class)
+                .extracting(throwable -> ((org.springframework.web.server.ResponseStatusException) throwable).getStatusCode())
+                .isEqualTo(HttpStatus.FORBIDDEN);
+
+        verify(messageLiveLocationService, never()).update(any(MessageLookupEntity.class), any(UpdateLiveLocationRequest.class));
+        verify(chatMessagePublisher, never()).publish(any(MessageEvent.class));
+    }
+
     private ChatEntity chat(UUID chatId, String chatType) {
         ChatEntity chat = new ChatEntity();
         chat.setId(chatId);
         chat.setChatType(chatType);
         chat.setTitle("Chat");
         return chat;
+    }
+
+    private MessageTextContent liveLocationContent(MessageLiveLocationPayload payload) {
+        return new MessageTextContent(
+                "",
+                List.of(),
+                "LIVE_LOCATION",
+                null,
+                null,
+                payload,
+                null,
+                null,
+                false
+        );
     }
 
     private MessageEntity message(UUID chatId, UUID messageId, UUID attachmentId, Instant createdAt) {
