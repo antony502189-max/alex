@@ -1199,7 +1199,6 @@ class CallServiceTest {
 
         verify(callReactionRepository, never()).save(any(CallReactionEntity.class));
     }
-
     private ChatEntity chat(UUID chatId, String type) {
         ChatEntity chat = new ChatEntity();
         chat.setId(chatId);

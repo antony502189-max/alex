@@ -1912,7 +1912,6 @@ public class MessageService {
             repeatingMessageRuleRepository.save(rule);
         }
     }
-
     private List<MessageAttachmentResponse> getAttachmentResponses(UUID requesterId, List<UUID> attachmentIds) {
         return attachmentService.getResponses(requesterId, attachmentIds);
     }

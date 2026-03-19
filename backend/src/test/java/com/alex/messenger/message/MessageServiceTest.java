@@ -1280,7 +1280,6 @@ class MessageServiceTest {
         verify(publicPostSearchService).syncMessage(lookup);
         assertThat(lookup.getDeletedAt()).isNotNull();
     }
-
     private ChatEntity chat(UUID chatId, String chatType) {
         ChatEntity chat = new ChatEntity();
         chat.setId(chatId);
@@ -1322,15 +1321,15 @@ class MessageServiceTest {
                 false,
                 false,
                 null,
-                  null,
-                  "APPROVED",
-                  null,
-                  false,
-                  false,
-                  null,
-                  null,
-                  null,
-                  false
-          );
+                null,
+                "APPROVED",
+                null,
+                false,
+                false,
+                null,
+                null,
+                null,
+                false
+        );
     }
 }

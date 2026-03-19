@@ -518,7 +518,6 @@ public class AttachmentService {
         }
         return current;
     }
-
     private void assertRequesterCanAccessAttachments(UUID requesterId, List<AttachmentEntity> attachments) {
         if (requesterId == null || attachments == null || attachments.isEmpty()) {
             return;

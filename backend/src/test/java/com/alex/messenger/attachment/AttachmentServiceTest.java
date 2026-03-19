@@ -614,7 +614,6 @@ class AttachmentServiceTest {
         assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         verify(attachmentRepository, never()).save(any(AttachmentEntity.class));
     }
-
     private byte[] createPng(int width, int height) throws IOException {
         BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
         ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
