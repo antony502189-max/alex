@@ -3,6 +3,7 @@ package com.alex.messenger.search;
 import com.alex.messenger.chat.ChatService;
 import com.alex.messenger.chat.dto.PublicChatDiscoveryResponse;
 import com.alex.messenger.search.dto.GlobalSearchResponse;
+import com.alex.messenger.search.dto.PublicPostSearchResponse;
 import com.alex.messenger.shared.CurrentUser;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
@@ -19,6 +20,7 @@ public class GlobalSearchController {
 
     private final GlobalSearchService globalSearchService;
     private final ChatService chatService;
+    private final PublicPostSearchService publicPostSearchService;
 
     @GetMapping("/global")
     public ResponseEntity<GlobalSearchResponse> search(
@@ -34,5 +36,13 @@ public class GlobalSearchController {
             @RequestParam(defaultValue = "10") int limit
     ) {
         return ResponseEntity.ok(chatService.discoverPublicChats(CurrentUser.id(), query, limit));
+    }
+
+    @GetMapping("/public-posts")
+    public ResponseEntity<PublicPostSearchResponse> searchPublicPosts(
+            @RequestParam String query,
+            @RequestParam(defaultValue = "20") int limit
+    ) {
+        return ResponseEntity.ok(publicPostSearchService.searchPublicPosts(CurrentUser.id(), query, limit));
     }
 }

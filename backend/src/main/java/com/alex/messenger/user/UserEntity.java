@@ -93,6 +93,12 @@ public class UserEntity {
     @Column(name = "two_factor_enabled_at")
     private Instant twoFactorEnabledAt;
 
+    @Column(name = "deleted_at")
+    private Instant deletedAt;
+
+    @Column(name = "account_self_destruct_days", nullable = false)
+    private Integer accountSelfDestructDays;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
@@ -109,6 +115,9 @@ public class UserEntity {
         }
         if (storyPrivacy == null) {
             storyPrivacy = "EVERYBODY";
+        }
+        if (accountSelfDestructDays == null) {
+            accountSelfDestructDays = 365;
         }
     }
 }

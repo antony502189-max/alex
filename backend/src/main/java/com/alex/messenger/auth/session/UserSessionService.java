@@ -136,6 +136,11 @@ public class UserSessionService {
         userSessionRepository.revokeOthers(userId, currentSessionId, Instant.now());
     }
 
+    @Transactional
+    public void revokeAll(UUID userId) {
+        userSessionRepository.revokeAllForUser(userId, Instant.now());
+    }
+
     @Transactional(readOnly = true)
     public UserSessionEntity requireActiveRefreshToken(String refreshTokenHash) {
         UserSessionEntity session = userSessionRepository.findByRefreshTokenHashAndRevokedAtIsNull(refreshTokenHash)

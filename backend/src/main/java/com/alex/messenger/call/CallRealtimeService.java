@@ -1,6 +1,8 @@
 package com.alex.messenger.call;
 
 import com.alex.messenger.call.dto.CallInboxEventResponse;
+import com.alex.messenger.call.dto.CallCommentResponse;
+import com.alex.messenger.call.dto.CallReactionResponse;
 import com.alex.messenger.call.dto.CallSessionResponse;
 import com.alex.messenger.call.dto.CallSignalEventResponse;
 import java.util.UUID;
@@ -18,7 +20,7 @@ public class CallRealtimeService {
         simpMessagingTemplate.convertAndSendToUser(
                 userId.toString(),
                 "/queue/calls",
-                new CallInboxEventResponse(eventType, call, null)
+                new CallInboxEventResponse(eventType, call, null, null, null)
         );
     }
 
@@ -26,7 +28,23 @@ public class CallRealtimeService {
         simpMessagingTemplate.convertAndSendToUser(
                 userId.toString(),
                 "/queue/calls",
-                new CallInboxEventResponse("SIGNAL", null, signal)
+                new CallInboxEventResponse("SIGNAL", null, signal, null, null)
+        );
+    }
+
+    public void publishCommentEvent(UUID userId, CallCommentResponse comment) {
+        simpMessagingTemplate.convertAndSendToUser(
+                userId.toString(),
+                "/queue/calls",
+                new CallInboxEventResponse("COMMENT", null, null, comment, null)
+        );
+    }
+
+    public void publishReactionEvent(UUID userId, CallReactionResponse reaction) {
+        simpMessagingTemplate.convertAndSendToUser(
+                userId.toString(),
+                "/queue/calls",
+                new CallInboxEventResponse("REACTION", null, null, null, reaction)
         );
     }
 }

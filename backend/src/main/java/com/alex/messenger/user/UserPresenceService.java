@@ -2,10 +2,10 @@ package com.alex.messenger.user;
 
 import com.alex.messenger.auth.session.UserSessionService;
 import com.alex.messenger.user.dto.UserPresenceResponse;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
-import java.util.Locale;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -17,12 +17,12 @@ import org.springframework.web.server.ResponseStatusException;
 @RequiredArgsConstructor
 public class UserPresenceService {
 
-    public record UserPresenceView(boolean online, Instant lastSeenAt) {
+    public record UserPresenceView(boolean online, Instant lastSeenAt, String visibility, String statusText) {
     }
 
     private final UserRepository userRepository;
-    private final ContactRepository contactRepository;
     private final UserSessionService userSessionService;
+    private final UserPrivacyService userPrivacyService;
 
     @Transactional(readOnly = true)
     public List<UserPresenceResponse> listPresence(UUID requesterId, Collection<UUID> userIds) {
@@ -30,49 +30,66 @@ public class UserPresenceService {
             return List.of();
         }
         return userRepository.findAllById(userIds).stream()
+                .filter(user -> user.getDeletedAt() == null)
                 .map(user -> toResponse(user, requesterId))
                 .toList();
     }
 
     @Transactional(readOnly = true)
     public UserPresenceResponse getPresence(UUID requesterId, UUID userId) {
-        UserEntity user = userRepository.findById(userId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        UserEntity user = requireActiveUser(userId);
         return toResponse(user, requesterId);
     }
 
     @Transactional(readOnly = true)
     public UserPresenceView resolvePresence(UUID requesterId, UserEntity user) {
         if (user == null || user.isBot()) {
-            return new UserPresenceView(false, null);
+            return new UserPresenceView(false, null, "HIDDEN", "hidden");
         }
-        if (!canViewLastSeen(requesterId, user)) {
-            return new UserPresenceView(false, null);
+        if (!userPrivacyService.canViewLastSeen(requesterId, user)) {
+            return new UserPresenceView(false, null, "HIDDEN", "hidden");
         }
         boolean online = userSessionService.isUserOnline(user.getId());
-        return new UserPresenceView(online, user.getLastSeenAt());
+        Instant lastSeenAt = user.getLastSeenAt();
+        if (online) {
+            return new UserPresenceView(true, lastSeenAt, "ONLINE", "online");
+        }
+        if (lastSeenAt == null) {
+            return new UserPresenceView(false, null, "LAST_SEEN", "last seen a long time ago");
+        }
+        Duration sinceLastSeen = Duration.between(lastSeenAt, Instant.now());
+        if (sinceLastSeen.compareTo(Duration.ofMinutes(5)) <= 0) {
+            return new UserPresenceView(false, lastSeenAt, "LAST_SEEN", "last seen just now");
+        }
+        if (sinceLastSeen.compareTo(Duration.ofDays(3)) <= 0) {
+            return new UserPresenceView(false, lastSeenAt, "RECENTLY", "last seen recently");
+        }
+        if (sinceLastSeen.compareTo(Duration.ofDays(7)) <= 0) {
+            return new UserPresenceView(false, lastSeenAt, "WITHIN_A_WEEK", "last seen within a week");
+        }
+        if (sinceLastSeen.compareTo(Duration.ofDays(30)) <= 0) {
+            return new UserPresenceView(false, lastSeenAt, "WITHIN_A_MONTH", "last seen within a month");
+        }
+        return new UserPresenceView(false, lastSeenAt, "LONG_AGO", "last seen a long time ago");
     }
 
     private UserPresenceResponse toResponse(UserEntity user, UUID requesterId) {
         UserPresenceView presence = resolvePresence(requesterId, user);
-        return new UserPresenceResponse(user.getId(), presence.online(), presence.lastSeenAt());
+        return new UserPresenceResponse(
+                user.getId(),
+                presence.online(),
+                presence.lastSeenAt(),
+                presence.visibility(),
+                presence.statusText()
+        );
     }
 
-    private boolean canViewLastSeen(UUID requesterId, UserEntity targetUser) {
-        if (requesterId.equals(targetUser.getId())) {
-            return true;
+    private UserEntity requireActiveUser(UUID userId) {
+        UserEntity user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        if (user.getDeletedAt() != null) {
+            throw new ResponseStatusException(HttpStatus.GONE, "User is deleted");
         }
-        String privacy = targetUser.getLastSeenPrivacy() != null
-                ? targetUser.getLastSeenPrivacy().trim().toUpperCase(Locale.ROOT)
-                : "EVERYBODY";
-        return switch (privacy) {
-            case "EVERYBODY" -> true;
-            case "CONTACTS" -> contactRepository.existsByIdOwnerUserIdAndIdContactUserId(
-                    targetUser.getId(),
-                    requesterId
-            );
-            case "NOBODY" -> false;
-            default -> true;
-        };
+        return user;
     }
 }

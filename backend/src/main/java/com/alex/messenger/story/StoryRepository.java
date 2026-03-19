@@ -17,5 +17,9 @@ public interface StoryRepository extends JpaRepository<StoryEntity, UUID> {
 
     List<StoryEntity> findAllByOwnerUserIdOrderByCreatedAtDesc(UUID ownerUserId);
 
+    List<StoryEntity> findAllByOwnerChatIdOrderByCreatedAtDesc(UUID ownerChatId);
+
+    List<StoryEntity> findAllByOwnerChatIdAndExpiresAtAfterOrderByCreatedAtDesc(UUID ownerChatId, Instant now);
+
     Optional<StoryEntity> findByIdAndExpiresAtAfter(UUID storyId, Instant now);
 }

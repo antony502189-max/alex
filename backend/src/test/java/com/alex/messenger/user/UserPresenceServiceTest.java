@@ -19,10 +19,10 @@ class UserPresenceServiceTest {
     private UserRepository userRepository;
 
     @Mock
-    private ContactRepository contactRepository;
+    private UserSessionService userSessionService;
 
     @Mock
-    private UserSessionService userSessionService;
+    private UserPrivacyService userPrivacyService;
 
     private UserPresenceService userPresenceService;
 
@@ -30,8 +30,8 @@ class UserPresenceServiceTest {
     void setUp() {
         userPresenceService = new UserPresenceService(
                 userRepository,
-                contactRepository,
-                userSessionService
+                userSessionService,
+                userPrivacyService
         );
     }
 
@@ -46,11 +46,13 @@ class UserPresenceServiceTest {
         user.setLastSeenAt(Instant.parse("2026-03-12T12:00:00Z"));
 
         when(userSessionService.isUserOnline(targetUserId)).thenReturn(true);
+        when(userPrivacyService.canViewLastSeen(requesterId, user)).thenReturn(true);
 
         UserPresenceService.UserPresenceView presence = userPresenceService.resolvePresence(requesterId, user);
 
         assertThat(presence.online()).isTrue();
         assertThat(presence.lastSeenAt()).isEqualTo(Instant.parse("2026-03-12T12:00:00Z"));
+        assertThat(presence.visibility()).isEqualTo("ONLINE");
     }
 
     @Test
@@ -62,10 +64,12 @@ class UserPresenceServiceTest {
         user.setId(targetUserId);
         user.setLastSeenPrivacy("NOBODY");
         user.setLastSeenAt(Instant.parse("2026-03-12T12:00:00Z"));
+        when(userPrivacyService.canViewLastSeen(requesterId, user)).thenReturn(false);
 
         UserPresenceService.UserPresenceView presence = userPresenceService.resolvePresence(requesterId, user);
 
         assertThat(presence.online()).isFalse();
         assertThat(presence.lastSeenAt()).isNull();
+        assertThat(presence.visibility()).isEqualTo("HIDDEN");
     }
 }

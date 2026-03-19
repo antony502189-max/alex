@@ -17,6 +17,7 @@ public record AttachmentUploadSessionResponse(
         Instant expiresAt,
         UUID completedAttachmentId,
         UUID albumId,
-        Integer albumItemIndex
+        Integer albumItemIndex,
+        boolean hdPhoto
 ) {
 }

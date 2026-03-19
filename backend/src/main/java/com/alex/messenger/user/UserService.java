@@ -4,6 +4,7 @@ import com.alex.messenger.user.dto.AddContactRequest;
 import com.alex.messenger.user.dto.BlockUserRequest;
 import com.alex.messenger.user.dto.BlockedUserResponse;
 import com.alex.messenger.user.dto.ContactResponse;
+import com.alex.messenger.user.dto.ContactNoteResponse;
 import com.alex.messenger.user.dto.ImportContactsRequest;
 import com.alex.messenger.user.dto.ImportContactsResponse;
 import com.alex.messenger.user.dto.ImportedPhoneContactPayload;
@@ -11,6 +12,8 @@ import com.alex.messenger.user.dto.ReportUserRequest;
 import com.alex.messenger.user.dto.UpdateLanguagePreferencesRequest;
 import com.alex.messenger.user.dto.UpdatePrivacyRequest;
 import com.alex.messenger.user.dto.UpdateProfileRequest;
+import com.alex.messenger.user.dto.UpsertContactNoteRequest;
+import com.alex.messenger.user.dto.UpcomingBirthdayResponse;
 import com.alex.messenger.user.dto.UserLanguagePreferencesResponse;
 import com.alex.messenger.user.dto.UserProfileResponse;
 import com.alex.messenger.user.dto.UserReportResponse;
@@ -37,6 +40,7 @@ import org.springframework.web.server.ResponseStatusException;
 public class UserService {
 
     private static final Set<String> PRIVACY_VALUES = Set.of("EVERYBODY", "CONTACTS", "NOBODY");
+    private static final Set<String> STORY_PRIVACY_VALUES = Set.of("EVERYBODY", "CONTACTS", "NOBODY", "CLOSE_FRIENDS");
     private static final Set<String> REPORT_CATEGORIES = Set.of(
             "SPAM",
             "ABUSE",
@@ -48,10 +52,12 @@ public class UserService {
 
     private final UserRepository userRepository;
     private final ContactRepository contactRepository;
+    private final ContactNoteRepository contactNoteRepository;
     private final BlockedUserRepository blockedUserRepository;
     private final UserReportRepository userReportRepository;
     private final ProfilePhotoService profilePhotoService;
     private final UserPresenceService userPresenceService;
+    private final UserPrivacyService userPrivacyService;
 
     @Transactional(readOnly = true)
     public List<UserSearchResponse> search(UUID requesterId, String query) {
@@ -70,7 +76,7 @@ public class UserService {
                     UserPresenceService.UserPresenceView presence = userPresenceService.resolvePresence(requesterId, user);
                     return new UserSearchResponse(
                             user.getId(),
-                            user.isBot() ? null : (canViewPhone(requesterId, user) ? user.getPhoneNumber() : null),
+                            user.isBot() ? null : (userPrivacyService.canViewPhone(requesterId, user) ? user.getPhoneNumber() : null),
                             user.getDisplayName(),
                             user.getUsername(),
                             user.isBot(),
@@ -97,7 +103,9 @@ public class UserService {
         return relationships.stream()
                 .map(relationship -> {
                     UserEntity user = usersById.get(relationship.getId().getBlockedUserId());
-                    return user != null ? toBlockedUser(user, relationship.getCreatedAt(), requesterId) : null;
+                    return user != null && user.getDeletedAt() == null
+                            ? toBlockedUser(user, relationship.getCreatedAt(), requesterId)
+                            : null;
                 })
                 .filter(java.util.Objects::nonNull)
                 .toList();
@@ -139,7 +147,7 @@ public class UserService {
         UserEntity user = getUser(requesterId);
         user.setPhonePrivacy(normalizePrivacy(request.phonePrivacy()));
         user.setLastSeenPrivacy(normalizePrivacy(request.lastSeenPrivacy()));
-        user.setStoryPrivacy(normalizePrivacy(request.storyPrivacy()));
+        user.setStoryPrivacy(normalizeStoryPrivacy(request.storyPrivacy()));
         return toProfile(userRepository.save(user), requesterId);
     }
 
@@ -204,7 +212,7 @@ public class UserService {
         return contacts.stream()
                 .map(contact -> {
                     UserEntity user = usersById.get(contact.getId().getContactUserId());
-                    if (user == null) {
+                    if (user == null || user.getDeletedAt() != null) {
                         return null;
                     }
                     return toContactResponse(requesterId, user, contact.getContactName());
@@ -229,6 +237,77 @@ public class UserService {
         entity.setContactName(contactName);
         contactRepository.save(entity);
         return listContacts(requesterId);
+    }
+
+    @Transactional(readOnly = true)
+    public ContactNoteResponse getContactNote(UUID requesterId, UUID contactUserId) {
+        ensureContactOwned(requesterId, contactUserId);
+        ContactNoteEntity note = contactNoteRepository.findByIdOwnerUserIdAndIdContactUserId(requesterId, contactUserId)
+                .orElse(null);
+        return new ContactNoteResponse(
+                contactUserId,
+                note != null ? note.getNote() : null,
+                note != null ? note.getBirthday() : null,
+                note != null ? note.getUpdatedAt() : null
+        );
+    }
+
+    @Transactional
+    public ContactNoteResponse upsertContactNote(
+            UUID requesterId,
+            UUID contactUserId,
+            UpsertContactNoteRequest request
+    ) {
+        ensureContactOwned(requesterId, contactUserId);
+        ContactNoteEntity existing = contactNoteRepository.findByIdOwnerUserIdAndIdContactUserId(requesterId, contactUserId)
+                .orElse(null);
+        String normalizedNote = normalizeOptional(request != null ? request.note() : null, 500);
+        java.time.LocalDate birthday = request != null ? request.birthday() : null;
+        if (normalizedNote == null && birthday == null) {
+            if (existing != null) {
+                contactNoteRepository.delete(existing);
+            }
+            return new ContactNoteResponse(contactUserId, null, null, null);
+        }
+        ContactNoteEntity note = existing;
+        if (note == null) {
+            note = new ContactNoteEntity();
+            note.setId(new ContactNoteId(requesterId, contactUserId));
+        }
+        note.setNote(normalizedNote);
+        note.setBirthday(birthday);
+        ContactNoteEntity saved = contactNoteRepository.save(note);
+        return new ContactNoteResponse(contactUserId, saved.getNote(), saved.getBirthday(), saved.getUpdatedAt());
+    }
+
+    @Transactional(readOnly = true)
+    public List<UpcomingBirthdayResponse> listUpcomingBirthdays(UUID requesterId, Integer days) {
+        int windowDays = normalizeBirthdayWindow(days);
+        java.time.LocalDate today = java.time.LocalDate.now(java.time.ZoneOffset.UTC);
+
+        List<ContactNoteEntity> notes = contactNoteRepository.findAllByIdOwnerUserIdAndBirthdayIsNotNullOrderByBirthdayAsc(requesterId);
+        if (notes.isEmpty()) {
+            return List.of();
+        }
+
+        Map<UUID, ContactEntity> contactsByUserId = contactRepository.findAllByIdOwnerUserIdOrderByContactNameAsc(requesterId).stream()
+                .collect(Collectors.toMap(contact -> contact.getId().getContactUserId(), contact -> contact, (left, right) -> left));
+        Map<UUID, UserEntity> usersById = userRepository.findAllById(
+                notes.stream().map(note -> note.getId().getContactUserId()).toList()
+        ).stream().filter(user -> user.getDeletedAt() == null)
+                .collect(Collectors.toMap(UserEntity::getId, user -> user, (left, right) -> left));
+
+        return notes.stream()
+                .map(note -> toUpcomingBirthdayResponse(note, today, windowDays, contactsByUserId, usersById))
+                .filter(java.util.Objects::nonNull)
+                .sorted(
+                        java.util.Comparator.comparing(UpcomingBirthdayResponse::nextOccurrence)
+                                .thenComparing(
+                                        UpcomingBirthdayResponse::contactName,
+                                        java.util.Comparator.nullsLast((left, right) -> left.compareToIgnoreCase(right))
+                                )
+                )
+                .toList();
     }
 
     @Transactional
@@ -341,17 +420,7 @@ public class UserService {
     }
 
     public boolean canViewPhone(UUID requesterId, UserEntity targetUser) {
-        if (requesterId.equals(targetUser.getId())) {
-            return true;
-        }
-
-        String privacy = targetUser.getPhonePrivacy() != null ? targetUser.getPhonePrivacy() : "EVERYBODY";
-        return switch (privacy) {
-            case "EVERYBODY" -> true;
-            case "CONTACTS" -> contactRepository.existsByIdOwnerUserIdAndIdContactUserId(targetUser.getId(), requesterId);
-            case "NOBODY" -> false;
-            default -> true;
-        };
+        return userPrivacyService.canViewPhone(requesterId, targetUser);
     }
 
     private UserProfileResponse toProfile(UserEntity user, UUID requesterId) {
@@ -359,7 +428,7 @@ public class UserService {
         UserPresenceService.UserPresenceView presence = userPresenceService.resolvePresence(requesterId, user);
         return new UserProfileResponse(
                 user.getId(),
-                user.isBot() ? null : (canViewPhone(requesterId, user) ? user.getPhoneNumber() : null),
+                user.isBot() ? null : (userPrivacyService.canViewPhone(requesterId, user) ? user.getPhoneNumber() : null),
                 user.getDisplayName(),
                 user.getUsername(),
                 user.isBot(),
@@ -391,7 +460,7 @@ public class UserService {
                 user.getBotDescription(),
                 user.isBotSupportsInline(),
                 user.getBotWebAppUrl(),
-                user.isBot() ? null : user.getPhoneNumber(),
+                user.isBot() ? null : (userPrivacyService.canViewPhone(requesterId, user) ? user.getPhoneNumber() : null),
                 photoAccess.photoUrl(),
                 photoAccess.photoAccessExpiresAt(),
                 presence.online(),
@@ -404,7 +473,7 @@ public class UserService {
         UserPresenceService.UserPresenceView presence = userPresenceService.resolvePresence(requesterId, user);
         return new BlockedUserResponse(
                 user.getId(),
-                user.isBot() ? null : (canViewPhone(requesterId, user) ? user.getPhoneNumber() : null),
+                user.isBot() ? null : (userPrivacyService.canViewPhone(requesterId, user) ? user.getPhoneNumber() : null),
                 user.getDisplayName(),
                 user.getUsername(),
                 user.isBot(),
@@ -428,8 +497,12 @@ public class UserService {
     }
 
     private UserEntity getUser(UUID userId) {
-        return userRepository.findById(userId)
+        UserEntity user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        if (user.getDeletedAt() != null) {
+            throw new ResponseStatusException(HttpStatus.GONE, "User is deleted");
+        }
+        return user;
     }
 
     private Set<UUID> getHiddenUserIds(UUID requesterId) {
@@ -442,6 +515,14 @@ public class UserService {
         String normalized = value.trim().toUpperCase(Locale.ROOT);
         if (!PRIVACY_VALUES.contains(normalized)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported privacy value");
+        }
+        return normalized;
+    }
+
+    private String normalizeStoryPrivacy(String value) {
+        String normalized = value.trim().toUpperCase(Locale.ROOT);
+        if (!STORY_PRIVACY_VALUES.contains(normalized)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported story privacy value");
         }
         return normalized;
     }
@@ -490,6 +571,68 @@ public class UserService {
         return normalized.isBlank() ? null : normalized;
     }
 
+    private void ensureContactOwned(UUID ownerUserId, UUID contactUserId) {
+        if (!contactRepository.existsByIdOwnerUserIdAndIdContactUserId(ownerUserId, contactUserId)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Contact not found");
+        }
+    }
+
+    private UpcomingBirthdayResponse toUpcomingBirthdayResponse(
+            ContactNoteEntity note,
+            java.time.LocalDate today,
+            int windowDays,
+            Map<UUID, ContactEntity> contactsByUserId,
+            Map<UUID, UserEntity> usersById
+    ) {
+        UUID contactUserId = note.getId().getContactUserId();
+        UserEntity user = usersById.get(contactUserId);
+        if (user == null || note.getBirthday() == null) {
+            return null;
+        }
+        java.time.LocalDate nextOccurrence = nextBirthdayOccurrence(note.getBirthday(), today);
+        long daysUntil = java.time.temporal.ChronoUnit.DAYS.between(today, nextOccurrence);
+        if (daysUntil < 0 || daysUntil > windowDays) {
+            return null;
+        }
+        ContactEntity contact = contactsByUserId.get(contactUserId);
+        return new UpcomingBirthdayResponse(
+                contactUserId,
+                contact != null ? contact.getContactName() : user.getDisplayName(),
+                user.getDisplayName(),
+                user.getUsername(),
+                note.getBirthday(),
+                nextOccurrence,
+                (int) daysUntil
+        );
+    }
+
+    private java.time.LocalDate nextBirthdayOccurrence(java.time.LocalDate birthday, java.time.LocalDate today) {
+        java.time.LocalDate nextOccurrence = normalizeBirthdayYear(birthday, today.getYear());
+        return nextOccurrence.isBefore(today)
+                ? normalizeBirthdayYear(birthday, today.getYear() + 1)
+                : nextOccurrence;
+    }
+
+    private java.time.LocalDate normalizeBirthdayYear(java.time.LocalDate birthday, int year) {
+        java.time.Month month = birthday.getMonth();
+        int day = Math.min(
+                birthday.getDayOfMonth(),
+                java.time.YearMonth.of(year, month).lengthOfMonth()
+        );
+        return java.time.LocalDate.of(year, month, day);
+    }
+
+    private String normalizeOptional(String value, int maxLength) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        if (normalized.isBlank()) {
+            return null;
+        }
+        return normalized.length() > maxLength ? normalized.substring(0, maxLength) : normalized;
+    }
+
     private ImportedPhoneContactPayload normalizeImportedContact(ImportedPhoneContactPayload contact) {
         String normalizedPhoneNumber = contact.phoneNumber() != null ? contact.phoneNumber().trim() : "";
         if (normalizedPhoneNumber.isBlank()) {
@@ -503,5 +646,12 @@ public class UserService {
 
     private String resolveImportedContactName(String requestedName, UserEntity user) {
         return requestedName != null && !requestedName.isBlank() ? requestedName : user.getDisplayName();
+    }
+
+    private int normalizeBirthdayWindow(Integer days) {
+        if (days == null) {
+            return 30;
+        }
+        return Math.max(1, Math.min(days, 365));
     }
 }

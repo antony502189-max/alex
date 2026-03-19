@@ -44,6 +44,9 @@ public class AttachmentUploadSessionEntity {
     @Column(name = "height")
     private Integer height;
 
+    @Column(name = "hd_photo", nullable = false)
+    private Boolean hdPhoto = false;
+
     @Column(name = "waveform", columnDefinition = "text")
     private String waveform;
 
@@ -78,6 +81,9 @@ public class AttachmentUploadSessionEntity {
         }
         if (status == null) {
             status = "ACTIVE";
+        }
+        if (hdPhoto == null) {
+            hdPhoto = false;
         }
     }
 
@@ -170,6 +176,14 @@ public class AttachmentUploadSessionEntity {
 
     public void setHeight(Integer height) {
         this.height = height;
+    }
+
+    public Boolean getHdPhoto() {
+        return hdPhoto;
+    }
+
+    public void setHdPhoto(Boolean hdPhoto) {
+        this.hdPhoto = hdPhoto;
     }
 
     public String getWaveform() {

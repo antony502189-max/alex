@@ -3,6 +3,7 @@ package com.alex.messenger.attachment;
 import com.alex.messenger.attachment.dto.AttachmentUploadSessionResponse;
 import com.alex.messenger.attachment.dto.CreateAttachmentUploadSessionRequest;
 import com.alex.messenger.attachment.dto.ModerateAttachmentRequest;
+import com.alex.messenger.attachment.dto.TrimAttachmentRequest;
 import com.alex.messenger.attachment.dto.UploadAttachmentChunkRequest;
 import com.alex.messenger.message.dto.MessageAttachmentResponse;
 import com.alex.messenger.shared.CurrentUser;
@@ -39,6 +40,7 @@ public class AttachmentController {
             @RequestParam(required = false) Long durationMs,
             @RequestParam(required = false) Integer width,
             @RequestParam(required = false) Integer height,
+            @RequestParam(required = false) Boolean hdPhoto,
             @RequestParam(required = false) String waveform,
             @RequestParam(required = false) UUID albumId,
             @RequestParam(required = false) Integer albumItemIndex,
@@ -52,6 +54,7 @@ public class AttachmentController {
                         durationMs,
                         width,
                         height,
+                        hdPhoto,
                         waveform,
                         albumId,
                         albumItemIndex,
@@ -107,6 +110,14 @@ public class AttachmentController {
             @org.springframework.web.bind.annotation.RequestBody ModerateAttachmentRequest request
     ) {
         return ResponseEntity.ok(attachmentService.reviewModeration(CurrentUser.id(), attachmentId, request));
+    }
+
+    @PostMapping("/{attachmentId}/trim")
+    public ResponseEntity<MessageAttachmentResponse> trim(
+            @PathVariable UUID attachmentId,
+            @org.springframework.web.bind.annotation.RequestBody(required = false) TrimAttachmentRequest request
+    ) {
+        return ResponseEntity.ok(attachmentService.trim(CurrentUser.id(), attachmentId, request));
     }
 
     @GetMapping("/{attachmentId}/download")

@@ -1,9 +1,11 @@
 package com.alex.messenger.message;
 
 import com.alex.messenger.message.dto.ChatMessageResponse;
+import com.alex.messenger.message.dto.CreateRepeatingMessageRequest;
 import com.alex.messenger.message.dto.CreatePollMessageRequest;
 import com.alex.messenger.message.dto.EditMessageRequest;
 import com.alex.messenger.message.dto.ForwardMessageRequest;
+import com.alex.messenger.message.dto.RepeatingMessageResponse;
 import com.alex.messenger.message.dto.ScheduleMessageRequest;
 import com.alex.messenger.message.dto.ScheduledMessageResponse;
 import com.alex.messenger.message.dto.SearchMessagesResponse;
@@ -52,6 +54,13 @@ public class MessageController {
     @PostMapping("/scheduled")
     public ResponseEntity<ScheduledMessageResponse> scheduleMessage(@Valid @RequestBody ScheduleMessageRequest request) {
         return ResponseEntity.ok(messageService.scheduleMessage(CurrentUser.id(), request));
+    }
+
+    @PostMapping("/repeating")
+    public ResponseEntity<RepeatingMessageResponse> createRepeatingMessage(
+            @Valid @RequestBody CreateRepeatingMessageRequest request
+    ) {
+        return ResponseEntity.ok(messageService.scheduleRepeatingMessage(CurrentUser.id(), request));
     }
 
     @PostMapping("/poll")

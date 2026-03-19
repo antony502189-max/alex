@@ -12,6 +12,7 @@ public record CreateAttachmentUploadSessionRequest(
         Long durationMs,
         Integer width,
         Integer height,
+        Boolean hdPhoto,
         List<Integer> waveform,
         UUID albumId,
         Integer albumItemIndex

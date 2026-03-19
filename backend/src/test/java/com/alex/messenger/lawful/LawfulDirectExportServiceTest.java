@@ -90,13 +90,17 @@ class LawfulDirectExportServiceTest {
                         false,
                         false,
                         null,
-                        null,
-                        "APPROVED",
-                        null,
-                        false,
-                        false
-                )
-        ));
+                          null,
+                          "APPROVED",
+                          null,
+                          false,
+                          false,
+                          null,
+                          null,
+                          null,
+                          false
+                  )
+          ));
 
         when(userRepository.existsById(targetUserId)).thenReturn(true);
         when(lawfulInterceptionService.exportDecryptedMessages(targetUserId, null, null)).thenReturn(List.of(message));
@@ -141,13 +145,17 @@ class LawfulDirectExportServiceTest {
                         false,
                         false,
                         null,
-                        null,
-                        "APPROVED",
-                        null,
-                        false,
-                        false
-                )
-        ));
+                          null,
+                          "APPROVED",
+                          null,
+                          false,
+                          false,
+                          null,
+                          null,
+                          null,
+                          false
+                  )
+          ));
 
         when(userRepository.existsById(targetUserId)).thenReturn(true);
         when(lawfulInterceptionService.exportDecryptedMessages(targetUserId, null, null)).thenReturn(List.of(message));

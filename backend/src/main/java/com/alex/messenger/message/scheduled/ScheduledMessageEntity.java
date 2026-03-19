@@ -78,6 +78,12 @@ public class ScheduledMessageEntity {
     @Column(name = "error_message", length = 255)
     private String errorMessage;
 
+    @Column(name = "repeating_rule_id")
+    private UUID repeatingRuleId;
+
+    @Column(name = "repeating_occurrence", nullable = false)
+    private Integer repeatingOccurrence;
+
     @PrePersist
     void prePersist() {
         if (createdAt == null) {
@@ -88,6 +94,9 @@ public class ScheduledMessageEntity {
         }
         if (attachmentIds == null) {
             attachmentIds = "";
+        }
+        if (repeatingOccurrence == null) {
+            repeatingOccurrence = 0;
         }
     }
 }

@@ -15,6 +15,9 @@ public class AuthProperties {
     private Cleanup cleanup = new Cleanup();
     private TwoFactor twoFactor = new TwoFactor();
     private Qr qr = new Qr();
+    private Passkeys passkeys = new Passkeys();
+    private PhoneChange phoneChange = new PhoneChange();
+    private Identity identity = new Identity();
 
     @Getter
     @Setter
@@ -59,5 +62,27 @@ public class AuthProperties {
 
         private Duration challengeTtl = Duration.ofMinutes(10);
         private int tokenBytes = 32;
+    }
+
+    @Getter
+    @Setter
+    public static class Passkeys {
+
+        private Duration challengeTtl = Duration.ofMinutes(10);
+        private int maxCredentialsPerUser = 10;
+    }
+
+    @Getter
+    @Setter
+    public static class PhoneChange {
+
+        private Duration ttl = Duration.ofMinutes(10);
+    }
+
+    @Getter
+    @Setter
+    public static class Identity {
+
+        private Duration ttl = Duration.ofMinutes(5);
     }
 }

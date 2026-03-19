@@ -4,16 +4,28 @@ import com.alex.messenger.shared.CurrentUser;
 import com.alex.messenger.user.dto.AddContactRequest;
 import com.alex.messenger.user.dto.BlockUserRequest;
 import com.alex.messenger.user.dto.BlockedUserResponse;
+import com.alex.messenger.user.dto.CloseFriendResponse;
 import com.alex.messenger.user.dto.ContactResponse;
+import com.alex.messenger.user.dto.ContactNoteResponse;
 import com.alex.messenger.user.dto.ImportContactsRequest;
 import com.alex.messenger.user.dto.ImportContactsResponse;
+import com.alex.messenger.user.dto.ReplaceCloseFriendsRequest;
 import com.alex.messenger.user.dto.ReportUserRequest;
+import com.alex.messenger.user.dto.UpcomingBirthdayResponse;
+import com.alex.messenger.user.dto.UpdatePrivacyExceptionsRequest;
 import com.alex.messenger.user.dto.UpdateLanguagePreferencesRequest;
 import com.alex.messenger.user.dto.UpdatePrivacyRequest;
 import com.alex.messenger.user.dto.UpdateProfileRequest;
+import com.alex.messenger.user.dto.UpdateProfileTabRequest;
+import com.alex.messenger.user.dto.UpsertContactNoteRequest;
+import com.alex.messenger.user.dto.UpsertProfileAudioRequest;
 import com.alex.messenger.user.dto.UserLanguagePreferencesResponse;
+import com.alex.messenger.user.dto.UserProfileAudioResponse;
+import com.alex.messenger.user.dto.UserProfilePreferencesResponse;
 import com.alex.messenger.user.dto.UserProfileResponse;
+import com.alex.messenger.user.dto.UserProfileRatingResponse;
 import com.alex.messenger.user.dto.UserPresenceResponse;
+import com.alex.messenger.user.dto.UserPrivacyExceptionsResponse;
 import com.alex.messenger.user.dto.UserReportResponse;
 import com.alex.messenger.user.dto.UserSearchResponse;
 import jakarta.validation.Valid;
@@ -30,6 +42,7 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.multipart.MultipartFile;
 
 @RestController
@@ -38,7 +51,9 @@ import org.springframework.web.multipart.MultipartFile;
 public class UserController {
 
     private final UserService userService;
+    private final UserProfileMetadataService userProfileMetadataService;
     private final UserPresenceService userPresenceService;
+    private final UserPrivacyService userPrivacyService;
 
     @GetMapping("/search")
     public ResponseEntity<List<UserSearchResponse>> search(@RequestParam String query) {
@@ -65,9 +80,45 @@ public class UserController {
         return ResponseEntity.ok(userService.updateProfile(CurrentUser.id(), request));
     }
 
+    @PatchMapping("/me/profile-tab")
+    public ResponseEntity<UserProfilePreferencesResponse> updateProfileTab(
+            @RequestBody(required = false) UpdateProfileTabRequest request
+    ) {
+        return ResponseEntity.ok(userProfileMetadataService.updateProfileTab(CurrentUser.id(), request));
+    }
+
+    @GetMapping("/me/profile-rating")
+    public ResponseEntity<UserProfileRatingResponse> profileRating() {
+        return ResponseEntity.ok(userProfileMetadataService.getProfileRating(CurrentUser.id()));
+    }
+
+    @GetMapping("/me/profile-audio")
+    public ResponseEntity<UserProfileAudioResponse> profileAudio() {
+        return ResponseEntity.ok(userProfileMetadataService.getProfileAudio(CurrentUser.id()));
+    }
+
+    @PutMapping("/me/profile-audio")
+    public ResponseEntity<UserProfileAudioResponse> upsertProfileAudio(
+            @RequestBody(required = false) UpsertProfileAudioRequest request
+    ) {
+        return ResponseEntity.ok(userProfileMetadataService.upsertProfileAudio(CurrentUser.id(), request));
+    }
+
     @PatchMapping("/me/privacy")
     public ResponseEntity<UserProfileResponse> updatePrivacy(@Valid @RequestBody UpdatePrivacyRequest request) {
         return ResponseEntity.ok(userService.updatePrivacy(CurrentUser.id(), request));
+    }
+
+    @PatchMapping("/me/privacy/exceptions")
+    public ResponseEntity<UserPrivacyExceptionsResponse> updatePrivacyExceptions(
+            @RequestBody(required = false) UpdatePrivacyExceptionsRequest request
+    ) {
+        return ResponseEntity.ok(userPrivacyService.updatePrivacyExceptions(CurrentUser.id(), request));
+    }
+
+    @GetMapping("/me/privacy/exceptions")
+    public ResponseEntity<UserPrivacyExceptionsResponse> privacyExceptions() {
+        return ResponseEntity.ok(userPrivacyService.getPrivacyExceptions(CurrentUser.id()));
     }
 
     @PatchMapping("/me/language-preferences")
@@ -90,6 +141,25 @@ public class UserController {
     @GetMapping("/contacts")
     public ResponseEntity<List<ContactResponse>> contacts() {
         return ResponseEntity.ok(userService.listContacts(CurrentUser.id()));
+    }
+
+    @GetMapping("/contacts/birthdays")
+    public ResponseEntity<List<UpcomingBirthdayResponse>> upcomingBirthdays(
+            @RequestParam(required = false) Integer days
+    ) {
+        return ResponseEntity.ok(userService.listUpcomingBirthdays(CurrentUser.id(), days));
+    }
+
+    @GetMapping("/me/close-friends")
+    public ResponseEntity<List<CloseFriendResponse>> closeFriends() {
+        return ResponseEntity.ok(userPrivacyService.listCloseFriends(CurrentUser.id()));
+    }
+
+    @PutMapping("/me/close-friends")
+    public ResponseEntity<List<CloseFriendResponse>> replaceCloseFriends(
+            @RequestBody(required = false) ReplaceCloseFriendsRequest request
+    ) {
+        return ResponseEntity.ok(userPrivacyService.replaceCloseFriends(CurrentUser.id(), request));
     }
 
     @GetMapping("/block")
@@ -115,6 +185,19 @@ public class UserController {
     @PostMapping("/contacts")
     public ResponseEntity<List<ContactResponse>> addContact(@Valid @RequestBody AddContactRequest request) {
         return ResponseEntity.ok(userService.addContact(CurrentUser.id(), request));
+    }
+
+    @GetMapping("/contacts/{contactUserId}/note")
+    public ResponseEntity<ContactNoteResponse> contactNote(@PathVariable UUID contactUserId) {
+        return ResponseEntity.ok(userService.getContactNote(CurrentUser.id(), contactUserId));
+    }
+
+    @PutMapping("/contacts/{contactUserId}/note")
+    public ResponseEntity<ContactNoteResponse> upsertContactNote(
+            @PathVariable UUID contactUserId,
+            @Valid @RequestBody(required = false) UpsertContactNoteRequest request
+    ) {
+        return ResponseEntity.ok(userService.upsertContactNote(CurrentUser.id(), contactUserId, request));
     }
 
     @PostMapping("/contacts/import")

@@ -79,6 +79,20 @@ alex:
     qr:
       challenge-ttl: ${ALEX_AUTH_QR_CHALLENGE_TTL:PT10M}
       token-bytes: ${ALEX_AUTH_QR_TOKEN_BYTES:32}
+    passkeys:
+      challenge-ttl: ${ALEX_AUTH_PASSKEY_CHALLENGE_TTL:PT10M}
+      max-credentials-per-user: ${ALEX_AUTH_PASSKEY_MAX_CREDENTIALS_PER_USER:10}
+    phone-change:
+      ttl: ${ALEX_AUTH_PHONE_CHANGE_TTL:PT10M}
+    identity:
+      ttl: ${ALEX_AUTH_IDENTITY_TTL:PT5M}
+  account:
+    export:
+      default-format: ${ALEX_ACCOUNT_EXPORT_DEFAULT_FORMAT:JSON}
+    deletion:
+      default-delay: ${ALEX_ACCOUNT_DELETION_DEFAULT_DELAY:P7D}
+      default-self-destruct-days: ${ALEX_ACCOUNT_SELF_DESTRUCT_DAYS:365}
+      execution-batch-size: ${ALEX_ACCOUNT_DELETION_EXECUTION_BATCH_SIZE:50}
   kafka:
     chat-messages-topic: ${ALEX_CHAT_MESSAGES_TOPIC:chat-messages}
     chat-messages-partitions: ${ALEX_CHAT_MESSAGES_PARTITIONS:12}
@@ -186,6 +200,12 @@ alex:
       init-secret: ${ALEX_BOT_WEB_APP_INIT_SECRET:dev-bot-web-app-secret-change-me}
       launch-ttl: ${ALEX_BOT_WEB_APP_LAUNCH_TTL:PT10M}
       platform: ${ALEX_BOT_WEB_APP_PLATFORM:alex-mobile}
+  stories:
+    live-donations:
+      dispatch-interval-ms: ${ALEX_STORIES_LIVE_DONATIONS_DISPATCH_INTERVAL_MS:5000}
+      request-timeout: ${ALEX_STORIES_LIVE_DONATIONS_REQUEST_TIMEOUT:PT10S}
+      batch-size: ${ALEX_STORIES_LIVE_DONATIONS_BATCH_SIZE:20}
+      max-attempts: ${ALEX_STORIES_LIVE_DONATIONS_MAX_ATTEMPTS:10}
   media:
     s3:
       endpoint: ${ALEX_S3_ENDPOINT:http://localhost:9000}

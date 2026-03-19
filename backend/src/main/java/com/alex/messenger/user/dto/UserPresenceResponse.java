@@ -6,6 +6,8 @@ import java.util.UUID;
 public record UserPresenceResponse(
         UUID userId,
         boolean online,
-        Instant lastSeenAt
+        Instant lastSeenAt,
+        String visibility,
+        String statusText
 ) {
 }

@@ -50,6 +50,18 @@ public class AttachmentEntity {
     @Column(name = "album_item_index")
     private Integer albumItemIndex;
 
+    @Column(name = "source_attachment_id")
+    private UUID sourceAttachmentId;
+
+    @Column(name = "trim_start_ms")
+    private Long trimStartMs;
+
+    @Column(name = "trim_end_ms")
+    private Long trimEndMs;
+
+    @Column(name = "hd_photo", nullable = false)
+    private boolean hdPhoto;
+
     @Column(name = "preview_bucket_name", length = 255)
     private String previewBucketName;
 
@@ -225,6 +237,38 @@ public class AttachmentEntity {
 
     public void setAlbumItemIndex(Integer albumItemIndex) {
         this.albumItemIndex = albumItemIndex;
+    }
+
+    public UUID getSourceAttachmentId() {
+        return sourceAttachmentId;
+    }
+
+    public void setSourceAttachmentId(UUID sourceAttachmentId) {
+        this.sourceAttachmentId = sourceAttachmentId;
+    }
+
+    public Long getTrimStartMs() {
+        return trimStartMs;
+    }
+
+    public void setTrimStartMs(Long trimStartMs) {
+        this.trimStartMs = trimStartMs;
+    }
+
+    public Long getTrimEndMs() {
+        return trimEndMs;
+    }
+
+    public void setTrimEndMs(Long trimEndMs) {
+        this.trimEndMs = trimEndMs;
+    }
+
+    public boolean isHdPhoto() {
+        return hdPhoto;
+    }
+
+    public void setHdPhoto(boolean hdPhoto) {
+        this.hdPhoto = hdPhoto;
     }
 
     public String getPreviewBucketName() {

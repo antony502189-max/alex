@@ -1,5 +1,8 @@
 package com.alex.messenger.bot;
 
+import com.alex.messenger.attachment.AttachmentService;
+import com.alex.messenger.chat.ChatEntity;
+import com.alex.messenger.chat.ChatService;
 import com.alex.messenger.bot.dto.BotApiAnswerInlineQueryRequest;
 import com.alex.messenger.bot.dto.BotApiAnswerPreCheckoutQueryRequest;
 import com.alex.messenger.bot.dto.BotApiAnswerCallbackQueryRequest;
@@ -9,6 +12,8 @@ import com.alex.messenger.bot.dto.BotApiDeleteMessageRequest;
 import com.alex.messenger.bot.dto.BotApiDeleteMessageResponse;
 import com.alex.messenger.bot.dto.BotApiEditMessageTextRequest;
 import com.alex.messenger.bot.dto.BotApiSendInvoiceRequest;
+import com.alex.messenger.bot.dto.BotApiSendAttachmentMessageRequest;
+import com.alex.messenger.bot.dto.BotApiSendMediaGroupRequest;
 import com.alex.messenger.bot.dto.BotApiSendMessageRequest;
 import com.alex.messenger.bot.dto.BotApiSetMyCommandsRequest;
 import com.alex.messenger.bot.dto.BotCallbackQueryResponse;
@@ -32,6 +37,8 @@ import org.springframework.transaction.annotation.Transactional;
 public class BotApiService {
 
     private final MessageService messageService;
+    private final AttachmentService attachmentService;
+    private final ChatService chatService;
     private final BotCommandService botCommandService;
     private final BotInlineResultCacheService botInlineResultCacheService;
     private final BotMessageActionService botMessageActionService;
@@ -56,6 +63,72 @@ public class BotApiService {
                         request.contactCard(),
                         request.attachmentIds(),
                         request.stickerId(),
+                        request.silent(),
+                        request.clientMessageId()
+                )
+        );
+        botMessageActionService.saveMessageActions(botUserId, response.messageId(), request.actions());
+        return response;
+    }
+
+    @Transactional
+    public ChatMessageResponse sendPhoto(UUID botUserId, BotApiSendAttachmentMessageRequest request) {
+        return sendAttachmentMessage(botUserId, request, "PHOTO");
+    }
+
+    @Transactional
+    public ChatMessageResponse sendVideo(UUID botUserId, BotApiSendAttachmentMessageRequest request) {
+        return sendAttachmentMessage(botUserId, request, "VIDEO");
+    }
+
+    @Transactional
+    public ChatMessageResponse sendAnimation(UUID botUserId, BotApiSendAttachmentMessageRequest request) {
+        return sendAttachmentMessage(botUserId, request, "ANIMATION");
+    }
+
+    @Transactional
+    public ChatMessageResponse sendDocument(UUID botUserId, BotApiSendAttachmentMessageRequest request) {
+        return sendAttachmentMessage(botUserId, request, "DOCUMENT");
+    }
+
+    @Transactional
+    public ChatMessageResponse sendVoice(UUID botUserId, BotApiSendAttachmentMessageRequest request) {
+        return sendAttachmentMessage(botUserId, request, "VOICE");
+    }
+
+    @Transactional
+    public ChatMessageResponse sendAudio(UUID botUserId, BotApiSendAttachmentMessageRequest request) {
+        return sendAttachmentMessage(botUserId, request, "AUDIO");
+    }
+
+    @Transactional
+    public ChatMessageResponse sendVideoNote(UUID botUserId, BotApiSendAttachmentMessageRequest request) {
+        return sendAttachmentMessage(botUserId, request, "VIDEO_NOTE");
+    }
+
+    @Transactional
+    public ChatMessageResponse sendMediaGroup(UUID botUserId, BotApiSendMediaGroupRequest request) {
+        ChatEntity targetChat = resolveTargetChat(botUserId, request.chatId(), request.recipientUserId());
+        List<UUID> clonedAttachmentIds = attachmentService.cloneAttachmentsToChatAsAlbum(
+                botUserId,
+                targetChat.getId(),
+                request.attachmentIds()
+        );
+        ChatMessageResponse response = messageService.sendMessage(
+                botUserId,
+                new SendMessageRequest(
+                        targetChat.getId(),
+                        null,
+                        request.topicId(),
+                        request.replyToMessageId(),
+                        null,
+                        request.caption(),
+                        "ALBUM",
+                        request.entities(),
+                        null,
+                        null,
+                        clonedAttachmentIds,
+                        null,
                         request.silent(),
                         request.clientMessageId()
                 )
@@ -120,5 +193,46 @@ public class BotApiService {
     @Transactional
     public BotPaymentReceiptResponse refundPayment(UUID botUserId, BotApiRefundPaymentRequest request) {
         return botPaymentService.refundPayment(botUserId, request);
+    }
+
+    private ChatMessageResponse sendAttachmentMessage(
+            UUID botUserId,
+            BotApiSendAttachmentMessageRequest request,
+            String messageType
+    ) {
+        ChatMessageResponse response = messageService.sendMessage(
+                botUserId,
+                new SendMessageRequest(
+                        request.chatId(),
+                        request.recipientUserId(),
+                        request.topicId(),
+                        request.replyToMessageId(),
+                        null,
+                        request.caption(),
+                        messageType,
+                        request.entities(),
+                        null,
+                        null,
+                        List.of(request.attachmentId()),
+                        null,
+                        request.silent(),
+                        request.clientMessageId()
+                )
+        );
+        botMessageActionService.saveMessageActions(botUserId, response.messageId(), request.actions());
+        return response;
+    }
+
+    private ChatEntity resolveTargetChat(UUID botUserId, UUID chatId, UUID recipientUserId) {
+        if (chatId != null) {
+            return chatService.getOwnedChat(botUserId, chatId);
+        }
+        if (recipientUserId != null) {
+            return chatService.getOrCreateDirectChat(botUserId, recipientUserId);
+        }
+        throw new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.BAD_REQUEST,
+                "chatId or recipientUserId is required"
+        );
     }
 }

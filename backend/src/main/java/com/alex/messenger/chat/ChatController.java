@@ -26,6 +26,8 @@ import com.alex.messenger.chat.dto.PinMessageEventResponse;
 import com.alex.messenger.chat.dto.PinMessageRequest;
 import com.alex.messenger.chat.dto.TypingEventRequest;
 import com.alex.messenger.chat.dto.TypingEventResponse;
+import com.alex.messenger.chat.dto.TransferChatOwnershipRequest;
+import com.alex.messenger.chat.dto.TransferChatOwnershipResponse;
 import com.alex.messenger.chat.dto.UpdateChatPublicUsernameRequest;
 import com.alex.messenger.chat.dto.UpdateChatProfileRequest;
 import com.alex.messenger.chat.dto.UpdateChatBanRequest;
@@ -68,9 +70,23 @@ public class ChatController {
 
     @GetMapping
     public ResponseEntity<List<ChatSummaryResponse>> listChats(
-            @RequestParam(defaultValue = "false") boolean archived
+            @RequestParam(defaultValue = "false") boolean archived,
+            @RequestParam(required = false) Integer limit,
+            @RequestParam(required = false) String cursor
     ) {
-        return ResponseEntity.ok(chatService.listChats(CurrentUser.id(), archived));
+        if (limit == null && cursor == null) {
+            return ResponseEntity.ok(chatService.listChats(CurrentUser.id(), archived));
+        }
+
+        int normalizedLimit = Math.min(Math.max(limit != null ? limit : 50, 1), 100);
+        ChatService.ChatListSlice page = chatService.listChatsPage(CurrentUser.id(), archived, cursor, limit);
+        ResponseEntity.BodyBuilder builder = ResponseEntity.ok()
+                .header("X-Chat-Has-More", String.valueOf(page.hasMore()))
+                .header("X-Chat-Limit", String.valueOf(normalizedLimit));
+        if (page.nextCursor() != null) {
+            builder.header("X-Chat-Next-Cursor", page.nextCursor());
+        }
+        return builder.body(page.chats());
     }
 
     @PostMapping("/direct")
@@ -293,6 +309,14 @@ public class ChatController {
         return ResponseEntity.ok(chatService.updateMemberRole(CurrentUser.id(), chatId, userId, request));
     }
 
+    @PostMapping("/{chatId}/ownership")
+    public ResponseEntity<TransferChatOwnershipResponse> transferOwnership(
+            @PathVariable UUID chatId,
+            @Valid @RequestBody TransferChatOwnershipRequest request
+    ) {
+        return ResponseEntity.ok(chatService.transferOwnership(CurrentUser.id(), chatId, request.newOwnerUserId()));
+    }
+
     @PostMapping("/{chatId}/permissions/{userId}")
     public ResponseEntity<ChatMemberResponse> updatePermissions(
             @PathVariable UUID chatId,
@@ -316,7 +340,7 @@ public class ChatController {
             @Valid @RequestBody MarkReadRequest request
     ) {
         ChatReadEventResponse event = chatService.markRead(CurrentUser.id(), chatId, request.messageId());
-        messageDeliveryService.markReadUpTo(CurrentUser.id(), chatId, request.messageId());
+        messageDeliveryService.markReadUpTo(CurrentUser.id(), chatId, event.messageId());
         chatReadEventPublisher.publish(event);
         return ResponseEntity.ok(event);
     }
@@ -326,7 +350,12 @@ public class ChatController {
             @PathVariable UUID chatId,
             @Valid @RequestBody TypingEventRequest request
     ) {
-        TypingEventResponse event = chatService.buildTypingEvent(CurrentUser.id(), chatId, request.typing());
+        TypingEventResponse event = chatService.buildTypingEvent(
+                CurrentUser.id(),
+                chatId,
+                request.topicId(),
+                request.typing()
+        );
         typingEventPublisher.publish(event);
         return ResponseEntity.ok(event);
     }

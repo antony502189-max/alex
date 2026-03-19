@@ -24,6 +24,9 @@ public class StoryEntity {
     @Column(name = "owner_user_id", nullable = false)
     private UUID ownerUserId;
 
+    @Column(name = "owner_chat_id")
+    private UUID ownerChatId;
+
     @Column(name = "text", length = 500)
     private String text;
 

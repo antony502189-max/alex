@@ -6,8 +6,10 @@ import com.alex.messenger.bot.dto.BotApiDeleteMessageRequest;
 import com.alex.messenger.bot.dto.BotApiDeleteMessageResponse;
 import com.alex.messenger.bot.dto.BotApiEditMessageTextRequest;
 import com.alex.messenger.bot.dto.BotApiRefundPaymentRequest;
+import com.alex.messenger.bot.dto.BotApiSendMediaGroupRequest;
 import com.alex.messenger.bot.dto.BotApiSendInvoiceRequest;
 import com.alex.messenger.bot.dto.BotApiSendMessageRequest;
+import com.alex.messenger.bot.dto.BotApiSendAttachmentMessageRequest;
 import com.alex.messenger.bot.dto.BotApiSetMyCommandsRequest;
 import com.alex.messenger.bot.dto.BotApiAnswerWebAppQueryRequest;
 import com.alex.messenger.bot.dto.BotApiAnswerInlineQueryRequest;
@@ -84,6 +86,78 @@ public class BotApiController {
         featureFlagService.requireBotsEnabled();
         featureFlagService.requireBotApiFullEnabled();
         return ResponseEntity.ok(botApiService.sendMessage(CurrentUser.id(), request));
+    }
+
+    @PostMapping("/send-photo")
+    public ResponseEntity<ChatMessageResponse> sendPhoto(
+            @Valid @RequestBody BotApiSendAttachmentMessageRequest request
+    ) {
+        featureFlagService.requireBotsEnabled();
+        featureFlagService.requireBotApiFullEnabled();
+        return ResponseEntity.ok(botApiService.sendPhoto(CurrentUser.id(), request));
+    }
+
+    @PostMapping("/send-video")
+    public ResponseEntity<ChatMessageResponse> sendVideo(
+            @Valid @RequestBody BotApiSendAttachmentMessageRequest request
+    ) {
+        featureFlagService.requireBotsEnabled();
+        featureFlagService.requireBotApiFullEnabled();
+        return ResponseEntity.ok(botApiService.sendVideo(CurrentUser.id(), request));
+    }
+
+    @PostMapping("/send-animation")
+    public ResponseEntity<ChatMessageResponse> sendAnimation(
+            @Valid @RequestBody BotApiSendAttachmentMessageRequest request
+    ) {
+        featureFlagService.requireBotsEnabled();
+        featureFlagService.requireBotApiFullEnabled();
+        return ResponseEntity.ok(botApiService.sendAnimation(CurrentUser.id(), request));
+    }
+
+    @PostMapping("/send-document")
+    public ResponseEntity<ChatMessageResponse> sendDocument(
+            @Valid @RequestBody BotApiSendAttachmentMessageRequest request
+    ) {
+        featureFlagService.requireBotsEnabled();
+        featureFlagService.requireBotApiFullEnabled();
+        return ResponseEntity.ok(botApiService.sendDocument(CurrentUser.id(), request));
+    }
+
+    @PostMapping("/send-voice")
+    public ResponseEntity<ChatMessageResponse> sendVoice(
+            @Valid @RequestBody BotApiSendAttachmentMessageRequest request
+    ) {
+        featureFlagService.requireBotsEnabled();
+        featureFlagService.requireBotApiFullEnabled();
+        return ResponseEntity.ok(botApiService.sendVoice(CurrentUser.id(), request));
+    }
+
+    @PostMapping("/send-audio")
+    public ResponseEntity<ChatMessageResponse> sendAudio(
+            @Valid @RequestBody BotApiSendAttachmentMessageRequest request
+    ) {
+        featureFlagService.requireBotsEnabled();
+        featureFlagService.requireBotApiFullEnabled();
+        return ResponseEntity.ok(botApiService.sendAudio(CurrentUser.id(), request));
+    }
+
+    @PostMapping("/send-video-note")
+    public ResponseEntity<ChatMessageResponse> sendVideoNote(
+            @Valid @RequestBody BotApiSendAttachmentMessageRequest request
+    ) {
+        featureFlagService.requireBotsEnabled();
+        featureFlagService.requireBotApiFullEnabled();
+        return ResponseEntity.ok(botApiService.sendVideoNote(CurrentUser.id(), request));
+    }
+
+    @PostMapping("/send-media-group")
+    public ResponseEntity<ChatMessageResponse> sendMediaGroup(
+            @Valid @RequestBody BotApiSendMediaGroupRequest request
+    ) {
+        featureFlagService.requireBotsEnabled();
+        featureFlagService.requireBotApiFullEnabled();
+        return ResponseEntity.ok(botApiService.sendMediaGroup(CurrentUser.id(), request));
     }
 
     @PostMapping("/edit-message-text")

@@ -96,17 +96,21 @@ public class AttachmentUploadSessionService {
         }
 
         AttachmentUploadSessionEntity session = new AttachmentUploadSessionEntity();
+        String normalizedContentType = normalizeContentType(request.contentType());
+        String normalizedKind = normalizeKind(request.kind(), normalizedContentType);
+        boolean normalizedHdPhoto = normalizeHdPhoto(request.hdPhoto(), normalizedKind);
         session.setId(sessionId);
         session.setChatId(request.chatId());
         session.setUploaderUserId(requesterId);
         session.setOriginalFileName(safeFileName(request.originalFileName()));
-        session.setContentType(normalizeContentType(request.contentType()));
-        session.setKind(normalizeKind(request.kind(), request.contentType()));
+        session.setContentType(normalizedContentType);
+        session.setKind(normalizedKind);
         session.setTotalSizeBytes(request.totalSizeBytes());
         session.setUploadedBytes(0L);
         session.setDurationMs(request.durationMs());
         session.setWidth(request.width());
         session.setHeight(request.height());
+        session.setHdPhoto(normalizedHdPhoto);
         session.setWaveform(serializeWaveform(request.waveform()));
         session.setAlbumId(request.albumId());
         session.setAlbumItemIndex(request.albumItemIndex());
@@ -185,6 +189,7 @@ public class AttachmentUploadSessionService {
                 session.getDurationMs(),
                 session.getWidth(),
                 session.getHeight(),
+                session.getHdPhoto(),
                 session.getWaveform(),
                 session.getAlbumId(),
                 session.getAlbumItemIndex(),
@@ -259,7 +264,8 @@ public class AttachmentUploadSessionService {
                 session.getExpiresAt(),
                 session.getCompletedAttachmentId(),
                 session.getAlbumId(),
-                session.getAlbumItemIndex()
+                session.getAlbumItemIndex(),
+                Boolean.TRUE.equals(session.getHdPhoto())
         );
     }
 
@@ -312,6 +318,14 @@ public class AttachmentUploadSessionService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported attachment kind");
         }
         return normalizedKind;
+    }
+
+    private boolean normalizeHdPhoto(Boolean hdPhoto, String kind) {
+        boolean enabled = Boolean.TRUE.equals(hdPhoto);
+        if (enabled && !"IMAGE".equals(kind)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "HD photo is supported only for image attachments");
+        }
+        return enabled;
     }
 
     private String safeFileName(String originalFileName) {

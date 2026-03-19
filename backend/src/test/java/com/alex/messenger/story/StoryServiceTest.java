@@ -1,6 +1,7 @@
 package com.alex.messenger.story;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -9,15 +10,23 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.alex.messenger.chat.ChatEntity;
+import com.alex.messenger.chat.ChatMemberRepository;
+import com.alex.messenger.chat.ChatRepository;
+import com.alex.messenger.chat.ChatService;
 import com.alex.messenger.media.MediaObjectReference;
 import com.alex.messenger.media.MediaProcessingService;
 import com.alex.messenger.media.MediaService;
 import com.alex.messenger.media.PresignedMediaAccess;
+import com.alex.messenger.story.dto.CreateStoryAlbumRequest;
 import com.alex.messenger.story.dto.CreateStoryRequest;
 import com.alex.messenger.story.dto.CreateStoryHighlightRequest;
+import com.alex.messenger.story.dto.CreateStoryLiveCommentRequest;
+import com.alex.messenger.story.dto.GoLiveStoryRequest;
 import com.alex.messenger.story.dto.StoryReactionRequest;
 import com.alex.messenger.user.ContactRepository;
 import com.alex.messenger.user.UserEntity;
+import com.alex.messenger.user.UserPrivacyService;
 import com.alex.messenger.user.UserRepository;
 import java.io.ByteArrayInputStream;
 import java.lang.reflect.Field;
@@ -51,10 +60,34 @@ class StoryServiceTest {
     private StoryHighlightItemRepository storyHighlightItemRepository;
 
     @Mock
+    private StoryAlbumRepository storyAlbumRepository;
+
+    @Mock
+    private StoryAlbumItemRepository storyAlbumItemRepository;
+
+    @Mock
+    private StoryLiveSessionRepository storyLiveSessionRepository;
+
+    @Mock
+    private StoryLiveCommentRepository storyLiveCommentRepository;
+
+    @Mock
+    private ChatRepository chatRepository;
+
+    @Mock
+    private ChatMemberRepository chatMemberRepository;
+
+    @Mock
+    private ChatService chatService;
+
+    @Mock
     private UserRepository userRepository;
 
     @Mock
     private ContactRepository contactRepository;
+
+    @Mock
+    private UserPrivacyService userPrivacyService;
 
     @Mock
     private MediaService mediaService;
@@ -72,8 +105,16 @@ class StoryServiceTest {
                 storyInteractionRepository,
                 storyHighlightRepository,
                 storyHighlightItemRepository,
+                storyAlbumRepository,
+                storyAlbumItemRepository,
+                storyLiveSessionRepository,
+                storyLiveCommentRepository,
+                chatRepository,
+                chatMemberRepository,
+                chatService,
                 userRepository,
                 contactRepository,
+                userPrivacyService,
                 mediaService,
                 mediaProcessingService
         );
@@ -105,6 +146,8 @@ class StoryServiceTest {
         when(userRepository.findAllById(anyCollection())).thenReturn(List.of(owner));
         when(storyViewRepository.findAllByIdViewerUserIdAndIdStoryIdIn(eq(allowedViewerId), anyList())).thenReturn(List.of());
         when(storyViewRepository.findAllByIdStoryId(storyId)).thenReturn(List.of());
+        when(userPrivacyService.isCloseFriend(ownerUserId, allowedViewerId)).thenReturn(false);
+        when(userPrivacyService.isCloseFriend(ownerUserId, blockedViewerId)).thenReturn(false);
 
         var allowedFeed = storyService.listFeed(allowedViewerId);
         var blockedFeed = storyService.listFeed(blockedViewerId);
@@ -161,7 +204,8 @@ class StoryServiceTest {
                         "#2563eb",
                         "#ffffff",
                         "DEFAULT",
-                        List.of()
+                        List.of(),
+                        null
                 ),
                 null,
                 file
@@ -173,6 +217,48 @@ class StoryServiceTest {
         assertThat(response.media().downloadUrl()).isEqualTo("https://cdn.example/stories/story.jpg");
         assertThat(response.media().previewUrl()).isEqualTo("https://cdn.example/stories/story.jpg");
         verify(mediaProcessingService).enqueueStoryPreview(any(StoryEntity.class));
+    }
+
+    @Test
+    void createStoryForChannelUsesChannelOwnershipSurface() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID ownerChatId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+
+        UserEntity owner = user(ownerUserId, "Publisher");
+        ChatEntity channel = channel(ownerChatId, "Release Notes", "release_notes");
+
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+        when(chatService.getOwnedChat(ownerUserId, ownerChatId)).thenReturn(channel);
+        when(storyRepository.save(any(StoryEntity.class))).thenAnswer(invocation -> {
+            StoryEntity story = invocation.getArgument(0);
+            if (story.getId() == null) {
+                story.setId(storyId);
+            }
+            if (story.getCreatedAt() == null) {
+                story.setCreatedAt(Instant.parse("2026-03-19T10:00:00Z"));
+            }
+            return story;
+        });
+
+        var response = storyService.create(
+                ownerUserId,
+                new CreateStoryRequest(
+                        "Update",
+                        "#0f172a",
+                        "#2563eb",
+                        "#ffffff",
+                        null,
+                        List.of(),
+                        ownerChatId
+                )
+        );
+
+        assertThat(response.storyId()).isEqualTo(storyId);
+        assertThat(response.ownerUserId()).isNull();
+        assertThat(response.ownerChatId()).isEqualTo(ownerChatId);
+        assertThat(response.ownerDisplayName()).isEqualTo("Release Notes");
+        assertThat(response.ownerUsername()).isEqualTo("release_notes");
     }
 
     @Test
@@ -201,11 +287,72 @@ class StoryServiceTest {
         when(storyViewRepository.findAllByIdStoryId(expiredStoryId)).thenReturn(List.of());
         when(storyViewRepository.findAllByIdStoryId(activeStoryId)).thenReturn(List.of());
 
-        var archive = storyService.listArchive(ownerUserId);
+        var archive = storyService.listArchive(ownerUserId, null);
 
         assertThat(archive).hasSize(1);
         assertThat(archive.get(0).storyId()).isEqualTo(expiredStoryId);
         assertThat(archive.get(0).expired()).isTrue();
+    }
+
+    @Test
+    void getChannelSurfaceIncludesStoriesAlbumsAndLiveIds() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+        UUID albumId = UUID.randomUUID();
+
+        ChatEntity channel = channel(chatId, "News", "daily_news");
+        UserEntity publisher = user(requesterId, "Publisher");
+
+        StoryEntity story = story(
+                storyId,
+                requesterId,
+                Instant.parse("2026-03-19T08:00:00Z"),
+                Instant.parse("2026-03-20T08:00:00Z")
+        );
+        story.setOwnerChatId(chatId);
+
+        StoryAlbumEntity album = new StoryAlbumEntity();
+        album.setId(albumId);
+        album.setOwnerUserId(requesterId);
+        album.setOwnerChatId(chatId);
+        album.setTitle("Top stories");
+        album.setPosition(0);
+        album.setCreatedAt(Instant.parse("2026-03-19T09:00:00Z"));
+        album.setUpdatedAt(Instant.parse("2026-03-19T09:00:00Z"));
+
+        StoryAlbumItemEntity albumItem = new StoryAlbumItemEntity();
+        albumItem.setAlbumId(albumId);
+        albumItem.setStoryId(storyId);
+        albumItem.setPosition(0);
+
+        StoryLiveSessionEntity liveSession = new StoryLiveSessionEntity();
+        liveSession.setId(UUID.randomUUID());
+        liveSession.setStoryId(storyId);
+        liveSession.setOwnerUserId(requesterId);
+        liveSession.setStatus("ACTIVE");
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(channel));
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(channel);
+        when(storyRepository.findAllByOwnerChatIdAndExpiresAtAfterOrderByCreatedAtDesc(eq(chatId), any(Instant.class)))
+                .thenReturn(List.of(story));
+        when(storyAlbumRepository.findAllByOwnerChatIdOrderByPositionAscCreatedAtAsc(chatId)).thenReturn(List.of(album));
+        when(storyAlbumItemRepository.findAllByAlbumIdOrderByPositionAscCreatedAtAsc(albumId)).thenReturn(List.of(albumItem));
+        when(storyRepository.findAllById(any())).thenReturn(List.of(story));
+        when(storyViewRepository.findAllByIdViewerUserIdAndIdStoryIdIn(eq(requesterId), anyCollection())).thenReturn(List.of());
+        when(storyViewRepository.findAllByIdStoryId(storyId)).thenReturn(List.of());
+        when(storyLiveSessionRepository.findAllByStoryIdInAndStatus(anyCollection(), eq("ACTIVE"))).thenReturn(List.of(liveSession));
+        when(userRepository.findAllById(anyCollection())).thenReturn(List.of(publisher));
+
+        var response = storyService.getChannelSurface(requesterId, chatId);
+
+        assertThat(response.ownerType()).isEqualTo("CHANNEL");
+        assertThat(response.ownerChatId()).isEqualTo(chatId);
+        assertThat(response.activeStoriesCount()).isEqualTo(1);
+        assertThat(response.albumCount()).isEqualTo(1);
+        assertThat(response.liveStoriesCount()).isEqualTo(1);
+        assertThat(response.activeLiveStoryIds()).containsExactly(storyId);
+        assertThat(response.canManage()).isTrue();
     }
 
     @Test
@@ -312,12 +459,255 @@ class StoryServiceTest {
                 .containsExactly(firstStoryId, secondStoryId);
     }
 
+    @Test
+    void reactToChannelStoryDoesNotRequireTargetUser() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+
+        StoryEntity story = story(
+                storyId,
+                requesterId,
+                Instant.parse("2026-03-19T08:00:00Z"),
+                Instant.parse("2026-03-20T08:00:00Z")
+        );
+        story.setOwnerChatId(chatId);
+        ChatEntity channel = channel(chatId, "News", "daily_news");
+        UserEntity requester = user(requesterId, "Viewer");
+
+        when(storyRepository.findByIdAndExpiresAtAfter(eq(storyId), any(Instant.class))).thenReturn(Optional.of(story));
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(channel));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(storyInteractionRepository.findFirstByStoryIdAndActorUserIdAndInteractionType(
+                storyId,
+                requesterId,
+                "REACTION"
+        )).thenReturn(Optional.empty());
+        when(storyInteractionRepository.save(any(StoryInteractionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(userRepository.findAllById(anyCollection())).thenReturn(List.of(requester));
+
+        var response = storyService.react(requesterId, storyId, new StoryReactionRequest("fire"));
+
+        assertThat(response.storyId()).isEqualTo(storyId);
+        assertThat(response.targetUserId()).isNull();
+        assertThat(response.reaction()).isEqualTo("fire");
+    }
+
+    @Test
+    void createAlbumUsesOwnedStoriesAndSetsDefaultCover() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID albumId = UUID.randomUUID();
+        UUID firstStoryId = UUID.randomUUID();
+        UUID secondStoryId = UUID.randomUUID();
+
+        UserEntity owner = user(ownerUserId, "Album owner");
+        StoryEntity firstStory = story(
+                firstStoryId,
+                ownerUserId,
+                Instant.parse("2026-03-12T08:00:00Z"),
+                Instant.parse("2026-03-15T08:00:00Z")
+        );
+        StoryEntity secondStory = story(
+                secondStoryId,
+                ownerUserId,
+                Instant.parse("2026-03-11T08:00:00Z"),
+                Instant.parse("2026-03-11T20:00:00Z")
+        );
+        StoryAlbumItemEntity firstItem = new StoryAlbumItemEntity();
+        firstItem.setAlbumId(albumId);
+        firstItem.setStoryId(firstStoryId);
+        firstItem.setPosition(0);
+        StoryAlbumItemEntity secondItem = new StoryAlbumItemEntity();
+        secondItem.setAlbumId(albumId);
+        secondItem.setStoryId(secondStoryId);
+        secondItem.setPosition(1);
+
+        when(storyRepository.findAllById(any())).thenReturn(List.of(firstStory, secondStory));
+        when(storyAlbumRepository.findAllByOwnerUserIdOrderByPositionAscCreatedAtAsc(ownerUserId)).thenReturn(List.of());
+        when(storyAlbumRepository.save(any(StoryAlbumEntity.class))).thenAnswer(invocation -> {
+            StoryAlbumEntity album = invocation.getArgument(0);
+            album.setId(albumId);
+            if (album.getCreatedAt() == null) {
+                album.setCreatedAt(Instant.parse("2026-03-19T09:00:00Z"));
+            }
+            if (album.getUpdatedAt() == null) {
+                album.setUpdatedAt(Instant.parse("2026-03-19T09:00:00Z"));
+            }
+            return album;
+        });
+        when(storyAlbumItemRepository.findAllByAlbumIdOrderByPositionAscCreatedAtAsc(albumId))
+                .thenReturn(List.of(firstItem, secondItem));
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+        when(storyViewRepository.findAllByIdViewerUserIdAndIdStoryIdIn(eq(ownerUserId), anyCollection())).thenReturn(List.of());
+        when(storyViewRepository.findAllByIdStoryId(firstStoryId)).thenReturn(List.of());
+        when(storyViewRepository.findAllByIdStoryId(secondStoryId)).thenReturn(List.of());
+
+        var response = storyService.createAlbum(
+                ownerUserId,
+                new CreateStoryAlbumRequest("Spring", null, null, List.of(firstStoryId, secondStoryId), null)
+        );
+
+        assertThat(response.albumId()).isEqualTo(albumId);
+        assertThat(response.coverStoryId()).isEqualTo(firstStoryId);
+        assertThat(response.storiesCount()).isEqualTo(2);
+        assertThat(response.stories()).extracting(story -> story.storyId())
+                .containsExactly(firstStoryId, secondStoryId);
+    }
+
+    @Test
+    void goLiveCreatesActiveSessionWithDonationMetadata() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+        UUID liveSessionId = UUID.randomUUID();
+
+        StoryEntity story = story(
+                storyId,
+                ownerUserId,
+                Instant.parse("2026-03-19T08:00:00Z"),
+                Instant.parse("2026-03-20T08:00:00Z")
+        );
+
+        when(storyRepository.findById(storyId)).thenReturn(Optional.of(story));
+        when(storyLiveSessionRepository.findFirstByStoryIdAndStatusOrderByStartedAtDesc(storyId, "ACTIVE"))
+                .thenReturn(Optional.empty());
+        when(storyLiveSessionRepository.save(any(StoryLiveSessionEntity.class))).thenAnswer(invocation -> {
+            StoryLiveSessionEntity session = invocation.getArgument(0);
+            session.setId(liveSessionId);
+            if (session.getStartedAt() == null) {
+                session.setStartedAt(Instant.parse("2026-03-19T09:00:00Z"));
+            }
+            if (session.getCreatedAt() == null) {
+                session.setCreatedAt(Instant.parse("2026-03-19T09:00:00Z"));
+            }
+            if (session.getUpdatedAt() == null) {
+                session.setUpdatedAt(Instant.parse("2026-03-19T09:00:00Z"));
+            }
+            return session;
+        });
+
+        var response = storyService.goLive(
+                ownerUserId,
+                storyId,
+                new GoLiveStoryRequest(true, "stars", "xtr", "https://hooks.example/story-live")
+        );
+
+        assertThat(response.liveSessionId()).isEqualTo(liveSessionId);
+        assertThat(response.storyId()).isEqualTo(storyId);
+        assertThat(response.status()).isEqualTo("ACTIVE");
+        assertThat(response.donationsEnabled()).isTrue();
+        assertThat(response.donationProvider()).isEqualTo("STARS");
+        assertThat(response.donationCurrency()).isEqualTo("XTR");
+        assertThat(response.donationEventHookUrl()).isEqualTo("https://hooks.example/story-live");
+    }
+
+    @Test
+    void commentLiveTracksDonationTotals() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+        UUID liveSessionId = UUID.randomUUID();
+        UUID commentId = UUID.randomUUID();
+
+        StoryEntity story = story(
+                storyId,
+                ownerUserId,
+                Instant.parse("2026-03-19T08:00:00Z"),
+                Instant.parse("2026-03-20T08:00:00Z")
+        );
+        UserEntity owner = user(ownerUserId, "Live owner");
+
+        StoryLiveSessionEntity session = new StoryLiveSessionEntity();
+        session.setId(liveSessionId);
+        session.setStoryId(storyId);
+        session.setOwnerUserId(ownerUserId);
+        session.setStatus("ACTIVE");
+        session.setDonationsEnabled(true);
+        session.setDonationCurrency("XTR");
+        session.setDonationEventsCount(0L);
+        session.setDonationsTotalMinor(0L);
+        session.setStartedAt(Instant.parse("2026-03-19T09:00:00Z"));
+
+        when(storyRepository.findByIdAndExpiresAtAfter(eq(storyId), any(Instant.class))).thenReturn(Optional.of(story));
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+        when(storyLiveSessionRepository.findFirstByStoryIdAndStatusOrderByStartedAtDesc(storyId, "ACTIVE"))
+                .thenReturn(Optional.of(session));
+        when(storyLiveCommentRepository.save(any(StoryLiveCommentEntity.class))).thenAnswer(invocation -> {
+            StoryLiveCommentEntity comment = invocation.getArgument(0);
+            comment.setId(commentId);
+            if (comment.getCreatedAt() == null) {
+                comment.setCreatedAt(Instant.parse("2026-03-19T09:05:00Z"));
+            }
+            return comment;
+        });
+        when(storyLiveSessionRepository.save(any(StoryLiveSessionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(userRepository.findAllById(anyCollection())).thenReturn(List.of(owner));
+
+        var response = storyService.commentLive(
+                ownerUserId,
+                storyId,
+                new CreateStoryLiveCommentRequest("Thanks", 50L, null)
+        );
+
+        assertThat(response.commentId()).isEqualTo(commentId);
+        assertThat(response.message()).isEqualTo("Thanks");
+        assertThat(response.donationAmountMinor()).isEqualTo(50L);
+        assertThat(response.donationCurrency()).isEqualTo("XTR");
+        assertThat(session.getDonationEventsCount()).isEqualTo(1L);
+        assertThat(session.getDonationsTotalMinor()).isEqualTo(50L);
+    }
+
+    @Test
+    void commentLiveRejectsCurrencyWithoutDonation() {
+        UUID ownerUserId = UUID.randomUUID();
+        UUID storyId = UUID.randomUUID();
+
+        StoryEntity story = story(
+                storyId,
+                ownerUserId,
+                Instant.parse("2026-03-19T08:00:00Z"),
+                Instant.parse("2026-03-20T08:00:00Z")
+        );
+        UserEntity owner = user(ownerUserId, "Live owner");
+
+        StoryLiveSessionEntity session = new StoryLiveSessionEntity();
+        session.setId(UUID.randomUUID());
+        session.setStoryId(storyId);
+        session.setOwnerUserId(ownerUserId);
+        session.setStatus("ACTIVE");
+        session.setDonationsEnabled(true);
+
+        when(storyRepository.findByIdAndExpiresAtAfter(eq(storyId), any(Instant.class))).thenReturn(Optional.of(story));
+        when(userRepository.findById(ownerUserId)).thenReturn(Optional.of(owner));
+        when(storyLiveSessionRepository.findFirstByStoryIdAndStatusOrderByStartedAtDesc(storyId, "ACTIVE"))
+                .thenReturn(Optional.of(session));
+
+        var exception = catchThrowableOfType(
+                () -> storyService.commentLive(
+                        ownerUserId,
+                        storyId,
+                        new CreateStoryLiveCommentRequest("Hello", null, "XTR")
+                ),
+                org.springframework.web.server.ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST);
+    }
+
     private UserEntity user(UUID userId, String displayName) {
         UserEntity user = new UserEntity();
         user.setId(userId);
         user.setDisplayName(displayName);
         user.setStoryPrivacy("EVERYBODY");
         return user;
+    }
+
+    private ChatEntity channel(UUID chatId, String title, String publicUsername) {
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("CHANNEL");
+        chat.setTitle(title);
+        chat.setPublicUsername(publicUsername);
+        return chat;
     }
 
     private StoryEntity story(UUID storyId, UUID ownerUserId, Instant createdAt, Instant expiresAt) {

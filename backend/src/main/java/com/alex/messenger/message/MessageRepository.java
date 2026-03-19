@@ -20,6 +20,9 @@ public interface MessageRepository extends CassandraRepository<MessageEntity, Me
     @Query("SELECT * FROM messages_by_chat_v2 WHERE chat_id = ?0 AND message_id <= ?1")
     List<MessageEntity> findAllByChatIdUpToMessageId(UUID chatId, UUID messageId);
 
+    @Query("SELECT * FROM messages_by_chat_v2 WHERE chat_id = ?0 AND message_id > ?1")
+    List<MessageEntity> findAllByChatIdAfterMessageId(UUID chatId, UUID messageId);
+
     @Query("""
             SELECT * FROM messages_by_chat_v2
             WHERE chat_id = ?0

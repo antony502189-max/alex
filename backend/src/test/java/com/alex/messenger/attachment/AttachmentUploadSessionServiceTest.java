@@ -27,6 +27,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.web.server.ResponseStatusException;
 
 @ExtendWith(MockitoExtension.class)
 class AttachmentUploadSessionServiceTest {
@@ -86,13 +87,14 @@ class AttachmentUploadSessionServiceTest {
                 requesterId,
                 new CreateAttachmentUploadSessionRequest(
                         chatId,
-                        "note.txt",
-                        "text/plain",
-                        "FILE",
+                        "photo.png",
+                        "image/png",
+                        "IMAGE",
                         5L,
                         null,
                         null,
                         null,
+                        true,
                         null,
                         UUID.fromString("11111111-1111-1111-1111-111111111111"),
                         0
@@ -115,6 +117,7 @@ class AttachmentUploadSessionServiceTest {
         assertThat(updatedSession.complete()).isTrue();
         assertThat(updatedSession.albumId()).isEqualTo(UUID.fromString("11111111-1111-1111-1111-111111111111"));
         assertThat(updatedSession.albumItemIndex()).isZero();
+        assertThat(updatedSession.hdPhoto()).isTrue();
     }
 
     @Test
@@ -159,12 +162,16 @@ class AttachmentUploadSessionServiceTest {
                 false,
                 false,
                 null,
-                null,
-                "APPROVED",
-                null,
-                false,
-                false
-        );
+                  null,
+                  "APPROVED",
+                  null,
+                  false,
+                  false,
+                  null,
+                  null,
+                  null,
+                  false
+          );
 
         when(attachmentUploadSessionRepository.findByIdAndUploaderUserId(sessionId, requesterId)).thenReturn(Optional.of(session));
         when(attachmentUploadSessionRepository.save(any(AttachmentUploadSessionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
@@ -175,6 +182,7 @@ class AttachmentUploadSessionServiceTest {
                 null,
                 null,
                 null,
+                false,
                 null,
                 null,
                 null,
@@ -197,6 +205,7 @@ class AttachmentUploadSessionServiceTest {
                 null,
                 null,
                 null,
+                false,
                 null,
                 null,
                 null,
@@ -205,5 +214,40 @@ class AttachmentUploadSessionServiceTest {
                 4L,
                 stagedFile
         );
+    }
+
+    @Test
+    void createSessionRejectsHdPhotoForNonImageKind() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+
+        ResponseStatusException exception = org.assertj.core.api.Assertions.catchThrowableOfType(
+                () -> attachmentUploadSessionService.createSession(
+                        requesterId,
+                        new CreateAttachmentUploadSessionRequest(
+                                chatId,
+                                "clip.mp4",
+                                "video/mp4",
+                                "VIDEO",
+                                5L,
+                                null,
+                                null,
+                                null,
+                                true,
+                                null,
+                                null,
+                                null
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST);
     }
 }

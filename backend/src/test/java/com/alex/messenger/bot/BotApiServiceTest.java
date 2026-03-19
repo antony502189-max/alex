@@ -15,10 +15,15 @@ import com.alex.messenger.bot.dto.BotApiDeleteMessageRequest;
 import com.alex.messenger.bot.dto.BotApiEditMessageTextRequest;
 import com.alex.messenger.bot.dto.BotApiMessageActionRequest;
 import com.alex.messenger.bot.dto.BotApiSendInvoiceRequest;
+import com.alex.messenger.bot.dto.BotApiSendAttachmentMessageRequest;
+import com.alex.messenger.bot.dto.BotApiSendMediaGroupRequest;
 import com.alex.messenger.bot.dto.BotApiSendMessageRequest;
 import com.alex.messenger.bot.dto.BotApiSetMyCommandsRequest;
 import com.alex.messenger.bot.dto.BotApiAnswerInlineQueryRequest;
 import com.alex.messenger.bot.dto.BotApiInlineResultRequest;
+import com.alex.messenger.attachment.AttachmentService;
+import com.alex.messenger.chat.ChatEntity;
+import com.alex.messenger.chat.ChatService;
 import com.alex.messenger.bot.dto.BotCallbackQueryResponse;
 import com.alex.messenger.bot.dto.BotCommandResponse;
 import com.alex.messenger.bot.dto.BotInlineResultResponse;
@@ -32,6 +37,7 @@ import com.alex.messenger.message.dto.SendMessageRequest;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -43,6 +49,12 @@ class BotApiServiceTest {
 
     @Mock
     private MessageService messageService;
+
+    @Mock
+    private AttachmentService attachmentService;
+
+    @Mock
+    private ChatService chatService;
 
     @Mock
     private BotCommandService botCommandService;
@@ -68,6 +80,8 @@ class BotApiServiceTest {
     void setUp() {
         botApiService = new BotApiService(
                 messageService,
+                attachmentService,
+                chatService,
                 botCommandService,
                 botInlineResultCacheService,
                 botMessageActionService,
@@ -107,6 +121,148 @@ class BotApiServiceTest {
                 )
         );
 
+        verify(botMessageActionService).saveMessageActions(botUserId, messageId, List.of(action));
+        assertThat(response.messageId()).isEqualTo(messageId);
+    }
+
+    @Test
+    void sendPhotoMapsToPhotoMessageTypeAndSingleAttachment() {
+        UUID botUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID attachmentId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        BotApiMessageActionRequest action = new BotApiMessageActionRequest("URL", "Open", null, "https://example.com", null);
+
+        when(messageService.sendMessage(eq(botUserId), any(SendMessageRequest.class))).thenReturn(message(messageId));
+
+        var response = botApiService.sendPhoto(
+                botUserId,
+                new BotApiSendAttachmentMessageRequest(
+                        chatId,
+                        null,
+                        null,
+                        null,
+                        "Cover",
+                        List.of(),
+                        attachmentId,
+                        false,
+                        null,
+                        List.of(action)
+                )
+        );
+
+        ArgumentCaptor<SendMessageRequest> requestCaptor = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(messageService).sendMessage(eq(botUserId), requestCaptor.capture());
+        SendMessageRequest captured = requestCaptor.getValue();
+        assertThat(captured.messageType()).isEqualTo("PHOTO");
+        assertThat(captured.attachmentIds()).containsExactly(attachmentId);
+        assertThat(captured.caption()).isEqualTo("Cover");
+        verify(botMessageActionService).saveMessageActions(botUserId, messageId, List.of(action));
+        assertThat(response.messageId()).isEqualTo(messageId);
+    }
+
+    @Test
+    void sendVideoNoteMapsToVideoNoteMessageType() {
+        UUID botUserId = UUID.randomUUID();
+        UUID attachmentId = UUID.randomUUID();
+
+        when(messageService.sendMessage(eq(botUserId), any(SendMessageRequest.class))).thenReturn(message(UUID.randomUUID()));
+
+        botApiService.sendVideoNote(
+                botUserId,
+                new BotApiSendAttachmentMessageRequest(
+                        null,
+                        UUID.randomUUID(),
+                        null,
+                        null,
+                        null,
+                        List.of(),
+                        attachmentId,
+                        true,
+                        UUID.randomUUID(),
+                        List.of()
+                )
+        );
+
+        ArgumentCaptor<SendMessageRequest> requestCaptor = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(messageService).sendMessage(eq(botUserId), requestCaptor.capture());
+        SendMessageRequest captured = requestCaptor.getValue();
+        assertThat(captured.messageType()).isEqualTo("VIDEO_NOTE");
+        assertThat(captured.attachmentIds()).containsExactly(attachmentId);
+        assertThat(captured.silent()).isTrue();
+    }
+
+    @Test
+    void sendAudioMapsToAudioMessageType() {
+        UUID botUserId = UUID.randomUUID();
+        UUID attachmentId = UUID.randomUUID();
+
+        when(messageService.sendMessage(eq(botUserId), any(SendMessageRequest.class))).thenReturn(message(UUID.randomUUID()));
+
+        botApiService.sendAudio(
+                botUserId,
+                new BotApiSendAttachmentMessageRequest(
+                        UUID.randomUUID(),
+                        null,
+                        null,
+                        null,
+                        "Track",
+                        List.of(),
+                        attachmentId,
+                        false,
+                        null,
+                        List.of()
+                )
+        );
+
+        ArgumentCaptor<SendMessageRequest> requestCaptor = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(messageService).sendMessage(eq(botUserId), requestCaptor.capture());
+        assertThat(requestCaptor.getValue().messageType()).isEqualTo("AUDIO");
+    }
+
+    @Test
+    void sendMediaGroupClonesAttachmentsAsAlbumAndSendsAlbumMessage() {
+        UUID botUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID firstAttachmentId = UUID.randomUUID();
+        UUID secondAttachmentId = UUID.randomUUID();
+        UUID clonedFirstAttachmentId = UUID.randomUUID();
+        UUID clonedSecondAttachmentId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        BotApiMessageActionRequest action = new BotApiMessageActionRequest("CALLBACK", "Open", "payload", null, null);
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        when(chatService.getOwnedChat(botUserId, chatId)).thenReturn(chat);
+        when(attachmentService.cloneAttachmentsToChatAsAlbum(botUserId, chatId, List.of(firstAttachmentId, secondAttachmentId)))
+                .thenReturn(List.of(clonedFirstAttachmentId, clonedSecondAttachmentId));
+        when(messageService.sendMessage(eq(botUserId), any(SendMessageRequest.class))).thenReturn(message(messageId));
+
+        var response = botApiService.sendMediaGroup(
+                botUserId,
+                new BotApiSendMediaGroupRequest(
+                        chatId,
+                        null,
+                        null,
+                        null,
+                        "Album caption",
+                        List.of(),
+                        List.of(firstAttachmentId, secondAttachmentId),
+                        true,
+                        null,
+                        List.of(action)
+                )
+        );
+
+        ArgumentCaptor<SendMessageRequest> requestCaptor = ArgumentCaptor.forClass(SendMessageRequest.class);
+        verify(messageService).sendMessage(eq(botUserId), requestCaptor.capture());
+        SendMessageRequest captured = requestCaptor.getValue();
+        assertThat(captured.chatId()).isEqualTo(chatId);
+        assertThat(captured.messageType()).isEqualTo("ALBUM");
+        assertThat(captured.attachmentIds()).containsExactly(clonedFirstAttachmentId, clonedSecondAttachmentId);
+        assertThat(captured.caption()).isEqualTo("Album caption");
+        assertThat(captured.silent()).isTrue();
         verify(botMessageActionService).saveMessageActions(botUserId, messageId, List.of(action));
         assertThat(response.messageId()).isEqualTo(messageId);
     }

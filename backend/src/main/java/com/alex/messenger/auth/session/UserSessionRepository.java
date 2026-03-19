@@ -66,4 +66,16 @@ public interface UserSessionRepository extends JpaRepository<UserSessionEntity, 
             @Param("currentSessionId") UUID currentSessionId,
             @Param("revokedAt") Instant revokedAt
     );
+
+    @Modifying
+    @Query("""
+        update UserSessionEntity s
+        set s.revokedAt = :revokedAt
+        where s.userId = :userId
+          and s.revokedAt is null
+        """)
+    int revokeAllForUser(
+            @Param("userId") UUID userId,
+            @Param("revokedAt") Instant revokedAt
+    );
 }

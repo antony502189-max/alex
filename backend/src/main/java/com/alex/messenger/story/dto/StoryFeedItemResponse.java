@@ -6,6 +6,7 @@ import java.util.UUID;
 
 public record StoryFeedItemResponse(
         UUID ownerUserId,
+        UUID ownerChatId,
         String ownerDisplayName,
         String ownerUsername,
         boolean own,

@@ -10,6 +10,7 @@ public record CreateStoryRequest(
         @Size(max = 16) String backgroundTo,
         @Size(max = 16) String textColor,
         @Size(max = 16) String audience,
-        List<UUID> allowedViewerUserIds
+        List<UUID> allowedViewerUserIds,
+        UUID ownerChatId
 ) {
 }

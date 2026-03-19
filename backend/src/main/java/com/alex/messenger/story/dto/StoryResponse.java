@@ -6,6 +6,7 @@ import java.util.UUID;
 public record StoryResponse(
         UUID storyId,
         UUID ownerUserId,
+        UUID ownerChatId,
         String ownerDisplayName,
         String ownerUsername,
         String text,

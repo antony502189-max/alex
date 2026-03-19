@@ -57,6 +57,9 @@ public class ChatEntity {
     @Column(name = "cross_posting_enabled", nullable = false)
     private Boolean crossPostingEnabled = true;
 
+    @Column(name = "direct_messages_enabled", nullable = false)
+    private Boolean directMessagesEnabled = false;
+
     @Column(name = "linked_discussion_chat_id")
     private UUID linkedDiscussionChatId;
 
@@ -112,6 +115,9 @@ public class ChatEntity {
         }
         if (crossPostingEnabled == null) {
             crossPostingEnabled = true;
+        }
+        if (directMessagesEnabled == null) {
+            directMessagesEnabled = false;
         }
     }
 }

@@ -3,16 +3,23 @@ package com.alex.messenger.story;
 import com.alex.messenger.feature.FeatureFlagService;
 import com.alex.messenger.shared.CurrentUser;
 import com.alex.messenger.story.dto.CreateStoryRequest;
+import com.alex.messenger.story.dto.CreateStoryAlbumRequest;
 import com.alex.messenger.story.dto.CreateStoryHighlightRequest;
+import com.alex.messenger.story.dto.CreateStoryLiveCommentRequest;
+import com.alex.messenger.story.dto.GoLiveStoryRequest;
 import com.alex.messenger.story.dto.StoryFeedItemResponse;
+import com.alex.messenger.story.dto.StoryAlbumResponse;
 import com.alex.messenger.story.dto.StoryHighlightResponse;
 import com.alex.messenger.story.dto.StoryInteractionResponse;
 import com.alex.messenger.story.dto.StoryInteractionSummaryResponse;
+import com.alex.messenger.story.dto.StoryLiveCommentResponse;
+import com.alex.messenger.story.dto.StoryLiveSessionResponse;
 import com.alex.messenger.story.dto.StoryMentionRequest;
 import com.alex.messenger.story.dto.StoryReactionRequest;
 import com.alex.messenger.story.dto.StoryReplyRequest;
 import com.alex.messenger.story.dto.StoryReshareRequest;
 import com.alex.messenger.story.dto.StoryResponse;
+import com.alex.messenger.story.dto.StorySurfaceResponse;
 import com.alex.messenger.story.dto.StoryViewerResponse;
 import com.alex.messenger.story.dto.UpdateStoryHighlightStoriesRequest;
 import jakarta.validation.Valid;
@@ -46,10 +53,22 @@ public class StoryController {
         return ResponseEntity.ok(storyService.listFeed(CurrentUser.id()));
     }
 
-    @GetMapping("/archive")
-    public ResponseEntity<List<StoryResponse>> archive() {
+    @GetMapping("/users/{userId}/surface")
+    public ResponseEntity<StorySurfaceResponse> userSurface(@PathVariable UUID userId) {
         featureFlagService.requireStoriesEnabled();
-        return ResponseEntity.ok(storyService.listArchive(CurrentUser.id()));
+        return ResponseEntity.ok(storyService.getUserSurface(CurrentUser.id(), userId));
+    }
+
+    @GetMapping("/channels/{chatId}/surface")
+    public ResponseEntity<StorySurfaceResponse> channelSurface(@PathVariable UUID chatId) {
+        featureFlagService.requireStoriesEnabled();
+        return ResponseEntity.ok(storyService.getChannelSurface(CurrentUser.id(), chatId));
+    }
+
+    @GetMapping("/archive")
+    public ResponseEntity<List<StoryResponse>> archive(@RequestParam(required = false) UUID ownerChatId) {
+        featureFlagService.requireStoriesEnabled();
+        return ResponseEntity.ok(storyService.listArchive(CurrentUser.id(), ownerChatId));
     }
 
     @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -66,6 +85,7 @@ public class StoryController {
             @RequestParam(required = false) String textColor,
             @RequestParam(required = false) String audience,
             @RequestParam(required = false) List<UUID> allowedViewerUserIds,
+            @RequestParam(required = false) UUID ownerChatId,
             @RequestParam(required = false) Long durationMs,
             @RequestPart("file") MultipartFile file
     ) {
@@ -76,7 +96,8 @@ public class StoryController {
                 backgroundTo,
                 textColor,
                 audience,
-                allowedViewerUserIds
+                allowedViewerUserIds,
+                ownerChatId
         );
         return ResponseEntity.ok(storyService.createWithMedia(CurrentUser.id(), request, durationMs, file));
     }
@@ -171,6 +192,21 @@ public class StoryController {
         return ResponseEntity.ok(storyService.createHighlight(CurrentUser.id(), request));
     }
 
+    @GetMapping("/albums")
+    public ResponseEntity<List<StoryAlbumResponse>> albums(
+            @RequestParam(required = false) UUID ownerUserId,
+            @RequestParam(required = false) UUID ownerChatId
+    ) {
+        featureFlagService.requireStoriesEnabled();
+        return ResponseEntity.ok(storyService.listAlbums(CurrentUser.id(), ownerUserId, ownerChatId));
+    }
+
+    @PostMapping("/albums")
+    public ResponseEntity<StoryAlbumResponse> createAlbum(@Valid @RequestBody CreateStoryAlbumRequest request) {
+        featureFlagService.requireStoriesEnabled();
+        return ResponseEntity.ok(storyService.createAlbum(CurrentUser.id(), request));
+    }
+
     @PostMapping("/highlights/{highlightId}/stories")
     public ResponseEntity<StoryHighlightResponse> addStoriesToHighlight(
             @PathVariable UUID highlightId,
@@ -189,6 +225,42 @@ public class StoryController {
         featureFlagService.requireStoriesEnabled();
         featureFlagService.requireStoryInteractionsEnabled();
         return ResponseEntity.ok(storyService.removeStoryFromHighlight(CurrentUser.id(), highlightId, storyId));
+    }
+
+    @GetMapping("/{storyId}/live")
+    public ResponseEntity<StoryLiveSessionResponse> live(@PathVariable UUID storyId) {
+        featureFlagService.requireStoriesEnabled();
+        return ResponseEntity.ok(storyService.getLiveSession(CurrentUser.id(), storyId));
+    }
+
+    @PostMapping("/{storyId}/go-live")
+    public ResponseEntity<StoryLiveSessionResponse> goLive(
+            @PathVariable UUID storyId,
+            @Valid @RequestBody(required = false) GoLiveStoryRequest request
+    ) {
+        featureFlagService.requireStoriesEnabled();
+        return ResponseEntity.ok(storyService.goLive(CurrentUser.id(), storyId, request));
+    }
+
+    @PostMapping("/{storyId}/end-live")
+    public ResponseEntity<StoryLiveSessionResponse> endLive(@PathVariable UUID storyId) {
+        featureFlagService.requireStoriesEnabled();
+        return ResponseEntity.ok(storyService.endLive(CurrentUser.id(), storyId));
+    }
+
+    @GetMapping("/{storyId}/comments")
+    public ResponseEntity<List<StoryLiveCommentResponse>> liveComments(@PathVariable UUID storyId) {
+        featureFlagService.requireStoriesEnabled();
+        return ResponseEntity.ok(storyService.listLiveComments(CurrentUser.id(), storyId));
+    }
+
+    @PostMapping("/{storyId}/comments")
+    public ResponseEntity<StoryLiveCommentResponse> commentLive(
+            @PathVariable UUID storyId,
+            @Valid @RequestBody CreateStoryLiveCommentRequest request
+    ) {
+        featureFlagService.requireStoriesEnabled();
+        return ResponseEntity.ok(storyService.commentLive(CurrentUser.id(), storyId, request));
     }
 
     @DeleteMapping("/{storyId}")

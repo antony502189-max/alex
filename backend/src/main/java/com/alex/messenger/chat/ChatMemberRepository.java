@@ -16,6 +16,8 @@ public interface ChatMemberRepository extends JpaRepository<ChatMemberEntity, Ch
 
     boolean existsByIdChatIdAndIdUserId(UUID chatId, UUID userId);
 
+    java.util.Optional<ChatMemberEntity> findByIdChatIdAndRole(UUID chatId, String role);
+
     @Query("""
         select cm
         from ChatMemberEntity cm

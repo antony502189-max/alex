@@ -27,6 +27,10 @@ public record MessageAttachmentResponse(
         String moderationStatus,
         String moderationReason,
         boolean sensitiveContent,
-        boolean blockedByModeration
+        boolean blockedByModeration,
+        UUID sourceAttachmentId,
+        Long trimStartMs,
+        Long trimEndMs,
+        boolean hdPhoto
 ) {
 }

@@ -1,6 +1,7 @@
 package com.alex.messenger.attachment;
 
 import com.alex.messenger.attachment.dto.ModerateAttachmentRequest;
+import com.alex.messenger.attachment.dto.TrimAttachmentRequest;
 import com.alex.messenger.chat.ChatEntity;
 import com.alex.messenger.chat.ChatService;
 import com.alex.messenger.crypto.ChatEncryptionService;
@@ -10,6 +11,7 @@ import com.alex.messenger.media.MediaService;
 import com.alex.messenger.media.PresignedMediaAccess;
 import com.alex.messenger.message.dto.MessageAttachmentResponse;
 import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -67,6 +69,7 @@ public class AttachmentService {
             Long durationMs,
             Integer width,
             Integer height,
+            Boolean hdPhoto,
             String waveform,
             UUID albumId,
             Integer albumItemIndex,
@@ -85,6 +88,7 @@ public class AttachmentService {
         String contentType = normalizeContentType(file.getContentType());
         String normalizedKind = normalizeKind(kind, contentType);
         validateAttachmentMetadata(normalizedKind, durationMs, width, height, contentType);
+        boolean normalizedHdPhoto = normalizeHdPhoto(hdPhoto, normalizedKind);
         validateAlbumMetadata(normalizedKind, albumId, albumItemIndex);
         List<Integer> waveformSamples = parseWaveform(waveform, normalizedKind);
         ImageDimensions imageDimensions = resolveImageDimensions(file, normalizedKind, width, height);
@@ -115,6 +119,7 @@ public class AttachmentService {
                 file.getSize(),
                 durationMs,
                 imageDimensions,
+                normalizedHdPhoto,
                 waveformSamples,
                 albumId,
                 albumItemIndex,
@@ -130,6 +135,7 @@ public class AttachmentService {
             Long durationMs,
             Integer width,
             Integer height,
+            Boolean hdPhoto,
             String waveform,
             UUID albumId,
             Integer albumItemIndex,
@@ -151,6 +157,7 @@ public class AttachmentService {
         String normalizedContentType = normalizeContentType(contentType);
         String normalizedKind = normalizeKind(kind, normalizedContentType);
         validateAttachmentMetadata(normalizedKind, durationMs, width, height, normalizedContentType);
+        boolean normalizedHdPhoto = normalizeHdPhoto(hdPhoto, normalizedKind);
         validateAlbumMetadata(normalizedKind, albumId, albumItemIndex);
         List<Integer> waveformSamples = parseWaveform(waveform, normalizedKind);
         ImageDimensions imageDimensions = resolveImageDimensions(sourcePath, normalizedKind, width, height);
@@ -181,6 +188,7 @@ public class AttachmentService {
                 fileSizeBytes,
                 durationMs,
                 imageDimensions,
+                normalizedHdPhoto,
                 waveformSamples,
                 albumId,
                 albumItemIndex,
@@ -220,11 +228,129 @@ public class AttachmentService {
         }
 
         Map<UUID, AttachmentEntity> attachmentsById = findAllOrdered(attachmentIds);
-        return attachmentIds.stream()
+        List<AttachmentEntity> attachments = attachmentIds.stream()
                 .map(attachmentsById::get)
                 .filter(java.util.Objects::nonNull)
+                .toList();
+        assertRequesterCanAccessAttachments(requesterId, attachments);
+        return attachments.stream()
                 .map(attachment -> toResponse(attachment, requesterId))
                 .toList();
+    }
+
+    @Transactional
+    public List<UUID> cloneAttachmentsToChat(UUID requesterId, UUID targetChatId, List<UUID> attachmentIds) {
+        return cloneAttachmentsToChat(requesterId, targetChatId, attachmentIds, true, false);
+    }
+
+    @Transactional
+    public List<UUID> cloneAttachmentsToChatAsAlbum(UUID requesterId, UUID targetChatId, List<UUID> attachmentIds) {
+        List<UUID> normalizedAttachmentIds = attachmentIds == null ? List.of() : List.copyOf(new LinkedHashSet<>(attachmentIds));
+        if (normalizedAttachmentIds.size() < 2) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Media group must include at least two attachments");
+        }
+        if (normalizedAttachmentIds.size() > 10) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Media group cannot exceed ten attachments");
+        }
+        return cloneAttachmentsToChat(requesterId, targetChatId, normalizedAttachmentIds, true, true);
+    }
+
+    @Transactional
+    public List<UUID> cloneAttachmentsToChatForSystem(UUID requesterId, UUID targetChatId, List<UUID> attachmentIds) {
+        return cloneAttachmentsToChat(requesterId, targetChatId, attachmentIds, false, false);
+    }
+
+    @Transactional
+    private List<UUID> cloneAttachmentsToChat(
+            UUID requesterId,
+            UUID targetChatId,
+            List<UUID> attachmentIds,
+            boolean requireTargetMembership,
+            boolean forceAlbumGrouping
+    ) {
+        if (attachmentIds == null || attachmentIds.isEmpty()) {
+            return List.of();
+        }
+
+        if (requireTargetMembership) {
+            chatService.getOwnedChat(requesterId, targetChatId);
+        } else {
+            chatService.getChat(targetChatId);
+        }
+        Map<UUID, AttachmentEntity> attachmentsById = findAllOrdered(attachmentIds);
+        if (attachmentsById.size() != new LinkedHashSet<>(attachmentIds).size()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "One or more attachments were not found");
+        }
+
+        List<AttachmentEntity> sourceAttachments = attachmentIds.stream()
+                .map(attachmentsById::get)
+                .filter(java.util.Objects::nonNull)
+                .toList();
+        assertRequesterCanAccessAttachments(requesterId, sourceAttachments);
+        if (forceAlbumGrouping) {
+            validateAlbumSourceAttachments(sourceAttachments);
+        }
+
+        Map<UUID, UUID> clonedAlbumIds = new LinkedHashMap<>();
+        UUID forcedAlbumId = forceAlbumGrouping ? UUID.randomUUID() : null;
+        List<UUID> clonedAttachmentIds = new ArrayList<>(sourceAttachments.size());
+        int forcedAlbumItemIndex = 0;
+        for (AttachmentEntity source : sourceAttachments) {
+            UUID clonedAttachmentId = UUID.randomUUID();
+            byte[] sourceBytes = loadCloneSourceBytes(source);
+            MediaObjectReference mediaObjectReference = mediaService.upload(
+                    targetChatId,
+                    clonedAttachmentId,
+                    source.getOriginalFileName(),
+                    source.getContentType(),
+                    sourceBytes.length,
+                    new ByteArrayInputStream(sourceBytes)
+            );
+
+            AttachmentEntity clone = new AttachmentEntity();
+            clone.setId(clonedAttachmentId);
+            clone.setChatId(targetChatId);
+            clone.setUploaderUserId(requesterId);
+            clone.setOriginalFileName(source.getOriginalFileName());
+            clone.setContentType(source.getContentType());
+            clone.setKind(source.getKind());
+            clone.setFileSizeBytes(source.getFileSizeBytes());
+            clone.setDurationMs(source.getDurationMs());
+            clone.setWidth(source.getWidth());
+            clone.setHeight(source.getHeight());
+            clone.setWaveform(source.getWaveform());
+            clone.setAlbumId(forceAlbumGrouping
+                    ? forcedAlbumId
+                    : source.getAlbumId() != null
+                    ? clonedAlbumIds.computeIfAbsent(source.getAlbumId(), ignored -> UUID.randomUUID())
+                    : null);
+            clone.setAlbumItemIndex(forceAlbumGrouping ? forcedAlbumItemIndex++ : source.getAlbumItemIndex());
+            clone.setSourceAttachmentId(null);
+            clone.setTrimStartMs(source.getTrimStartMs());
+            clone.setTrimEndMs(source.getTrimEndMs());
+            clone.setHdPhoto(source.isHdPhoto());
+            clone.setPreviewBucketName(null);
+            clone.setPreviewObjectKey(null);
+            clone.setThumbnailBucketName(null);
+            clone.setThumbnailObjectKey(null);
+            clone.setProcessingStatus("NOT_REQUIRED");
+            clone.setModerationStatus(source.getModerationStatus());
+            clone.setModerationReason(source.getModerationReason());
+            clone.setModerationSensitive(source.isModerationSensitive());
+            clone.setModerationReviewedByUserId(source.getModerationReviewedByUserId());
+            clone.setModerationReviewedAt(source.getModerationReviewedAt());
+            clone.setStorageProvider("S3");
+            clone.setBucketName(mediaObjectReference.bucketName());
+            clone.setObjectKey(mediaObjectReference.objectKey());
+            clone.setStoragePath(mediaObjectReference.storagePath());
+            clone.setNonce(null);
+            clone.setKeyVersion(null);
+
+            AttachmentEntity saved = attachmentRepository.save(clone);
+            mediaProcessingService.enqueueAttachmentPreview(saved);
+            clonedAttachmentIds.add(saved.getId());
+        }
+        return List.copyOf(clonedAttachmentIds);
     }
 
     @Transactional(readOnly = true)
@@ -243,18 +369,19 @@ public class AttachmentService {
             return new AttachmentDownloadResult(accessResponse.downloadUrl(), null);
         }
 
+        AttachmentEntity binarySource = resolveBinarySource(attachment);
         byte[] ciphertext;
         try {
-            ciphertext = Files.readAllBytes(Path.of(attachment.getStoragePath()));
+            ciphertext = Files.readAllBytes(Path.of(binarySource.getStoragePath()));
         } catch (IOException exception) {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Unable to read attachment", exception);
         }
 
         byte[] plaintext = chatEncryptionService.decryptBytes(
-                attachment.getChatId(),
+                binarySource.getChatId(),
                 ciphertext,
-                attachment.getNonce(),
-                attachment.getKeyVersion()
+                binarySource.getNonce(),
+                binarySource.getKeyVersion()
         );
 
         return new AttachmentDownloadResult(
@@ -276,7 +403,12 @@ public class AttachmentService {
         if (attachments.isEmpty()) {
             return List.of();
         }
-        chatService.getOwnedChat(requesterId, attachments.get(0).getChatId());
+        UUID chatId = attachments.get(0).getChatId();
+        boolean multipleChats = attachments.stream().anyMatch(attachment -> !chatId.equals(attachment.getChatId()));
+        if (multipleChats) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Album attachments must belong to one chat");
+        }
+        chatService.getOwnedChat(requesterId, chatId);
         return attachments.stream().map(attachment -> toResponse(attachment, requesterId)).toList();
     }
 
@@ -306,6 +438,59 @@ public class AttachmentService {
         return toResponse(attachmentRepository.save(attachment), requesterId);
     }
 
+    @Transactional
+    public MessageAttachmentResponse trim(UUID requesterId, UUID attachmentId, TrimAttachmentRequest request) {
+        AttachmentEntity source = getOwnedAttachment(requesterId, attachmentId);
+        ensureTrimSupported(source);
+        ensureModerationAccessAllowed(requesterId, source);
+
+        TrimWindow trimWindow = normalizeTrimWindow(source, request);
+        AttachmentEntity trimmed = new AttachmentEntity();
+        trimmed.setId(UUID.randomUUID());
+        trimmed.setChatId(source.getChatId());
+        trimmed.setUploaderUserId(requesterId);
+        trimmed.setOriginalFileName(source.getOriginalFileName());
+        trimmed.setContentType(source.getContentType());
+        trimmed.setKind(source.getKind());
+        trimmed.setFileSizeBytes(source.getFileSizeBytes());
+        trimmed.setDurationMs(trimWindow.durationMs());
+        trimmed.setWidth(source.getWidth());
+        trimmed.setHeight(source.getHeight());
+        trimmed.setWaveform(source.getWaveform());
+        trimmed.setAlbumId(null);
+        trimmed.setAlbumItemIndex(null);
+        trimmed.setSourceAttachmentId(source.getId());
+        trimmed.setTrimStartMs(trimWindow.startMs());
+        trimmed.setTrimEndMs(trimWindow.endMs());
+        trimmed.setHdPhoto(source.isHdPhoto());
+        trimmed.setPreviewBucketName(source.getPreviewBucketName());
+        trimmed.setPreviewObjectKey(source.getPreviewObjectKey());
+        trimmed.setThumbnailBucketName(source.getThumbnailBucketName());
+        trimmed.setThumbnailObjectKey(source.getThumbnailObjectKey());
+        trimmed.setProcessingStatus(source.getProcessingStatus());
+        trimmed.setModerationStatus(source.getModerationStatus());
+        trimmed.setModerationReason(source.getModerationReason());
+        trimmed.setModerationSensitive(source.isModerationSensitive());
+        trimmed.setModerationReviewedByUserId(source.getModerationReviewedByUserId());
+        trimmed.setModerationReviewedAt(source.getModerationReviewedAt());
+        trimmed.setStorageProvider(source.getStorageProvider());
+        trimmed.setBucketName(source.getBucketName());
+        trimmed.setObjectKey(source.getObjectKey());
+        trimmed.setStoragePath(
+                source.getStoragePath()
+                        + "#trim:"
+                        + trimWindow.startMs()
+                        + "-"
+                        + trimWindow.endMs()
+                        + ":"
+                        + trimmed.getId()
+        );
+        trimmed.setNonce(source.getNonce());
+        trimmed.setKeyVersion(source.getKeyVersion());
+
+        return toResponse(attachmentRepository.save(trimmed), requesterId);
+    }
+
     private AttachmentEntity getOwnedAttachment(UUID requesterId, UUID attachmentId) {
         AttachmentEntity attachment = attachmentRepository.findById(attachmentId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Attachment not found"));
@@ -321,14 +506,38 @@ public class AttachmentService {
         return attachmentsById;
     }
 
+    private AttachmentEntity resolveBinarySource(AttachmentEntity attachment) {
+        AttachmentEntity current = attachment;
+        Set<UUID> visited = new LinkedHashSet<>();
+        while (current.getSourceAttachmentId() != null && visited.add(current.getId())) {
+            AttachmentEntity next = attachmentRepository.findById(current.getSourceAttachmentId()).orElse(null);
+            if (next == null) {
+                break;
+            }
+            current = next;
+        }
+        return current;
+    }
+
+    private void assertRequesterCanAccessAttachments(UUID requesterId, List<AttachmentEntity> attachments) {
+        if (requesterId == null || attachments == null || attachments.isEmpty()) {
+            return;
+        }
+        for (UUID chatId : attachments.stream().map(AttachmentEntity::getChatId).distinct().toList()) {
+            chatService.getOwnedChat(requesterId, chatId);
+        }
+    }
+
     private MessageAttachmentResponse toResponse(AttachmentEntity attachment, UUID requesterId) {
         boolean blockedByModeration = isBlockedByModeration(requesterId, attachment);
         boolean hidePreviewForSensitive = shouldHidePreviewForSensitiveContent(requesterId, attachment);
-        AttachmentAccessResponse accessResponse = blockedByModeration
+        AttachmentAccessResponse accessResponse = requesterId == null
                 ? new AttachmentAccessResponse(null, null, null, true)
-                : buildAccessResponse(attachment);
-        String previewUrl = hidePreviewForSensitive ? null : accessResponse.previewUrl();
-        String thumbnailUrl = hidePreviewForSensitive ? null : resolveThumbnailUrl(attachment);
+                : blockedByModeration
+                        ? new AttachmentAccessResponse(null, null, null, true)
+                        : buildAccessResponse(attachment);
+        String previewUrl = requesterId == null || hidePreviewForSensitive ? null : accessResponse.previewUrl();
+        String thumbnailUrl = requesterId == null || hidePreviewForSensitive ? null : resolveThumbnailUrl(attachment);
         return new MessageAttachmentResponse(
                 attachment.getId(),
                 attachment.getOriginalFileName(),
@@ -352,7 +561,11 @@ public class AttachmentService {
                 attachment.getModerationStatus(),
                 attachment.getModerationReason(),
                 attachment.isModerationSensitive(),
-                blockedByModeration
+                blockedByModeration,
+                attachment.getSourceAttachmentId(),
+                attachment.getTrimStartMs(),
+                attachment.getTrimEndMs(),
+                attachment.isHdPhoto()
         );
     }
 
@@ -412,6 +625,30 @@ public class AttachmentService {
         return "S3".equalsIgnoreCase(attachment.getStorageProvider())
                 && attachment.getBucketName() != null
                 && attachment.getObjectKey() != null;
+    }
+
+    private byte[] loadCloneSourceBytes(AttachmentEntity attachment) {
+        if (isS3Stored(attachment)) {
+            return mediaService.downloadObjectBytes(attachment.getBucketName(), attachment.getObjectKey());
+        }
+        if (attachment.getStoragePath() == null || attachment.getStoragePath().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Attachment source media is unavailable");
+        }
+        byte[] storedBytes;
+        try {
+            storedBytes = Files.readAllBytes(Path.of(attachment.getStoragePath()));
+        } catch (IOException exception) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Unable to read attachment", exception);
+        }
+        if (attachment.getNonce() != null && attachment.getKeyVersion() != null) {
+            return chatEncryptionService.decryptBytes(
+                    attachment.getChatId(),
+                    storedBytes,
+                    attachment.getNonce(),
+                    attachment.getKeyVersion()
+            );
+        }
+        return storedBytes;
     }
 
     private boolean isImageAttachment(AttachmentEntity attachment) {
@@ -519,6 +756,14 @@ public class AttachmentService {
         return List.of("VOICE", "AUDIO", "VIDEO", "VIDEO_NOTE").contains(attachment.getKind());
     }
 
+    private void validateAlbumSourceAttachments(List<AttachmentEntity> attachments) {
+        for (AttachmentEntity attachment : attachments) {
+            if (attachment == null || !List.of("IMAGE", "VIDEO", "GIF", "VIDEO_NOTE").contains(attachment.getKind())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Media groups support only visual attachments");
+            }
+        }
+    }
+
     private String normalizeContentType(String contentType) {
         if (contentType == null || contentType.isBlank()) {
             return "application/octet-stream";
@@ -546,6 +791,41 @@ public class AttachmentService {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Value is too long");
         }
         return normalized;
+    }
+
+    private void ensureTrimSupported(AttachmentEntity attachment) {
+        if (!List.of("VOICE", "AUDIO", "VIDEO", "VIDEO_NOTE").contains(attachment.getKind())) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Attachment trimming is supported only for audio and video attachments"
+            );
+        }
+        if (attachment.getDurationMs() == null || attachment.getDurationMs() <= 0) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Attachment duration is unavailable for trimming");
+        }
+    }
+
+    private boolean normalizeHdPhoto(Boolean hdPhoto, String kind) {
+        boolean enabled = Boolean.TRUE.equals(hdPhoto);
+        if (enabled && !"IMAGE".equals(kind)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "HD photo is supported only for image attachments");
+        }
+        return enabled;
+    }
+
+    private TrimWindow normalizeTrimWindow(AttachmentEntity attachment, TrimAttachmentRequest request) {
+        Long startMs = request != null ? request.startMs() : null;
+        Long endMs = request != null ? request.endMs() : null;
+        if (startMs == null || endMs == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Trim start and end are required");
+        }
+        if (startMs < 0 || endMs <= 0 || endMs <= startMs) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Trim range is invalid");
+        }
+        if (endMs > attachment.getDurationMs()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Trim end exceeds attachment duration");
+        }
+        return new TrimWindow(startMs, endMs, endMs - startMs);
     }
 
     private String normalizeModerationStatus(String value) {
@@ -670,6 +950,7 @@ public class AttachmentService {
             long fileSizeBytes,
             Long durationMs,
             ImageDimensions imageDimensions,
+            boolean hdPhoto,
             List<Integer> waveformSamples,
             UUID albumId,
             Integer albumItemIndex,
@@ -689,6 +970,10 @@ public class AttachmentService {
         entity.setWaveform(serializeWaveform(waveformSamples));
         entity.setAlbumId(albumId);
         entity.setAlbumItemIndex(albumItemIndex);
+        entity.setSourceAttachmentId(null);
+        entity.setTrimStartMs(null);
+        entity.setTrimEndMs(null);
+        entity.setHdPhoto(hdPhoto);
         entity.setStorageProvider("S3");
         entity.setBucketName(mediaObjectReference.bucketName());
         entity.setObjectKey(mediaObjectReference.objectKey());
@@ -745,5 +1030,8 @@ public class AttachmentService {
     }
 
     private record ImageDimensions(Integer width, Integer height) {
+    }
+
+    private record TrimWindow(Long startMs, Long endMs, Long durationMs) {
     }
 }

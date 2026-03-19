@@ -2,11 +2,15 @@ package com.alex.messenger.call;
 
 import com.alex.messenger.call.dto.CallHistoryEntryResponse;
 import com.alex.messenger.call.dto.CallJoinLinkResponse;
+import com.alex.messenger.call.dto.CallCommentResponse;
+import com.alex.messenger.call.dto.CallReactionResponse;
 import com.alex.messenger.call.dto.CallSessionResponse;
 import com.alex.messenger.call.dto.CallRtcConfigResponse;
 import com.alex.messenger.call.dto.CallSignalEventResponse;
 import com.alex.messenger.call.dto.CallSignalRequest;
 import com.alex.messenger.call.dto.CreateCallJoinLinkRequest;
+import com.alex.messenger.call.dto.CreateCallCommentRequest;
+import com.alex.messenger.call.dto.CreateCallReactionRequest;
 import com.alex.messenger.call.dto.StartCallRequest;
 import com.alex.messenger.call.dto.UpdateCallParticipantModerationRequest;
 import com.alex.messenger.feature.FeatureFlagService;
@@ -104,6 +108,42 @@ public class CallController {
     ) {
         featureFlagService.requireCallsEnabled();
         return ResponseEntity.ok(callService.sendSignal(CurrentUser.id(), callId, request));
+    }
+
+    @GetMapping("/{callId}/comments")
+    public ResponseEntity<List<CallCommentResponse>> comments(
+            @PathVariable UUID callId,
+            @RequestParam(defaultValue = "50") int limit
+    ) {
+        featureFlagService.requireCallsEnabled();
+        return ResponseEntity.ok(callService.listComments(CurrentUser.id(), callId, limit));
+    }
+
+    @PostMapping("/{callId}/comments")
+    public ResponseEntity<CallCommentResponse> comment(
+            @PathVariable UUID callId,
+            @RequestBody(required = false) CreateCallCommentRequest request
+    ) {
+        featureFlagService.requireCallsEnabled();
+        return ResponseEntity.ok(callService.createComment(CurrentUser.id(), callId, request));
+    }
+
+    @GetMapping("/{callId}/reactions")
+    public ResponseEntity<List<CallReactionResponse>> reactions(
+            @PathVariable UUID callId,
+            @RequestParam(defaultValue = "50") int limit
+    ) {
+        featureFlagService.requireCallsEnabled();
+        return ResponseEntity.ok(callService.listReactions(CurrentUser.id(), callId, limit));
+    }
+
+    @PostMapping("/{callId}/reactions")
+    public ResponseEntity<CallReactionResponse> react(
+            @PathVariable UUID callId,
+            @RequestBody(required = false) CreateCallReactionRequest request
+    ) {
+        featureFlagService.requireCallsEnabled();
+        return ResponseEntity.ok(callService.createReaction(CurrentUser.id(), callId, request));
     }
 
     @PostMapping("/{callId}/participants/{userId}/moderation")

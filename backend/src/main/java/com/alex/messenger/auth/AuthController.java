@@ -5,16 +5,27 @@ import com.alex.messenger.auth.dto.AuthResponse;
 import com.alex.messenger.auth.dto.DisableTwoFactorRequest;
 import com.alex.messenger.auth.dto.EnableTwoFactorRequest;
 import com.alex.messenger.auth.dto.GenerateQrLoginResponse;
+import com.alex.messenger.auth.dto.PasskeyCredentialResponse;
+import com.alex.messenger.auth.dto.PasskeyLoginOptionsRequest;
+import com.alex.messenger.auth.dto.PasskeyLoginOptionsResponse;
+import com.alex.messenger.auth.dto.PasskeyRegistrationOptionsResponse;
 import com.alex.messenger.auth.dto.QrLoginBindRequest;
 import com.alex.messenger.auth.dto.QrLoginChallengeResponse;
 import com.alex.messenger.auth.dto.QrLoginPollRequest;
 import com.alex.messenger.auth.dto.QrLoginStatusResponse;
 import com.alex.messenger.auth.dto.RefreshTokenRequest;
+import com.alex.messenger.auth.dto.RequestPhoneChangeRequest;
+import com.alex.messenger.auth.dto.RequestPhoneChangeResponse;
 import com.alex.messenger.auth.dto.RequestLoginCodeRequest;
 import com.alex.messenger.auth.dto.RequestLoginCodeResponse;
+import com.alex.messenger.auth.dto.TelegramIdentityTokenRequest;
+import com.alex.messenger.auth.dto.TelegramIdentityTokenResponse;
 import com.alex.messenger.auth.dto.TwoFactorStatusResponse;
 import com.alex.messenger.auth.dto.UpdatePushTokenRequest;
 import com.alex.messenger.auth.dto.UserSessionResponse;
+import com.alex.messenger.auth.dto.VerifyPasskeyLoginRequest;
+import com.alex.messenger.auth.dto.VerifyPasskeyRegistrationRequest;
+import com.alex.messenger.auth.dto.VerifyPhoneChangeRequest;
 import com.alex.messenger.auth.dto.VerifyLoginCodeRequest;
 import com.alex.messenger.auth.dto.VerifyTwoFactorRequest;
 import com.alex.messenger.auth.session.UserSessionService;
@@ -42,6 +53,9 @@ public class AuthController {
 
     private final AuthService authService;
     private final UserSessionService userSessionService;
+    private final PasskeyService passkeyService;
+    private final PhoneChangeService phoneChangeService;
+    private final IdentityTokenService identityTokenService;
 
     @PostMapping("/request-code")
     public ResponseEntity<RequestLoginCodeResponse> requestCode(
@@ -101,6 +115,70 @@ public class AuthController {
                 extractClientIp(httpServletRequest),
                 httpServletRequest.getHeader("User-Agent")
         ));
+    }
+
+    @PostMapping("/passkeys/register/options")
+    public ResponseEntity<PasskeyRegistrationOptionsResponse> passkeyRegistrationOptions() {
+        return ResponseEntity.ok(passkeyService.requestRegistrationOptions(CurrentUser.id(), CurrentSession.id()));
+    }
+
+    @PostMapping("/passkeys/register/verify")
+    public ResponseEntity<PasskeyCredentialResponse> verifyPasskeyRegistration(
+            @Valid @RequestBody VerifyPasskeyRegistrationRequest request
+    ) {
+        return ResponseEntity.ok(passkeyService.verifyRegistration(CurrentUser.id(), CurrentSession.id(), request));
+    }
+
+    @PostMapping("/passkeys/login/options")
+    public ResponseEntity<PasskeyLoginOptionsResponse> passkeyLoginOptions(
+            @Valid @RequestBody PasskeyLoginOptionsRequest request,
+            HttpServletRequest httpServletRequest
+    ) {
+        return ResponseEntity.ok(passkeyService.requestLoginOptions(
+                request,
+                extractClientIp(httpServletRequest),
+                httpServletRequest.getHeader("User-Agent")
+        ));
+    }
+
+    @PostMapping("/passkeys/login/verify")
+    public ResponseEntity<AuthResponse> verifyPasskeyLogin(
+            @Valid @RequestBody VerifyPasskeyLoginRequest request,
+            HttpServletRequest httpServletRequest
+    ) {
+        return ResponseEntity.ok(passkeyService.verifyLogin(
+                request,
+                extractClientIp(httpServletRequest),
+                httpServletRequest.getHeader("User-Agent")
+        ));
+    }
+
+    @PostMapping("/change-phone/request-code")
+    public ResponseEntity<RequestPhoneChangeResponse> requestPhoneChange(
+            @Valid @RequestBody RequestPhoneChangeRequest request
+    ) {
+        return ResponseEntity.ok(phoneChangeService.requestCode(CurrentUser.id(), CurrentSession.id(), request));
+    }
+
+    @PostMapping("/change-phone/verify")
+    public ResponseEntity<AuthResponse> verifyPhoneChange(
+            @Valid @RequestBody VerifyPhoneChangeRequest request,
+            HttpServletRequest httpServletRequest
+    ) {
+        return ResponseEntity.ok(phoneChangeService.verifyCode(
+                CurrentUser.id(),
+                CurrentSession.id(),
+                request,
+                extractClientIp(httpServletRequest),
+                httpServletRequest.getHeader("User-Agent")
+        ));
+    }
+
+    @PostMapping("/identity/token")
+    public ResponseEntity<TelegramIdentityTokenResponse> createIdentityToken(
+            @Valid @RequestBody TelegramIdentityTokenRequest request
+    ) {
+        return ResponseEntity.ok(identityTokenService.issueToken(CurrentUser.id(), CurrentSession.id(), request));
     }
 
     @GetMapping("/2fa/status")

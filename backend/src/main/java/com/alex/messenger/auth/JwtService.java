@@ -43,6 +43,33 @@ public class JwtService {
         return new IssuedAccessToken(token, expiresAt);
     }
 
+    public IssuedSignedToken issueIdentityToken(
+            UserEntity user,
+            UUID sessionId,
+            String appId,
+            String redirectUri,
+            String state,
+            Duration identityTtl
+    ) {
+        Instant now = Instant.now();
+        Instant expiresAt = now.plus(identityTtl);
+        String token = Jwts.builder()
+                .subject(user.getId().toString())
+                .claim("sessionId", sessionId.toString())
+                .claim("tokenType", "IDENTITY")
+                .claim("appId", appId)
+                .claim("redirectUri", redirectUri)
+                .claim("state", state)
+                .claim("phoneNumber", user.getPhoneNumber())
+                .claim("displayName", user.getDisplayName())
+                .claim("username", user.getUsername())
+                .issuedAt(Date.from(now))
+                .expiration(Date.from(expiresAt))
+                .signWith(signingKey)
+                .compact();
+        return new IssuedSignedToken(token, expiresAt);
+    }
+
     public UUID extractUserId(String token) {
         return UUID.fromString(parseClaims(token).getSubject());
     }
@@ -65,6 +92,12 @@ public class JwtService {
     }
 
     public record IssuedAccessToken(
+            String token,
+            Instant expiresAt
+    ) {
+    }
+
+    public record IssuedSignedToken(
             String token,
             Instant expiresAt
     ) {
