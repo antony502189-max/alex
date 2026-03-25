@@ -1,8 +1,10 @@
 package com.alex.messenger.lawful;
 
+import com.alex.messenger.feature.FeatureFlagService;
 import com.alex.messenger.lawful.dto.DirectLawfulExportRequest;
 import com.alex.messenger.lawful.dto.DirectLawfulExportResponse;
 import com.alex.messenger.message.dto.ChatMessageResponse;
+import com.alex.messenger.message.dto.MessageAttachmentResponse;
 import com.alex.messenger.user.UserRepository;
 import java.time.Instant;
 import java.util.List;
@@ -21,9 +23,12 @@ public class LawfulDirectExportService {
     private final LawfulInterceptionService lawfulInterceptionService;
     private final LawfulExportChecksumService checksumService;
     private final UserRepository userRepository;
+    private final FeatureFlagService featureFlagService;
+    private final LawfulProperties lawfulProperties;
 
     @Transactional
     public DirectLawfulExportResponse export(String operatorId, DirectLawfulExportRequest request) {
+        featureFlagService.requireLawfulDirectExportEnabled();
         String normalizedOperatorId = normalizeRequired(operatorId, "Operator id", 120);
         validateRange(request.fromInclusive(), request.toExclusive());
         if (!userRepository.existsById(request.targetUserId())) {
@@ -36,9 +41,9 @@ public class LawfulDirectExportService {
                 request.fromInclusive(),
                 request.toExclusive()
         );
-        List<ChatMessageResponse> messages = includeAttachmentsMetadata
-                ? rawMessages
-                : rawMessages.stream().map(this::withoutAttachments).toList();
+        List<ChatMessageResponse> messages = rawMessages.stream()
+                .map(message -> sanitizeMessage(message, includeAttachmentsMetadata))
+                .toList();
 
         LawfulDirectExportEntity export = new LawfulDirectExportEntity();
         export.setTargetUserId(request.targetUserId());
@@ -65,6 +70,10 @@ public class LawfulDirectExportService {
         ));
 
         LawfulDirectExportEntity saved = lawfulDirectExportRepository.save(export);
+        List<ChatMessageResponse> inlineMessages =
+                messages.size() <= Math.max(0, lawfulProperties.getDirectExport().getInlineMessageLimit())
+                        ? messages
+                        : List.of();
         return new DirectLawfulExportResponse(
                 saved.getId(),
                 saved.getTargetUserId(),
@@ -77,19 +86,19 @@ public class LawfulDirectExportService {
                 saved.getMessageCount(),
                 saved.getArtifactChecksum(),
                 saved.getArtifactLocation(),
-                messages
+                inlineMessages
         );
     }
 
-    private ChatMessageResponse withoutAttachments(ChatMessageResponse message) {
+    private ChatMessageResponse sanitizeMessage(ChatMessageResponse message, boolean includeAttachmentsMetadata) {
         return new ChatMessageResponse(
                 message.chatId(),
                 message.messageId(),
                 message.clientMessageId(),
                 message.senderId(),
                 message.displaySenderName(),
-                message.displaySenderPhotoUrl(),
-                message.displaySenderPhotoAccessExpiresAt(),
+                null,
+                null,
                 message.anonymousSender(),
                 message.recipientId(),
                 message.viaBotUserId(),
@@ -113,7 +122,9 @@ public class LawfulDirectExportService {
                 message.forwardedFromMessageId(),
                 message.poll(),
                 message.sticker(),
-                List.of(),
+                includeAttachmentsMetadata
+                        ? message.attachments().stream().map(this::sanitizeAttachmentMetadata).toList()
+                        : List.of(),
                 message.reactions(),
                 message.deliveryStatus(),
                 message.deliveredAt(),
@@ -121,6 +132,38 @@ public class LawfulDirectExportService {
                 message.expiresAt(),
                 message.editedAt(),
                 message.deletedAt()
+        );
+    }
+
+    private MessageAttachmentResponse sanitizeAttachmentMetadata(MessageAttachmentResponse attachment) {
+        return new MessageAttachmentResponse(
+                attachment.attachmentId(),
+                attachment.originalFileName(),
+                attachment.contentType(),
+                attachment.kind(),
+                attachment.fileSizeBytes(),
+                attachment.durationMs(),
+                null,
+                null,
+                null,
+                attachment.width(),
+                attachment.height(),
+                attachment.waveform(),
+                null,
+                attachment.requiresAuthorization(),
+                attachment.streamingSupported(),
+                attachment.voiceNote(),
+                attachment.roundMessage(),
+                attachment.albumId(),
+                attachment.albumItemIndex(),
+                attachment.moderationStatus(),
+                attachment.moderationReason(),
+                attachment.sensitiveContent(),
+                attachment.blockedByModeration(),
+                attachment.sourceAttachmentId(),
+                attachment.trimStartMs(),
+                attachment.trimEndMs(),
+                attachment.hdPhoto()
         );
     }
 

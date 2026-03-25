@@ -26,7 +26,8 @@ public interface ChatMemberRepository extends JpaRepository<ChatMemberEntity, Ch
         order by
             case when cm.listPinned = true then 0 else 1 end asc,
             case when cm.listPinned = true then coalesce(cm.listPinOrder, 2147483647) else 2147483647 end asc,
-            coalesce(c.lastMessageAt, c.createdAt) desc
+            coalesce(c.lastMessageAt, c.createdAt) desc,
+            c.id asc
         """)
     List<ChatMemberEntity> findMembershipsOrderedForUser(
             @Param("userId") UUID userId,

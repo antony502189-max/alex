@@ -42,6 +42,9 @@ class AuthControllerMvcTest {
     @Mock
     private IdentityTokenService identityTokenService;
 
+    @Mock
+    private AuthSecurityEventService authSecurityEventService;
+
     private MockMvc mockMvc;
     private ObjectMapper objectMapper;
 
@@ -56,7 +59,8 @@ class AuthControllerMvcTest {
                                 userSessionService,
                                 passkeyService,
                                 phoneChangeService,
-                                identityTokenService
+                                identityTokenService,
+                                authSecurityEventService
                         )
                 )
                 .setValidator(validator)
@@ -75,7 +79,14 @@ class AuthControllerMvcTest {
                 )
                 .andExpect(status().isBadRequest());
 
-        verifyNoInteractions(authService, userSessionService, passkeyService, phoneChangeService, identityTokenService);
+        verifyNoInteractions(
+                authService,
+                userSessionService,
+                passkeyService,
+                phoneChangeService,
+                identityTokenService,
+                authSecurityEventService
+        );
     }
 
     @Test
@@ -89,7 +100,14 @@ class AuthControllerMvcTest {
                 )
                 .andExpect(status().isBadRequest());
 
-        verifyNoInteractions(authService, userSessionService, passkeyService, phoneChangeService, identityTokenService);
+        verifyNoInteractions(
+                authService,
+                userSessionService,
+                passkeyService,
+                phoneChangeService,
+                identityTokenService,
+                authSecurityEventService
+        );
     }
 
     @Test
@@ -111,7 +129,14 @@ class AuthControllerMvcTest {
                 )
                 .andExpect(status().isBadRequest());
 
-        verifyNoInteractions(authService, userSessionService, passkeyService, phoneChangeService, identityTokenService);
+        verifyNoInteractions(
+                authService,
+                userSessionService,
+                passkeyService,
+                phoneChangeService,
+                identityTokenService,
+                authSecurityEventService
+        );
     }
 
     @Test
@@ -133,7 +158,14 @@ class AuthControllerMvcTest {
                 )
                 .andExpect(status().isBadRequest());
 
-        verifyNoInteractions(authService, userSessionService, passkeyService, phoneChangeService, identityTokenService);
+        verifyNoInteractions(
+                authService,
+                userSessionService,
+                passkeyService,
+                phoneChangeService,
+                identityTokenService,
+                authSecurityEventService
+        );
     }
 
     @Test
@@ -147,6 +179,13 @@ class AuthControllerMvcTest {
                 )
                 .andExpect(status().isBadRequest());
 
-        verifyNoInteractions(authService, userSessionService, passkeyService, phoneChangeService, identityTokenService);
+        verifyNoInteractions(
+                authService,
+                userSessionService,
+                passkeyService,
+                phoneChangeService,
+                identityTokenService,
+                authSecurityEventService
+        );
     }
 }

@@ -47,6 +47,7 @@ public class AuthService {
     private final UserSessionService userSessionService;
     private final AuthProperties authProperties;
     private final TwoFactorPasswordService twoFactorPasswordService;
+    private final AuthSecurityEventService authSecurityEventService;
     private final SecureRandom secureRandom = new SecureRandom();
 
     @Transactional
@@ -56,6 +57,14 @@ public class AuthService {
             String userAgent
     ) {
         String normalizedPhone = normalizePhoneNumber(request.phoneNumber());
+        String normalizedIpAddress = normalizeNullable(ipAddress, 64);
+        String normalizedUserAgent = normalizeNullable(userAgent, 255);
+        String requestFingerprintHash = buildRequestFingerprintHash(
+                request.deviceName(),
+                request.platform(),
+                request.appVersion(),
+                userAgent
+        );
         userRepository.findByPhoneNumber(normalizedPhone)
                 .filter(UserEntity::isBot)
                 .ifPresent(user -> {
@@ -63,12 +72,34 @@ public class AuthService {
                 });
 
         Instant now = Instant.now();
+        Instant windowStart = now.minus(authProperties.getCode().getRequestWindow());
         long recentRequests = loginCodeChallengeRepository.countByPhoneNumberAndCreatedAtAfter(
                 normalizedPhone,
-                now.minus(authProperties.getCode().getRequestWindow())
+                windowStart
         );
         if (recentRequests >= authProperties.getCode().getMaxRequestsPerWindow()) {
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many login code requests");
+        }
+        if (normalizedIpAddress != null) {
+            long recentRequestsByIp = loginCodeChallengeRepository.countByRequestedByIpAndCreatedAtAfter(
+                    normalizedIpAddress,
+                    windowStart
+            );
+            if (recentRequestsByIp >= authProperties.getCode().getMaxRequestsPerIpWindow()) {
+                throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many login code requests from this IP");
+            }
+        }
+        if (requestFingerprintHash != null) {
+            long recentRequestsByFingerprint = loginCodeChallengeRepository.countByRequestFingerprintHashAndCreatedAtAfter(
+                    requestFingerprintHash,
+                    windowStart
+            );
+            if (recentRequestsByFingerprint >= authProperties.getCode().getMaxRequestsPerFingerprintWindow()) {
+                throw new ResponseStatusException(
+                        HttpStatus.TOO_MANY_REQUESTS,
+                        "Too many login code requests from this device fingerprint"
+                );
+            }
         }
 
         String code = generateCode(authProperties.getCode().getLength());
@@ -79,8 +110,9 @@ public class AuthService {
         challenge.setDeviceName(normalizeNullable(request.deviceName(), 120));
         challenge.setPlatform(normalizeNullable(request.platform(), 32));
         challenge.setAppVersion(normalizeNullable(request.appVersion(), 32));
-        challenge.setRequestedByIp(normalizeNullable(ipAddress, 64));
-        challenge.setRequestedByUserAgent(normalizeNullable(userAgent, 255));
+        challenge.setRequestedByIp(normalizedIpAddress);
+        challenge.setRequestedByUserAgent(normalizedUserAgent);
+        challenge.setRequestFingerprintHash(requestFingerprintHash);
         challenge.setMaxAttempts(authProperties.getCode().getMaxAttempts());
         challenge.setExpiresAt(now.plus(authProperties.getCode().getTtl()));
         challenge.setCodeHash(hashLoginCode(challenge.getId(), code));
@@ -152,6 +184,9 @@ public class AuthService {
 
     @Transactional
     public AuthResponse login(AuthRequest request, String ipAddress, String userAgent) {
+        if (!authProperties.getLegacyLogin().isEnabled()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Legacy login is disabled");
+        }
         String normalizedPhone = normalizePhoneNumber(request.phoneNumber());
         UserEntity user = userRepository.findByPhoneNumber(normalizedPhone)
                 .orElseGet(() -> createUser(normalizedPhone, request.displayName()));
@@ -416,11 +451,23 @@ public class AuthService {
         user.setTwoFactorEnabledAt(Instant.now());
         userRepository.save(user);
         userSessionService.markTrusted(currentSessionId, userId);
+        authSecurityEventService.recordEvent(
+                userId,
+                currentSessionId,
+                "TWO_FACTOR_ENABLED",
+                "INFO",
+                null,
+                null,
+                null,
+                null,
+                null,
+                "Two-factor authentication enabled"
+        );
         return new TwoFactorStatusResponse(true, user.getTwoFactorHint(), user.getTwoFactorEnabledAt());
     }
 
     @Transactional
-    public TwoFactorStatusResponse disableTwoFactor(UUID userId, DisableTwoFactorRequest request) {
+    public TwoFactorStatusResponse disableTwoFactor(UUID userId, UUID currentSessionId, DisableTwoFactorRequest request) {
         UserEntity user = getUser(userId);
         requireTwoFactorPassword(user, request.password());
         user.setTwoFactorPasswordSalt(null);
@@ -428,6 +475,18 @@ public class AuthService {
         user.setTwoFactorHint(null);
         user.setTwoFactorEnabledAt(null);
         userRepository.save(user);
+        authSecurityEventService.recordEvent(
+                userId,
+                currentSessionId,
+                "TWO_FACTOR_DISABLED",
+                "WARN",
+                null,
+                null,
+                null,
+                null,
+                null,
+                "Two-factor authentication disabled"
+        );
         return new TwoFactorStatusResponse(false, null, null);
     }
 
@@ -679,6 +738,31 @@ public class AuthService {
 
     private String hashQrToken(String qrToken) {
         return hash(normalizeRequired(qrToken, "QR token", 512));
+    }
+
+    private String buildRequestFingerprintHash(
+            String deviceName,
+            String platform,
+            String appVersion,
+            String userAgent
+    ) {
+        String normalizedDeviceName = normalizeNullable(deviceName, 120);
+        String normalizedPlatform = normalizeNullable(platform, 32);
+        String normalizedAppVersion = normalizeNullable(appVersion, 32);
+        String normalizedUserAgent = normalizeNullable(userAgent, 255);
+        if (normalizedDeviceName == null
+                && normalizedPlatform == null
+                && normalizedAppVersion == null
+                && normalizedUserAgent == null) {
+            return null;
+        }
+        return hash(String.join(
+                "|",
+                normalizedDeviceName != null ? normalizedDeviceName : "<null>",
+                normalizedPlatform != null ? normalizedPlatform : "<null>",
+                normalizedAppVersion != null ? normalizedAppVersion : "<null>",
+                normalizedUserAgent != null ? normalizedUserAgent : "<null>"
+        ));
     }
 
     private String hash(String value) {

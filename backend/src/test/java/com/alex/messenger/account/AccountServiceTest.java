@@ -113,7 +113,7 @@ class AccountServiceTest {
         );
 
         assertThat(response.status()).isEqualTo("COMPLETED");
-        assertThat(response.exportFormat()).isEqualTo("JSON");
+        assertThat(response.format()).isEqualTo("JSON");
         assertThat(response.includeAttachmentsMetadata()).isTrue();
         assertThat(response.messageCount()).isEqualTo(1);
         assertThat(response.artifactChecksum()).isEqualTo("checksum-123");

@@ -23,7 +23,8 @@ public record SendMessageRequest(
         List<@NotNull UUID> attachmentIds,
         UUID stickerId,
         Boolean silent,
-        UUID clientMessageId
+        UUID clientMessageId,
+        Boolean disableLinkPreview
 ) {
     public SendMessageRequest(
             UUID chatId,
@@ -56,7 +57,8 @@ public record SendMessageRequest(
                 attachmentIds,
                 stickerId,
                 silent,
-                clientMessageId
+                clientMessageId,
+                null
         );
     }
 

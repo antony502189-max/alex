@@ -16,10 +16,25 @@ public record MessageTextContent(
         MessageLiveLocationPayload liveLocation,
         MessageContactCardPayload contactCard,
         MessageServicePayload serviceMessage,
-        boolean silent
+        boolean silent,
+        boolean disableLinkPreview
 ) {
     public MessageTextContent(String text, List<MessageTextEntityPayload> entities) {
-        this(text, entities, null, null, null, null, null, null, false);
+        this(text, entities, null, null, null, null, null, null, false, false);
+    }
+
+    public MessageTextContent(
+            String text,
+            List<MessageTextEntityPayload> entities,
+            String messageType,
+            String caption,
+            MessageLocationPayload location,
+            MessageLiveLocationPayload liveLocation,
+            MessageContactCardPayload contactCard,
+            MessageServicePayload serviceMessage,
+            boolean silent
+    ) {
+        this(text, entities, messageType, caption, location, liveLocation, contactCard, serviceMessage, silent, false);
     }
 
     public MessageTextContent(
@@ -32,6 +47,6 @@ public record MessageTextContent(
             MessageServicePayload serviceMessage,
             boolean silent
     ) {
-        this(text, entities, messageType, caption, location, null, contactCard, serviceMessage, silent);
+        this(text, entities, messageType, caption, location, null, contactCard, serviceMessage, silent, false);
     }
 }

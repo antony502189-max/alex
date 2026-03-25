@@ -67,6 +67,14 @@ public class FeatureFlagService {
         require(featureProperties.isTranslations(), "Translations");
     }
 
+    public boolean isCallsEnabled() {
+        return featureProperties.isCalls();
+    }
+
+    public boolean isGroupCallsEnabled() {
+        return featureProperties.isGroupCalls();
+    }
+
     private void require(boolean enabled, String featureName) {
         if (enabled) {
             return;

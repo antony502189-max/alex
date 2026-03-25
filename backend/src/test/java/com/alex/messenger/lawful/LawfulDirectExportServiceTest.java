@@ -4,9 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.alex.messenger.feature.FeatureFlagService;
 import com.alex.messenger.lawful.dto.DirectLawfulExportRequest;
 import com.alex.messenger.lawful.dto.DirectLawfulExportResponse;
 import com.alex.messenger.message.dto.ChatMessageResponse;
@@ -38,16 +41,44 @@ class LawfulDirectExportServiceTest {
     @Mock
     private UserRepository userRepository;
 
+    @Mock
+    private FeatureFlagService featureFlagService;
+
+    private LawfulProperties lawfulProperties;
     private LawfulDirectExportService lawfulDirectExportService;
 
     @BeforeEach
     void setUp() {
+        lawfulProperties = new LawfulProperties();
         lawfulDirectExportService = new LawfulDirectExportService(
                 lawfulDirectExportRepository,
                 lawfulInterceptionService,
                 checksumService,
-                userRepository
+                userRepository,
+                featureFlagService,
+                lawfulProperties
         );
+    }
+
+    @Test
+    void exportRejectsWhenFeatureFlagIsDisabled() {
+        UUID targetUserId = UUID.randomUUID();
+        doThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "Lawful direct export is disabled"))
+                .when(featureFlagService)
+                .requireLawfulDirectExportEnabled();
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> lawfulDirectExportService.export(
+                        "operator-a",
+                        new DirectLawfulExportRequest(targetUserId, null, null, "Need export", false)
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(exception.getReason()).isEqualTo("Lawful direct export is disabled");
+        verifyNoInteractions(userRepository, lawfulInterceptionService, lawfulDirectExportRepository);
     }
 
     @Test
@@ -115,9 +146,11 @@ class LawfulDirectExportServiceTest {
         );
 
         assertThat(response.messageCount()).isEqualTo(1);
-        assertThat(response.messages()).singleElement().satisfies(savedMessage ->
-                assertThat(savedMessage.attachments()).isEmpty()
-        );
+        assertThat(response.messages()).singleElement().satisfies(savedMessage -> {
+            assertThat(savedMessage.attachments()).isEmpty();
+            assertThat(savedMessage.displaySenderPhotoUrl()).isNull();
+            assertThat(savedMessage.displaySenderPhotoAccessExpiresAt()).isNull();
+        });
         assertThat(response.artifactChecksum()).isEqualTo("checksum-1");
         verify(lawfulDirectExportRepository).save(any(LawfulDirectExportEntity.class));
     }
@@ -169,9 +202,44 @@ class LawfulDirectExportServiceTest {
                 new DirectLawfulExportRequest(targetUserId, null, null, "Need export", true)
         );
 
-        assertThat(response.messages()).singleElement().satisfies(savedMessage ->
-                assertThat(savedMessage.attachments()).hasSize(1)
+        assertThat(response.messages()).singleElement().satisfies(savedMessage -> {
+            assertThat(savedMessage.displaySenderPhotoUrl()).isNull();
+            assertThat(savedMessage.displaySenderPhotoAccessExpiresAt()).isNull();
+            assertThat(savedMessage.attachments()).singleElement().satisfies(attachment -> {
+                assertThat(attachment.originalFileName()).isEqualTo("photo.jpg");
+                assertThat(attachment.downloadUrl()).isNull();
+                assertThat(attachment.previewUrl()).isNull();
+                assertThat(attachment.thumbnailUrl()).isNull();
+                assertThat(attachment.accessExpiresAt()).isNull();
+                assertThat(attachment.width()).isEqualTo(640);
+                assertThat(attachment.height()).isEqualTo(480);
+            });
+        });
+    }
+
+    @Test
+    void exportSuppressesInlineMessagesWhenResultExceedsConfiguredLimit() {
+        UUID targetUserId = UUID.randomUUID();
+        lawfulProperties.getDirectExport().setInlineMessageLimit(1);
+        ChatMessageResponse firstMessage = buildMessage(List.of());
+        ChatMessageResponse secondMessage = buildMessage(List.of());
+
+        when(userRepository.existsById(targetUserId)).thenReturn(true);
+        when(lawfulInterceptionService.exportDecryptedMessages(targetUserId, null, null))
+                .thenReturn(List.of(firstMessage, secondMessage));
+        when(checksumService.computeDirectExportChecksum(any(), any(), any(), any(), any(), any(), anyBoolean(), any()))
+                .thenReturn("checksum-3");
+        when(lawfulDirectExportRepository.save(any(LawfulDirectExportEntity.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+
+        DirectLawfulExportResponse response = lawfulDirectExportService.export(
+                "operator-a",
+                new DirectLawfulExportRequest(targetUserId, null, null, "Need export", true)
         );
+
+        assertThat(response.messageCount()).isEqualTo(2);
+        assertThat(response.messages()).isEmpty();
+        assertThat(response.artifactChecksum()).isEqualTo("checksum-3");
     }
 
     private ChatMessageResponse buildMessage(List<MessageAttachmentResponse> attachments) {
@@ -181,8 +249,8 @@ class LawfulDirectExportServiceTest {
                 null,
                 UUID.randomUUID(),
                 "Sender",
-                null,
-                null,
+                "https://example.test/profiles/sender",
+                Instant.parse("2026-03-13T13:00:00Z"),
                 false,
                 UUID.randomUUID(),
                 null,

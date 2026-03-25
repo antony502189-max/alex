@@ -7,10 +7,14 @@ import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.alex.messenger.abuse.AbuseProtectionService;
 import com.alex.messenger.attachment.AttachmentService;
 import com.alex.messenger.auth.session.UserSessionService;
 import com.alex.messenger.bot.BotService;
@@ -24,9 +28,12 @@ import com.alex.messenger.crypto.ChatEncryptionService;
 import com.alex.messenger.crypto.EncryptedPayload;
 import com.alex.messenger.message.dto.ChatMessageResponse;
 import com.alex.messenger.message.dto.CreateRepeatingMessageRequest;
+import com.alex.messenger.message.dto.DeleteMessageRequest;
+import com.alex.messenger.message.dto.EditMessageRequest;
 import com.alex.messenger.message.dto.ForwardMessageRequest;
 import com.alex.messenger.message.dto.MessageAttachmentResponse;
 import com.alex.messenger.message.dto.MessageLiveLocationPayload;
+import com.alex.messenger.message.dto.MessageTextEntityPayload;
 import com.alex.messenger.message.dto.RepeatingMessageResponse;
 import com.alex.messenger.message.dto.SendMessageRequest;
 import com.alex.messenger.message.dto.ScheduledMessageResponse;
@@ -41,6 +48,7 @@ import com.alex.messenger.message.scheduled.ScheduledMessageRepository;
 import com.alex.messenger.poll.PollService;
 import com.alex.messenger.search.PublicPostSearchService;
 import com.alex.messenger.sticker.StickerService;
+import com.alex.messenger.sync.UserSyncService;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -73,6 +81,9 @@ class MessageServiceTest {
 
     @Mock
     private MessageLookupRepository messageLookupRepository;
+
+    @Mock
+    private MessageReportRepository messageReportRepository;
 
     @Mock
     private MessageReactionService messageReactionService;
@@ -111,6 +122,9 @@ class MessageServiceTest {
     private MessageContentCodec messageContentCodec;
 
     @Mock
+    private MessageLinkPreviewService messageLinkPreviewService;
+
+    @Mock
     private MessageSearchCorpusService messageSearchCorpusService;
 
     @Mock
@@ -141,7 +155,13 @@ class MessageServiceTest {
     private UserSessionService userSessionService;
 
     @Mock
+    private UserSyncService userSyncService;
+
+    @Mock
     private ApplicationEventPublisher applicationEventPublisher;
+
+    @Mock
+    private AbuseProtectionService abuseProtectionService;
 
     private MessageService messageService;
 
@@ -152,6 +172,7 @@ class MessageServiceTest {
                 messageTopicRepository,
                 messageThreadRepository,
                 messageLookupRepository,
+                messageReportRepository,
                 messageReactionService,
                 messageExpirationRepository,
                 scheduledMessageRepository,
@@ -164,6 +185,7 @@ class MessageServiceTest {
                 messageLiveLocationService,
                 chatEncryptionService,
                 messageContentCodec,
+                messageLinkPreviewService,
                 messageSearchCorpusService,
                 messageTranslationCacheRepository,
                 messageIdempotencyService,
@@ -174,13 +196,28 @@ class MessageServiceTest {
                 botService,
                 botUpdateService,
                 userSessionService,
-                applicationEventPublisher
+                userSyncService,
+                applicationEventPublisher,
+                abuseProtectionService
         );
 
         lenient().when(chatEncryptionService.decrypt(any(UUID.class), anyString(), anyString(), anyInt())).thenReturn("decoded");
         lenient().when(messageContentCodec.decode("decoded")).thenReturn(new MessageTextContent("Hello", List.of()));
         lenient().when(messageReactionService.getSummaries(any(UUID.class))).thenReturn(List.of());
         lenient().when(messageReactionService.getSummaries(anyCollection())).thenReturn(Map.of());
+        lenient().when(userSyncService.participantsIncludingActor(any(UUID.class), anyCollection()))
+                .thenAnswer(invocation -> {
+                    java.util.LinkedHashSet<UUID> participants = new java.util.LinkedHashSet<>();
+                    UUID actorId = invocation.getArgument(0, UUID.class);
+                    if (actorId != null) {
+                        participants.add(actorId);
+                    }
+                    java.util.Collection<UUID> others = invocation.getArgument(1);
+                    if (others != null) {
+                        participants.addAll(others);
+                    }
+                    return participants;
+                });
         lenient().when(chatService.resolveMessageAuthor(any(UUID.class), any(UUID.class), any(UUID.class)))
                 .thenAnswer(invocation -> new ChatService.MessageAuthorView(
                         invocation.getArgument(2, UUID.class),
@@ -203,7 +240,7 @@ class MessageServiceTest {
 
         when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
         when(forumTopicService.resolveTopicForWrite(chat, senderId, null)).thenReturn(null);
-        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any()))
+        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new MessageTextContent("Reminder", List.of()));
         when(messageContentCodec.encode(any(MessageTextContent.class))).thenReturn("encoded-repeat");
         when(chatEncryptionService.encrypt(chatId, "encoded-repeat"))
@@ -321,7 +358,7 @@ class MessageServiceTest {
         when(attachmentService.getResponses(requesterId, List.of(newerAttachmentId)))
                 .thenReturn(List.of(attachment(newerAttachmentId, "VIDEO")));
 
-        List<ChatMessageResponse> history = messageService.getHistory(requesterId, chatId, null, null, null, 200);
+        List<ChatMessageResponse> history = messageService.getHistory(requesterId, chatId, null, null, null, 100);
 
         assertThat(history).extracting(ChatMessageResponse::messageId)
                 .containsExactly(olderMessageId, newerMessageId);
@@ -540,7 +577,7 @@ class MessageServiceTest {
         when(chatService.getRecipientIdsForSystem(discussionChat, senderId)).thenReturn(List.of(discussionRecipientId));
         when(chatService.isCrossPostingEnabled(channelChatId)).thenReturn(true);
         when(forumTopicService.resolveTopicForWrite(channelChat, senderId, null)).thenReturn(null);
-        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any()))
+        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new MessageTextContent("Channel post", List.of()));
         when(messageContentCodec.encode(any(MessageTextContent.class))).thenReturn("encoded-message");
         when(chatEncryptionService.encrypt(channelChatId, "encoded-message"))
@@ -587,6 +624,53 @@ class MessageServiceTest {
         verify(attachmentService).cloneAttachmentsToChatForSystem(senderId, discussionChatId, List.of(sourceAttachmentId));
         verify(chatService, never()).getRecipientIds(discussionChat, senderId);
         verify(chatService, org.mockito.Mockito.atLeastOnce()).getRecipientIdsForSystem(discussionChat, senderId);
+    }
+
+    @Test
+    void sendMessagePublishesChatSummaryRefreshForActiveParticipants() {
+        UUID senderId = UUID.randomUUID();
+        UUID recipientId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "DIRECT");
+
+        when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
+        when(chatService.getRecipientIds(chat, senderId)).thenReturn(List.of(recipientId));
+        when(forumTopicService.resolveTopicForWrite(chat, senderId, null)).thenReturn(null);
+        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new MessageTextContent("Hello there", List.of()));
+        when(messageContentCodec.encode(any(MessageTextContent.class))).thenReturn("encoded-direct");
+        when(chatEncryptionService.encrypt(chatId, "encoded-direct"))
+                .thenReturn(new EncryptedPayload("cipher-direct", "nonce-direct", 1));
+        when(attachmentService.getResponses(senderId, List.of())).thenReturn(List.of());
+
+        messageService.sendMessage(
+                senderId,
+                new SendMessageRequest(
+                        chatId,
+                        null,
+                        null,
+                        null,
+                        "Hello there",
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        List.of(),
+                        null,
+                        false,
+                        null
+                )
+        );
+
+        ArgumentCaptor<java.util.Collection<UUID>> recipientsCaptor = ArgumentCaptor.forClass(java.util.Collection.class);
+        ArgumentCaptor<Map<String, Object>> payloadCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(chatService).publishChatUpdate(eq(senderId), eq(chatId), recipientsCaptor.capture(), payloadCaptor.capture());
+        assertThat(recipientsCaptor.getValue()).containsExactly(senderId, recipientId);
+        assertThat(payloadCaptor.getValue()).containsEntry("chatId", chatId);
+        assertThat(payloadCaptor.getValue()).containsEntry("actorUserId", senderId);
+        assertThat(payloadCaptor.getValue()).containsEntry("senderId", senderId);
     }
 
     @Test
@@ -1092,7 +1176,7 @@ class MessageServiceTest {
         deletedReplyTarget.setChatId(chatId);
         deletedReplyTarget.setDeletedAt(Instant.parse("2026-03-14T09:59:00Z"));
 
-        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any()))
+        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new MessageTextContent("Hello", List.of()));
         when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
         when(forumTopicService.resolveTopicForWrite(chat, senderId, null)).thenReturn(null);
@@ -1365,12 +1449,59 @@ class MessageServiceTest {
 
         when(messageLookupRepository.findById(messageId)).thenReturn(Optional.of(lookup));
         when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
+        when(chatService.getRecipientIds(chat, senderId)).thenReturn(List.of());
+        when(chatService.getChat(chatId)).thenReturn(chat);
+        when(messageRepository.findRecentByChatId(chatId, 200)).thenReturn(List.of());
         when(attachmentService.getResponses(senderId, List.of())).thenReturn(List.of());
 
         messageService.deleteMessage(senderId, messageId);
 
         verify(publicPostSearchService).syncMessage(lookup);
         assertThat(lookup.getDeletedAt()).isNotNull();
+    }
+
+    @Test
+    void deleteMessagePublishesChatSummaryRefreshAfterStateReconciliation() {
+        UUID senderId = UUID.randomUUID();
+        UUID recipientId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "DIRECT");
+        MessageLookupEntity lookup = new MessageLookupEntity();
+        lookup.setMessageId(messageId);
+        lookup.setChatId(chatId);
+        lookup.setSenderId(senderId);
+        lookup.setCiphertext("cipher-delete");
+        lookup.setNonce("nonce-delete");
+        lookup.setKeyVersion(1);
+        lookup.setAttachmentIds(List.of());
+        lookup.setCreatedAt(Instant.parse("2026-03-19T17:00:00Z"));
+
+        when(messageLookupRepository.findById(messageId)).thenReturn(Optional.of(lookup));
+        when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
+        when(chatService.getRecipientIds(chat, senderId)).thenReturn(List.of(recipientId));
+        when(chatService.getChat(chatId)).thenReturn(chat);
+        when(chatService.getRecipientIdsForSystem(chat, senderId)).thenReturn(List.of(recipientId));
+        when(messageRepository.findRecentByChatId(chatId, 200)).thenReturn(List.of());
+        when(attachmentService.getResponses(senderId, List.of())).thenReturn(List.of());
+
+        messageService.deleteMessage(senderId, messageId);
+
+        ArgumentCaptor<java.util.Collection<UUID>> recipientsCaptor = ArgumentCaptor.forClass(java.util.Collection.class);
+        verify(chatService).publishChatUpdate(eq(senderId), eq(chatId), recipientsCaptor.capture(), anyMap());
+        assertThat(recipientsCaptor.getValue()).containsExactly(senderId, recipientId);
+        verify(userSyncService).recordForUsers(
+                argThat(userIds -> userIds != null
+                        && userIds.size() == 2
+                        && userIds.containsAll(List.of(senderId, recipientId))),
+                eq("MESSAGE_DELETED"),
+                eq("MESSAGE"),
+                eq(messageId),
+                eq(chatId),
+                any()
+        );
+        verify(chatService).reconcileUnreadState(chatId);
     }
 
     @Test
@@ -1546,6 +1677,142 @@ class MessageServiceTest {
     }
 
     @Test
+    void deleteMessageAllowsModeratorToRemoveAnotherUsersMessage() {
+        UUID requesterId = UUID.randomUUID();
+        UUID senderId = UUID.randomUUID();
+        UUID recipientId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "GROUP");
+
+        MessageLookupEntity lookup = new MessageLookupEntity();
+        lookup.setMessageId(messageId);
+        lookup.setChatId(chatId);
+        lookup.setSenderId(senderId);
+        lookup.setCiphertext("cipher-moderated");
+        lookup.setNonce("nonce-moderated");
+        lookup.setKeyVersion(1);
+        lookup.setAttachmentIds(List.of());
+        lookup.setCreatedAt(Instant.parse("2026-03-24T11:00:00Z"));
+        lookup.setDeliveryStatus("DELIVERED");
+
+        when(messageLookupRepository.findById(messageId)).thenReturn(Optional.of(lookup));
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(chatService.hasMessageModerationPermission(requesterId, chatId)).thenReturn(true);
+        when(chatService.getRecipientIds(chat, requesterId)).thenReturn(List.of(recipientId));
+        when(chatService.getChat(chatId)).thenReturn(chat);
+        when(messageRepository.findRecentByChatId(chatId, 200)).thenReturn(List.of());
+        when(attachmentService.getResponses(requesterId, List.of())).thenReturn(List.of());
+
+        ChatMessageResponse response = messageService.deleteMessage(
+                requesterId,
+                messageId,
+                new DeleteMessageRequest(true, "spam cleanup")
+        );
+
+        assertThat(lookup.getDeletedAt()).isNotNull();
+        assertThat(response.deletedAt()).isNotNull();
+        verify(chatAdminLogService).log(
+                eq(chatId),
+                eq(requesterId),
+                eq(senderId),
+                eq("MESSAGE_DELETED"),
+                anyString(),
+                eq(messageId),
+                eq(null)
+        );
+        verify(userSyncService).recordForUsers(
+                eq(List.of(requesterId)),
+                eq("MESSAGE_DELETED"),
+                eq("MESSAGE"),
+                eq(messageId),
+                eq(chatId),
+                any()
+        );
+        verify(chatService).reconcileUnreadState(chatId);
+    }
+
+    @Test
+    void editMessageUpdatesCaptionAndDisablesLinkPreview() {
+        UUID senderId = UUID.randomUUID();
+        UUID recipientId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        UUID attachmentId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "DIRECT");
+
+        MessageLookupEntity lookup = new MessageLookupEntity();
+        lookup.setMessageId(messageId);
+        lookup.setChatId(chatId);
+        lookup.setSenderId(senderId);
+        lookup.setCiphertext("cipher-original");
+        lookup.setNonce("nonce-original");
+        lookup.setKeyVersion(1);
+        lookup.setAttachmentIds(List.of(attachmentId));
+        lookup.setCreatedAt(Instant.parse("2026-03-24T11:10:00Z"));
+        lookup.setDeliveryStatus("DELIVERED");
+
+        MessageTextContent existingContent = new MessageTextContent(
+                "Old caption",
+                List.of(),
+                null,
+                "Old caption",
+                null,
+                null,
+                null,
+                null,
+                false,
+                false
+        );
+        MessageTextContent updatedContent = new MessageTextContent(
+                "Updated caption",
+                List.of(new MessageTextEntityPayload("BOLD", 0, 7, null, null)),
+                null,
+                "Updated caption",
+                null,
+                null,
+                null,
+                null,
+                false,
+                true
+        );
+
+        when(messageLookupRepository.findById(messageId)).thenReturn(Optional.of(lookup));
+        when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
+        when(chatService.getRecipientIds(chat, senderId)).thenReturn(List.of(recipientId));
+        when(chatEncryptionService.decrypt(chatId, "cipher-original", "nonce-original", 1)).thenReturn("decoded-original");
+        when(messageContentCodec.decode("decoded-original")).thenReturn(existingContent);
+        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(updatedContent);
+        when(messageContentCodec.encode(updatedContent)).thenReturn("encoded-updated");
+        when(chatEncryptionService.encrypt(chatId, "encoded-updated"))
+                .thenReturn(new EncryptedPayload("cipher-updated", "nonce-updated", 2));
+        when(chatEncryptionService.decrypt(chatId, "cipher-updated", "nonce-updated", 2)).thenReturn("decoded-updated");
+        when(messageContentCodec.decode("decoded-updated")).thenReturn(updatedContent);
+        when(attachmentService.getResponses(senderId, List.of(attachmentId)))
+                .thenReturn(List.of(attachment(attachmentId, "IMAGE")));
+
+        ChatMessageResponse response = messageService.editMessage(
+                senderId,
+                messageId,
+                new EditMessageRequest(
+                        null,
+                        "Updated caption",
+                        List.of(new MessageTextEntityPayload("BOLD", 0, 7, null, null)),
+                        true
+                )
+        );
+
+        assertThat(lookup.getEditedAt()).isNotNull();
+        assertThat(response.text()).isEqualTo("Updated caption");
+        assertThat(response.caption()).isEqualTo("Updated caption");
+        assertThat(response.disableLinkPreview()).isTrue();
+        verify(messageTranslationCacheRepository).deleteByMessageId(messageId);
+    }
+
+    @Test
     void updateLiveLocationRejectsMessagesOwnedByAnotherSender() {
         UUID requesterId = UUID.randomUUID();
         UUID actualSenderId = UUID.randomUUID();
@@ -1572,6 +1839,80 @@ class MessageServiceTest {
 
         verify(messageLiveLocationService, never()).update(any(MessageLookupEntity.class), any(UpdateLiveLocationRequest.class));
         verify(chatMessagePublisher, never()).publish(any(MessageEvent.class));
+    }
+
+    @Test
+    void sendMessageRejectsWhenThrottleExceeded() {
+        UUID senderId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        ChatEntity chat = chat(chatId, "GROUP");
+
+        when(messageContentCodec.normalize(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new MessageTextContent("hello", List.of()));
+        when(chatService.getOwnedChat(senderId, chatId)).thenReturn(chat);
+        when(messageContentCodec.encode(any(MessageTextContent.class))).thenReturn("encoded-message");
+        when(chatEncryptionService.encrypt(chatId, "encoded-message"))
+                .thenReturn(new EncryptedPayload("cipher-send", "nonce-send", 1));
+        doThrow(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many messages created recently"))
+                .when(abuseProtectionService)
+                .assertMessageSendAllowed(senderId, chatId);
+
+        assertThatThrownBy(() -> messageService.sendMessage(
+                senderId,
+                new SendMessageRequest(
+                        chatId,
+                        null,
+                        null,
+                        null,
+                        "hello",
+                        null,
+                        null,
+                        List.of(),
+                        null,
+                        null,
+                        null,
+                        List.of(),
+                        null,
+                        false,
+                        null,
+                        null
+                )
+        ))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception ->
+                        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS)
+                );
+
+        verify(messageStorageService, never()).save(any(MessageLookupEntity.class));
+    }
+
+    @Test
+    void reportMessageRejectsWhenThrottleExceeded() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "GROUP");
+        MessageLookupEntity lookup = new MessageLookupEntity();
+        lookup.setMessageId(messageId);
+        lookup.setChatId(chatId);
+        lookup.setSenderId(UUID.randomUUID());
+
+        when(messageLookupRepository.findById(messageId)).thenReturn(Optional.of(lookup));
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        doThrow(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many message reports submitted recently"))
+                .when(abuseProtectionService)
+                .assertMessageReportAllowed(requesterId);
+
+        assertThatThrownBy(() -> messageService.reportMessage(
+                requesterId,
+                messageId,
+                new com.alex.messenger.message.dto.ReportMessageRequest("spam", "bulk abuse")
+        ))
+                .isInstanceOfSatisfying(ResponseStatusException.class, exception ->
+                        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS)
+                );
+
+        verify(messageReportRepository, never()).save(any(MessageReportEntity.class));
     }
 
     private ChatEntity chat(UUID chatId, String chatType) {

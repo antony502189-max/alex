@@ -6,8 +6,11 @@ import com.alex.messenger.chat.dto.ChatInviteLinkResponse;
 import com.alex.messenger.chat.dto.ChatJoinRequestResponse;
 import com.alex.messenger.chat.dto.ChatBanResponse;
 import com.alex.messenger.chat.dto.ChatAnalyticsResponse;
+import com.alex.messenger.chat.dto.ChatReportResponse;
 import com.alex.messenger.chat.dto.ChatReadEventResponse;
 import com.alex.messenger.chat.dto.ChatSummaryResponse;
+import com.alex.messenger.chat.dto.ClearHistoryRequest;
+import com.alex.messenger.chat.dto.ClearHistoryResponse;
 import com.alex.messenger.chat.dto.PinnedMessageHistoryResponse;
 import com.alex.messenger.chat.dto.AddMembersRequest;
 import com.alex.messenger.chat.dto.ArchiveChatRequest;
@@ -18,6 +21,8 @@ import com.alex.messenger.chat.dto.CreateGroupChatRequest;
 import com.alex.messenger.chat.dto.JoinByInviteLinkRequest;
 import com.alex.messenger.chat.dto.JoinByPublicUsernameRequest;
 import com.alex.messenger.chat.dto.JoinChatResultResponse;
+import com.alex.messenger.chat.dto.LeaveChatResponse;
+import com.alex.messenger.chat.dto.MarkChatUnreadRequest;
 import com.alex.messenger.chat.dto.MarkReadRequest;
 import com.alex.messenger.chat.dto.MemberMutationResponse;
 import com.alex.messenger.chat.dto.CreateForumTopicRequest;
@@ -25,6 +30,7 @@ import com.alex.messenger.chat.dto.ForumTopicResponse;
 import com.alex.messenger.chat.dto.MuteChatRequest;
 import com.alex.messenger.chat.dto.PinMessageEventResponse;
 import com.alex.messenger.chat.dto.PinMessageRequest;
+import com.alex.messenger.chat.dto.ReportChatRequest;
 import com.alex.messenger.chat.dto.TypingEventRequest;
 import com.alex.messenger.chat.dto.TypingEventResponse;
 import com.alex.messenger.chat.dto.TransferChatOwnershipRequest;
@@ -42,8 +48,6 @@ import com.alex.messenger.chat.forum.ForumTopicService;
 import com.alex.messenger.message.MessageDeliveryService;
 import com.alex.messenger.shared.CurrentUser;
 import jakarta.validation.Valid;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
@@ -107,21 +111,7 @@ public class ChatController {
         if (limit == null && cursor == null) {
             return ResponseEntity.ok(chats);
         }
-
-        int normalizedLimit = validatedLimit != null ? validatedLimit : 50;
-        int offset = decodeChatCursor(cursor);
-        if (offset > chats.size()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is out of range");
-        }
-        int nextOffset = Math.min(offset + normalizedLimit, chats.size());
-        boolean hasMore = nextOffset < chats.size();
-        ResponseEntity.BodyBuilder builder = ResponseEntity.ok()
-                .header("X-Chat-Has-More", String.valueOf(hasMore))
-                .header("X-Chat-Limit", String.valueOf(normalizedLimit));
-        if (hasMore) {
-            builder.header("X-Chat-Next-Cursor", encodeChatCursor(nextOffset));
-        }
-        return builder.body(chats.subList(offset, nextOffset));
+        return buildPagedResponse(chatService.sliceChatList(chats, cursor, validatedLimit));
     }
 
     @PostMapping("/direct")
@@ -158,6 +148,36 @@ public class ChatController {
             @Valid @RequestBody MuteChatRequest request
     ) {
         return ResponseEntity.ok(chatService.muteChat(CurrentUser.id(), chatId, request.mutedUntil()));
+    }
+
+    @PostMapping("/{chatId}/leave")
+    public ResponseEntity<LeaveChatResponse> leave(@PathVariable UUID chatId) {
+        return ResponseEntity.ok(chatService.leaveChat(CurrentUser.id(), chatId));
+    }
+
+    @PostMapping("/{chatId}/clear-history")
+    public ResponseEntity<ClearHistoryResponse> clearHistory(
+            @PathVariable UUID chatId,
+            @RequestBody(required = false) ClearHistoryRequest request
+    ) {
+        return ResponseEntity.ok(chatService.clearHistory(CurrentUser.id(), chatId, request));
+    }
+
+    @PostMapping("/{chatId}/mark-unread")
+    public ResponseEntity<ChatSummaryResponse> markUnread(
+            @PathVariable UUID chatId,
+            @RequestBody(required = false) MarkChatUnreadRequest request
+    ) {
+        boolean unread = request == null || request.unread() == null || request.unread();
+        return ResponseEntity.ok(chatService.markChatUnread(CurrentUser.id(), chatId, unread));
+    }
+
+    @PostMapping("/{chatId}/report")
+    public ResponseEntity<ChatReportResponse> reportChat(
+            @PathVariable UUID chatId,
+            @Valid @RequestBody ReportChatRequest request
+    ) {
+        return ResponseEntity.ok(chatService.reportChat(CurrentUser.id(), chatId, request));
     }
 
     @PutMapping("/{chatId}/list-pin")
@@ -442,28 +462,6 @@ public class ChatController {
             builder.header("X-Chat-Next-Cursor", page.nextCursor());
         }
         return builder.body(page.chats());
-    }
-
-    private int decodeChatCursor(String cursor) {
-        if (cursor == null || cursor.isBlank()) {
-            return 0;
-        }
-        try {
-            String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
-            int offset = Integer.parseInt(decoded);
-            if (offset < 0) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is invalid");
-            }
-            return offset;
-        } catch (IllegalArgumentException exception) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is invalid", exception);
-        }
-    }
-
-    private String encodeChatCursor(int offset) {
-        return Base64.getUrlEncoder()
-                .withoutPadding()
-                .encodeToString(String.valueOf(offset).getBytes(StandardCharsets.UTF_8));
     }
 
     private int requireLimit(int limit, int max) {

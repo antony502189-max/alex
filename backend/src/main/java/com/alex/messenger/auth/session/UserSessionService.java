@@ -1,5 +1,6 @@
 package com.alex.messenger.auth.session;
 
+import com.alex.messenger.auth.AuthSecurityEventService;
 import com.alex.messenger.auth.dto.UpdatePushTokenRequest;
 import com.alex.messenger.auth.dto.UserSessionResponse;
 import com.alex.messenger.user.UserRepository;
@@ -20,13 +21,16 @@ public class UserSessionService {
 
     private static final Duration TOUCH_INTERVAL = Duration.ofMinutes(1);
     private static final Duration ONLINE_ACTIVITY_WINDOW = Duration.ofMinutes(2);
+    private static final int SECURITY_EVENT_DETAILS_MAX_LENGTH = 500;
 
     private final UserSessionRepository userSessionRepository;
     private final UserRepository userRepository;
+    private final AuthSecurityEventService authSecurityEventService;
 
     @Transactional
     public UUID createSession(UUID userId, CreateUserSessionCommand command) {
         Instant now = Instant.now();
+        List<UserSessionEntity> recentSessions = userSessionRepository.findTop5ByUserIdAndRevokedAtIsNullOrderByLastActiveAtDesc(userId);
         UserSessionEntity session = new UserSessionEntity();
         session.setUserId(userId);
         session.setDeviceName(normalizeDeviceName(command.deviceName(), command.platform()));
@@ -42,6 +46,20 @@ public class UserSessionService {
         session.setTrustedAt(Boolean.TRUE.equals(command.trustedSession()) ? command.trustedAt() : null);
         UUID sessionId = userSessionRepository.save(session).getId();
         userRepository.touchLastSeenAt(userId, now);
+        if (isSuspiciousLogin(session, recentSessions)) {
+            authSecurityEventService.recordEvent(
+                    userId,
+                    sessionId,
+                    "SUSPICIOUS_LOGIN",
+                    "WARN",
+                    session.getIpAddress(),
+                    session.getUserAgent(),
+                    session.getDeviceName(),
+                    session.getPlatform(),
+                    session.getAppVersion(),
+                    truncate("New session differs from recent active devices or IP addresses", SECURITY_EVENT_DETAILS_MAX_LENGTH)
+            );
+        }
         return sessionId;
     }
 
@@ -129,16 +147,56 @@ public class UserSessionService {
         if (userSessionRepository.revoke(targetSessionId, userId, Instant.now()) == 0) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Session not found");
         }
+        authSecurityEventService.recordEvent(
+                userId,
+                targetSessionId,
+                "SESSION_REVOKED",
+                "INFO",
+                null,
+                null,
+                null,
+                null,
+                null,
+                "User revoked a session"
+        );
     }
 
     @Transactional
     public void revokeOthers(UUID userId, UUID currentSessionId) {
-        userSessionRepository.revokeOthers(userId, currentSessionId, Instant.now());
+        int revokedSessions = userSessionRepository.revokeOthers(userId, currentSessionId, Instant.now());
+        if (revokedSessions > 0) {
+            authSecurityEventService.recordEvent(
+                    userId,
+                    currentSessionId,
+                    "SESSIONS_REVOKED",
+                    "INFO",
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    "Revoked %d other sessions".formatted(revokedSessions)
+            );
+        }
     }
 
     @Transactional
     public void revokeAll(UUID userId) {
-        userSessionRepository.revokeAllForUser(userId, Instant.now());
+        int revokedSessions = userSessionRepository.revokeAllForUser(userId, Instant.now());
+        if (revokedSessions > 0) {
+            authSecurityEventService.recordEvent(
+                    userId,
+                    null,
+                    "ALL_SESSIONS_REVOKED",
+                    "WARN",
+                    null,
+                    null,
+                    null,
+                    null,
+                    null,
+                    "Revoked %d sessions".formatted(revokedSessions)
+            );
+        }
     }
 
     @Transactional(readOnly = true)
@@ -252,5 +310,33 @@ public class UserSessionService {
     private String normalizeAuthMethod(String authMethod) {
         String normalized = normalizeNullable(authMethod, 32);
         return normalized != null ? normalized.toUpperCase(Locale.ROOT) : "LEGACY_LOGIN";
+    }
+
+    private boolean isSuspiciousLogin(UserSessionEntity session, List<UserSessionEntity> recentSessions) {
+        if (recentSessions == null || recentSessions.isEmpty()) {
+            return false;
+        }
+        for (UserSessionEntity recentSession : recentSessions) {
+            if (recentSession == null) {
+                continue;
+            }
+            boolean sameIp = recentSession.getIpAddress() != null
+                    && recentSession.getIpAddress().equalsIgnoreCase(String.valueOf(session.getIpAddress()));
+            boolean sameDevice = recentSession.getDeviceName() != null
+                    && recentSession.getDeviceName().equalsIgnoreCase(String.valueOf(session.getDeviceName()))
+                    && recentSession.getPlatform() != null
+                    && recentSession.getPlatform().equalsIgnoreCase(String.valueOf(session.getPlatform()));
+            if (sameIp || sameDevice) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String truncate(String value, int maxLength) {
+        if (value == null || value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength);
     }
 }

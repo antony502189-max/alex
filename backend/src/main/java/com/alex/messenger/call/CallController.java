@@ -51,6 +51,12 @@ public class CallController {
         return ResponseEntity.ok(callService.getActiveCalls(CurrentUser.id()));
     }
 
+    @GetMapping("/{callId}")
+    public ResponseEntity<CallSessionResponse> getCall(@PathVariable UUID callId) {
+        featureFlagService.requireCallsEnabled();
+        return ResponseEntity.ok(callService.getCall(CurrentUser.id(), callId));
+    }
+
     @GetMapping("/recent")
     public ResponseEntity<List<CallHistoryEntryResponse>> getRecentCalls(
             @RequestParam(defaultValue = "50") int limit
@@ -62,7 +68,7 @@ public class CallController {
 
     @GetMapping("/links")
     public ResponseEntity<List<CallJoinLinkResponse>> getJoinLinks(@RequestParam UUID chatId) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.getJoinLinks(CurrentUser.id(), chatId));
     }
 
@@ -70,13 +76,13 @@ public class CallController {
     public ResponseEntity<CallJoinLinkResponse> createJoinLink(
             @Valid @RequestBody CreateCallJoinLinkRequest request
     ) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.createJoinLink(CurrentUser.id(), request));
     }
 
     @PostMapping("/links/{token}/join")
     public ResponseEntity<CallSessionResponse> joinByLink(@PathVariable String token) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.joinByLink(CurrentUser.id(), token));
     }
 
@@ -119,7 +125,7 @@ public class CallController {
             @RequestParam(defaultValue = "50") int limit
     ) {
         int validatedLimit = requireLimit(limit, 100);
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.listComments(CurrentUser.id(), callId, validatedLimit));
     }
 
@@ -128,7 +134,7 @@ public class CallController {
             @PathVariable UUID callId,
             @Valid @RequestBody(required = false) CreateCallCommentRequest request
     ) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.createComment(CurrentUser.id(), callId, request));
     }
 
@@ -138,7 +144,7 @@ public class CallController {
             @RequestParam(defaultValue = "50") int limit
     ) {
         int validatedLimit = requireLimit(limit, 100);
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.listReactions(CurrentUser.id(), callId, validatedLimit));
     }
 
@@ -147,7 +153,7 @@ public class CallController {
             @PathVariable UUID callId,
             @Valid @RequestBody(required = false) CreateCallReactionRequest request
     ) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.createReaction(CurrentUser.id(), callId, request));
     }
 
@@ -157,31 +163,31 @@ public class CallController {
             @PathVariable UUID userId,
             @Valid @RequestBody UpdateCallParticipantModerationRequest request
     ) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.moderateParticipant(CurrentUser.id(), callId, userId, request));
     }
 
     @PostMapping("/{callId}/screen-share/start")
     public ResponseEntity<CallSessionResponse> startScreenShare(@PathVariable UUID callId) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.setScreenSharing(CurrentUser.id(), callId, true));
     }
 
     @PostMapping("/{callId}/screen-share/stop")
     public ResponseEntity<CallSessionResponse> stopScreenShare(@PathVariable UUID callId) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.setScreenSharing(CurrentUser.id(), callId, false));
     }
 
     @PostMapping("/{callId}/hand-raise")
     public ResponseEntity<CallSessionResponse> raiseHand(@PathVariable UUID callId) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.setHandRaised(CurrentUser.id(), callId, true));
     }
 
     @PostMapping("/{callId}/hand-lower")
     public ResponseEntity<CallSessionResponse> lowerHand(@PathVariable UUID callId) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.setHandRaised(CurrentUser.id(), callId, false));
     }
 
@@ -199,14 +205,19 @@ public class CallController {
 
     @PostMapping("/{callId}/recording/start")
     public ResponseEntity<CallSessionResponse> startRecording(@PathVariable UUID callId) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.setRecording(CurrentUser.id(), callId, true));
     }
 
     @PostMapping("/{callId}/recording/stop")
     public ResponseEntity<CallSessionResponse> stopRecording(@PathVariable UUID callId) {
-        featureFlagService.requireCallsEnabled();
+        requireGroupCallSurfaceEnabled();
         return ResponseEntity.ok(callService.setRecording(CurrentUser.id(), callId, false));
+    }
+
+    private void requireGroupCallSurfaceEnabled() {
+        featureFlagService.requireCallsEnabled();
+        featureFlagService.requireGroupCallsEnabled();
     }
 
     private int requireLimit(int limit, int max) {

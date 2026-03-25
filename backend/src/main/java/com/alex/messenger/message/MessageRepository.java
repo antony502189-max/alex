@@ -14,6 +14,12 @@ public interface MessageRepository extends CassandraRepository<MessageEntity, Me
     @Query("SELECT * FROM messages_by_chat_v2 WHERE chat_id = ?0 AND message_id < maxTimeuuid(?1) LIMIT ?2")
     List<MessageEntity> findRecentByChatIdBefore(UUID chatId, Instant before, int limit);
 
+    @Query("SELECT * FROM messages_by_chat_v2 WHERE chat_id = ?0 AND message_id <= ?1 LIMIT ?2")
+    List<MessageEntity> findRecentByChatIdAtOrBeforeMessageId(UUID chatId, UUID atOrBeforeMessageId, int limit);
+
+    @Query("SELECT * FROM messages_by_chat_v2 WHERE chat_id = ?0 AND message_id < ?1 LIMIT ?2")
+    List<MessageEntity> findRecentByChatIdBeforeMessageId(UUID chatId, UUID beforeMessageId, int limit);
+
     @Query("SELECT * FROM messages_by_chat_v2 WHERE chat_id = ?0")
     List<MessageEntity> findAllByChatId(UUID chatId);
 

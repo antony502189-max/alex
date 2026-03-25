@@ -1,5 +1,6 @@
 package com.alex.messenger.message;
 
+import com.alex.messenger.abuse.AbuseProtectionService;
 import com.alex.messenger.attachment.AttachmentService;
 import com.alex.messenger.auth.session.UserSessionService;
 import com.alex.messenger.bot.BotService;
@@ -15,6 +16,7 @@ import com.datastax.oss.driver.api.core.uuid.Uuids;
 import com.alex.messenger.message.dto.ChatMessageResponse;
 import com.alex.messenger.message.dto.CreateRepeatingMessageRequest;
 import com.alex.messenger.message.dto.CreatePollMessageRequest;
+import com.alex.messenger.message.dto.DeleteMessageRequest;
 import com.alex.messenger.message.dto.EditMessageRequest;
 import com.alex.messenger.message.dto.ForwardMessageRequest;
 import com.alex.messenger.message.dto.MessageAttachmentResponse;
@@ -22,9 +24,11 @@ import com.alex.messenger.message.dto.MessageContactCardPayload;
 import com.alex.messenger.message.dto.MessageLiveLocationPayload;
 import com.alex.messenger.message.dto.MessageLocationPayload;
 import com.alex.messenger.message.dto.MessageReactionSummary;
+import com.alex.messenger.message.dto.MessageReportResponse;
 import com.alex.messenger.message.dto.MessageServicePayload;
 import com.alex.messenger.message.dto.MessageTextEntityPayload;
 import com.alex.messenger.message.dto.RepeatingMessageResponse;
+import com.alex.messenger.message.dto.ReportMessageRequest;
 import com.alex.messenger.message.dto.ScheduleMessageRequest;
 import com.alex.messenger.message.dto.ScheduledMessageResponse;
 import com.alex.messenger.message.dto.SearchMessagesResponse;
@@ -44,6 +48,7 @@ import com.alex.messenger.poll.PollService;
 import com.alex.messenger.search.PublicPostSearchService;
 import com.alex.messenger.shared.SearchQueryValidationSupport;
 import com.alex.messenger.sticker.StickerService;
+import com.alex.messenger.sync.UserSyncService;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -65,6 +70,13 @@ import org.springframework.web.server.ResponseStatusException;
 @RequiredArgsConstructor
 public class MessageService {
 
+    private static final java.util.Set<String> MESSAGE_REPORT_CATEGORIES = java.util.Set.of(
+            "SPAM",
+            "VIOLENCE",
+            "FRAUD",
+            "OTHER"
+    );
+
     private record ResolvedReadScope(
             ForumTopicEntity topic,
             UUID threadRootMessageId
@@ -85,6 +97,7 @@ public class MessageService {
     private final MessageTopicRepository messageTopicRepository;
     private final MessageThreadRepository messageThreadRepository;
     private final MessageLookupRepository messageLookupRepository;
+    private final MessageReportRepository messageReportRepository;
     private final MessageReactionService messageReactionService;
     private final MessageExpirationRepository messageExpirationRepository;
     private final ScheduledMessageRepository scheduledMessageRepository;
@@ -97,6 +110,7 @@ public class MessageService {
     private final MessageLiveLocationService messageLiveLocationService;
     private final ChatEncryptionService chatEncryptionService;
     private final MessageContentCodec messageContentCodec;
+    private final MessageLinkPreviewService messageLinkPreviewService;
     private final MessageSearchCorpusService messageSearchCorpusService;
     private final MessageTranslationCacheRepository messageTranslationCacheRepository;
     private final MessageIdempotencyService messageIdempotencyService;
@@ -107,7 +121,9 @@ public class MessageService {
     private final BotService botService;
     private final BotUpdateService botUpdateService;
     private final UserSessionService userSessionService;
+    private final UserSyncService userSyncService;
     private final ApplicationEventPublisher applicationEventPublisher;
+    private final AbuseProtectionService abuseProtectionService;
 
     @Transactional
     public ChatMessageResponse sendMessage(UUID senderId, SendMessageRequest request) {
@@ -121,6 +137,7 @@ public class MessageService {
                 request.liveLocation(),
                 request.contactCard(),
                 request.silent(),
+                request.disableLinkPreview(),
                 attachmentIds,
                 request.stickerId()
         );
@@ -167,6 +184,7 @@ public class MessageService {
                 );
             }
         }
+        abuseProtectionService.assertMessageSendAllowed(senderId, chat.getId());
         List<UUID> recipientIds = chatService.getRecipientIds(chat, senderId);
         content = activateLiveLocationIfNeeded(lookup, content);
 
@@ -183,6 +201,9 @@ public class MessageService {
                 lookup.getTopicId()
         );
         publish(lookup, recipientIds, request.clientMessageId());
+        publishChatSummaryRefresh(senderId, chat.getId(), recipientIds, lookup);
+        recordMessageUsage(senderId, lookup.getStickerId(), attachmentIds);
+        abuseProtectionService.recordMessageSend(senderId, chat.getId());
         botUpdateService.maybeEnqueueIncomingMessage(chat, senderId, lookup);
         botService.maybeReplyToDirectMessage(chat, senderId, lookup);
         publishDirectMessageCreatedEvent(chat, senderId, lookup);
@@ -228,6 +249,7 @@ public class MessageService {
         chatService.updateLastMessageAt(chat, lookup.getCreatedAt());
         chatService.incrementUnreadCounts(chat.getId(), senderId, content, null);
         publish(lookup, recipientIds);
+        publishChatSummaryRefresh(senderId, chat.getId(), recipientIds, lookup);
 
         return toResponse(senderId, lookup, List.of(), List.of());
     }
@@ -262,6 +284,7 @@ public class MessageService {
         chatService.updateLastMessageAt(chat, lookup.getCreatedAt());
         chatService.incrementUnreadCounts(chat.getId(), senderId, content, null);
         publish(lookup, recipientIds);
+        publishChatSummaryRefresh(senderId, chat.getId(), recipientIds, lookup);
 
         return toResponse(senderId, lookup, List.of(), List.of());
     }
@@ -303,6 +326,7 @@ public class MessageService {
                 );
             }
         }
+        abuseProtectionService.assertMessageSendAllowed(senderId, chat.getId());
 
         MessageLookupEntity lookup = buildNewMessage(
                 chat,
@@ -334,6 +358,8 @@ public class MessageService {
                 lookup.getTopicId()
         );
         publish(lookup, recipientIds, request.clientMessageId());
+        publishChatSummaryRefresh(senderId, chat.getId(), recipientIds, lookup);
+        abuseProtectionService.recordMessageSend(senderId, chat.getId());
         if (request.clientMessageId() != null) {
             messageIdempotencyService.markCompleted(senderId, request.clientMessageId(), lookup.getMessageId());
         }
@@ -354,6 +380,7 @@ public class MessageService {
                 request.liveLocation(),
                 request.contactCard(),
                 request.silent(),
+                request.disableLinkPreview(),
                 attachmentIds,
                 request.stickerId()
         );
@@ -402,6 +429,7 @@ public class MessageService {
                 request.liveLocation(),
                 request.contactCard(),
                 request.silent(),
+                request.disableLinkPreview(),
                 attachmentIds,
                 request.stickerId()
         );
@@ -429,6 +457,7 @@ public class MessageService {
                 return toRepeatingResponse(existing);
             }
         }
+        abuseProtectionService.assertMessageSendAllowed(senderId, chat.getId());
 
         EncryptedPayload encryptedPayload = chatEncryptionService.encrypt(
                 chat.getId(),
@@ -456,7 +485,9 @@ public class MessageService {
         try {
             RepeatingMessageRuleEntity savedRule = repeatingMessageRuleRepository.save(rule);
             materializeNextRepeatingOccurrence(savedRule);
-            return toRepeatingResponse(repeatingMessageRuleRepository.save(savedRule));
+            RepeatingMessageResponse response = toRepeatingResponse(repeatingMessageRuleRepository.save(savedRule));
+            abuseProtectionService.recordMessageSend(senderId, chat.getId());
+            return response;
         } catch (DataIntegrityViolationException duplicateRuleRace) {
             if (clientRuleId == null) {
                 throw duplicateRuleRace;
@@ -483,6 +514,7 @@ public class MessageService {
                 request.liveLocation(),
                 request.contactCard(),
                 request.silent(),
+                request.disableLinkPreview(),
                 attachmentIds,
                 request.stickerId()
         );
@@ -633,16 +665,18 @@ public class MessageService {
             chatService.recordMessageSent(chat.getId(), scheduledMessage.getSenderId(), lookup.getCreatedAt());
             linkDiscussionThreadIfNeeded(chat, scheduledMessage.getSenderId(), lookup);
             chatService.updateLastMessageAt(chat, lookup.getCreatedAt());
-            forumTopicService.touchTopic(lookup.getTopicId(), lookup.getCreatedAt());
-            chatService.incrementUnreadCounts(
-                    chat.getId(),
-                    scheduledMessage.getSenderId(),
-                    content,
+        forumTopicService.touchTopic(lookup.getTopicId(), lookup.getCreatedAt());
+        chatService.incrementUnreadCounts(
+                chat.getId(),
+                scheduledMessage.getSenderId(),
+                content,
                     resolveReplyTargetSenderId(scheduledMessage.getReplyToMessageId()),
-                    lookup.getTopicId()
-            );
-            publish(lookup, recipientIds);
-            botUpdateService.maybeEnqueueIncomingMessage(chat, scheduledMessage.getSenderId(), lookup);
+                lookup.getTopicId()
+        );
+        publish(lookup, recipientIds);
+        publishChatSummaryRefresh(scheduledMessage.getSenderId(), chat.getId(), recipientIds, lookup);
+        recordMessageUsage(scheduledMessage.getSenderId(), lookup.getStickerId(), lookup.getAttachmentIds());
+        botUpdateService.maybeEnqueueIncomingMessage(chat, scheduledMessage.getSenderId(), lookup);
             botService.maybeReplyToDirectMessage(chat, scheduledMessage.getSenderId(), lookup);
             publishDirectMessageCreatedEvent(chat, scheduledMessage.getSenderId(), lookup);
 
@@ -672,6 +706,9 @@ public class MessageService {
                 lookup.setDeletedAt(now);
                 persistMessage(lookup);
                 publishExpiredDeletion(lookup);
+                chatService.reconcileUnreadState(lookup.getChatId());
+                refreshChatLastMessageAt(lookup.getChatId());
+                publishChatSummaryRefreshForSystem(lookup.getSenderId(), lookup);
             }
             expiration.setProcessedAt(now);
             messageExpirationRepository.save(expiration);
@@ -711,6 +748,7 @@ public class MessageService {
                 );
             }
         }
+        abuseProtectionService.assertMessageSendAllowed(senderId, chat.getId());
 
         PollEntity poll = pollService.createPoll(chat, senderId, request);
         MessageLookupEntity lookup = buildNewMessage(
@@ -742,6 +780,8 @@ public class MessageService {
                 lookup.getTopicId()
         );
         publish(lookup, recipientIds, request.clientMessageId());
+        publishChatSummaryRefresh(senderId, chat.getId(), recipientIds, lookup);
+        abuseProtectionService.recordMessageSend(senderId, chat.getId());
         botUpdateService.maybeEnqueueIncomingMessage(chat, senderId, lookup);
         botService.maybeReplyToDirectMessage(chat, senderId, lookup);
         publishDirectMessageCreatedEvent(chat, senderId, lookup);
@@ -795,6 +835,7 @@ public class MessageService {
                 );
             }
         }
+        abuseProtectionService.assertMessageSendAllowed(senderId, targetChat.getId());
         List<UUID> forwardedAttachmentIds = attachmentService.cloneAttachmentsToChat(
                 senderId,
                 targetChat.getId(),
@@ -832,6 +873,9 @@ public class MessageService {
                 lookup.getTopicId()
         );
         publish(lookup, recipientIds, request.clientMessageId());
+        publishChatSummaryRefresh(senderId, targetChat.getId(), recipientIds, lookup);
+        recordMessageUsage(senderId, lookup.getStickerId(), lookup.getAttachmentIds());
+        abuseProtectionService.recordMessageSend(senderId, targetChat.getId());
         botUpdateService.maybeEnqueueIncomingMessage(targetChat, senderId, lookup);
         botService.maybeReplyToDirectMessage(targetChat, senderId, lookup);
         publishDirectMessageCreatedEvent(targetChat, senderId, lookup);
@@ -853,13 +897,47 @@ public class MessageService {
         if (lookup.getDeletedAt() != null) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Deleted message cannot be edited");
         }
-        if ("LIVE_LOCATION".equals(decodeMessageContent(lookup).messageType())) {
+        MessageTextContent existingContent = decodeMessageContent(lookup);
+        if ("LIVE_LOCATION".equals(existingContent.messageType())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Use live location update endpoints for this message");
         }
+        if (request == null
+                || (request.text() == null
+                && request.caption() == null
+                && request.entities() == null
+                && request.disableLinkPreview() == null)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Provide text, caption, entities or disableLinkPreview");
+        }
 
-        MessageTextContent content = messageContentCodec.normalize(request.text().trim(), request.entities());
-        if (content.text().isBlank()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message text is blank");
+        String updatedText = request.text() != null ? request.text().trim() : existingContent.text();
+        String updatedCaption = request.caption() != null ? request.caption().trim() : existingContent.caption();
+        List<MessageTextEntityPayload> updatedEntities = request.entities() != null ? request.entities() : existingContent.entities();
+        if (request.text() == null
+                && request.caption() != null
+                && (lookup.getStickerId() != null
+                || (lookup.getAttachmentIds() != null && !lookup.getAttachmentIds().isEmpty())
+                || existingContent.location() != null
+                || existingContent.liveLocation() != null
+                || existingContent.contactCard() != null)) {
+            updatedText = updatedCaption;
+        }
+        boolean disableLinkPreview = request.disableLinkPreview() != null
+                ? request.disableLinkPreview()
+                : existingContent.disableLinkPreview();
+        MessageTextContent content = messageContentCodec.normalize(
+                updatedText,
+                updatedEntities,
+                existingContent.messageType(),
+                updatedCaption,
+                existingContent.location(),
+                existingContent.liveLocation(),
+                existingContent.contactCard(),
+                existingContent.serviceMessage(),
+                existingContent.silent(),
+                disableLinkPreview
+        );
+        if (isMessageEmpty(content, lookup.getAttachmentIds(), lookup.getStickerId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message must contain text, attachments or a sticker");
         }
 
         EncryptedPayload encryptedPayload = chatEncryptionService.encrypt(
@@ -940,35 +1018,63 @@ public class MessageService {
 
     @Transactional
     public ChatMessageResponse deleteMessage(UUID senderId, UUID messageId) {
-        MessageLookupEntity lookup = getOwnedMessage(senderId, messageId);
+        return deleteMessage(senderId, messageId, new DeleteMessageRequest(true, null));
+    }
+
+    @Transactional
+    public ChatMessageResponse deleteMessage(UUID requesterId, UUID messageId, DeleteMessageRequest request) {
+        MessageLookupEntity lookup = getAccessibleMessage(requesterId, messageId);
+        boolean senderOwnsMessage = lookup.getSenderId().equals(requesterId);
+        boolean moderatorDelete = !senderOwnsMessage && chatService.hasMessageModerationPermission(requesterId, lookup.getChatId());
+        if (!senderOwnsMessage && !moderatorDelete) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Only sender or moderators can delete the message");
+        }
         if (lookup.getDeletedAt() == null) {
-            MessageTextContent content = decodeMessageContent(lookup);
-            if ("LIVE_LOCATION".equals(content.messageType()) && content.liveLocation() != null) {
-                try {
-                    messageLiveLocationService.stop(lookup);
-                } catch (ResponseStatusException ignored) {
-                    // Deletion should still succeed even if the live-location state is already gone.
-                }
+            applyDeletion(requesterId, lookup);
+            String auditMessage = moderatorDelete
+                    ? "Moderator deleted a message"
+                    : "Deleted a message";
+            String normalizedAdminReason = normalizeAdminReason(request != null ? request.adminReason() : null);
+            if (normalizedAdminReason != null) {
+                auditMessage = auditMessage + ": " + normalizedAdminReason;
             }
-            lookup.setDeletedAt(Instant.now());
-            persistMessage(lookup);
-            publishToChatMembers(senderId, lookup);
             chatAdminLogService.log(
                     lookup.getChatId(),
-                    senderId,
-                    null,
+                    requesterId,
+                    senderOwnsMessage ? null : lookup.getSenderId(),
                     "MESSAGE_DELETED",
-                    "Deleted a message",
+                    auditMessage,
                     messageId,
-                null
+                    null
             );
         }
-        botUpdateService.maybeEnqueueMessageDeleted(chatService.getOwnedChat(senderId, lookup.getChatId()), senderId, lookup);
+        botUpdateService.maybeEnqueueMessageDeleted(chatService.getOwnedChat(requesterId, lookup.getChatId()), requesterId, lookup);
         return toResponse(
-                senderId,
+                requesterId,
                 lookup,
                 messageReactionService.getSummaries(lookup.getMessageId()),
-                getAttachmentResponses(senderId, lookup.getAttachmentIds())
+                getAttachmentResponses(requesterId, lookup.getAttachmentIds())
+        );
+    }
+
+    @Transactional
+    public MessageReportResponse reportMessage(UUID requesterId, UUID messageId, ReportMessageRequest request) {
+        MessageLookupEntity lookup = getAccessibleMessage(requesterId, messageId);
+        abuseProtectionService.assertMessageReportAllowed(requesterId);
+        MessageReportEntity report = new MessageReportEntity();
+        report.setReporterUserId(requesterId);
+        report.setMessageId(messageId);
+        report.setChatId(lookup.getChatId());
+        report.setCategory(normalizeMessageReportCategory(request != null ? request.category() : null));
+        report.setDetails(normalizeReportDetails(request != null ? request.details() : null));
+        MessageReportEntity saved = messageReportRepository.save(report);
+        abuseProtectionService.recordMessageReport(requesterId, lookup.getChatId());
+        return new MessageReportResponse(
+                saved.getId(),
+                saved.getMessageId(),
+                saved.getChatId(),
+                saved.getCategory(),
+                saved.getCreatedAt()
         );
     }
 
@@ -1882,9 +1988,12 @@ public class MessageService {
                 return toScheduledResponse(senderId, existing);
             }
         }
+        abuseProtectionService.assertMessageSendAllowed(senderId, expectedChatId);
 
         try {
-            return toScheduledResponse(senderId, scheduledMessageRepository.save(scheduledMessage));
+            ScheduledMessageEntity saved = scheduledMessageRepository.save(scheduledMessage);
+            abuseProtectionService.recordMessageSend(senderId, expectedChatId);
+            return toScheduledResponse(senderId, saved);
         } catch (DataIntegrityViolationException duplicateScheduleRace) {
             if (clientMessageId == null) {
                 throw duplicateScheduleRace;
@@ -2012,6 +2121,7 @@ public class MessageService {
         MessageTextContent content = lookup.getDeletedAt() != null
                 ? new MessageTextContent("", List.of())
                 : decodeMessageContent(lookup);
+        var linkPreview = lookup.getDeletedAt() != null ? null : messageLinkPreviewService.resolvePreview(content);
         ChatService.MessageAuthorView author = chatService.resolveMessageAuthor(
                 requesterId,
                 lookup.getChatId(),
@@ -2064,7 +2174,9 @@ public class MessageService {
                 lookup.getReadAt(),
                 lookup.getExpiresAt(),
                 lookup.getEditedAt(),
-                lookup.getDeletedAt()
+                lookup.getDeletedAt(),
+                content.disableLinkPreview(),
+                linkPreview
         );
     }
 
@@ -2077,6 +2189,7 @@ public class MessageService {
         MessageTextContent content = message.getDeletedAt() != null
                 ? new MessageTextContent("", List.of())
                 : decodeMessageContent(message);
+        var linkPreview = message.getDeletedAt() != null ? null : messageLinkPreviewService.resolvePreview(content);
         ChatService.MessageAuthorView author = chatService.resolveMessageAuthor(
                 requesterId,
                 message.getKey().getChatId(),
@@ -2129,7 +2242,9 @@ public class MessageService {
                 message.getReadAt(),
                 message.getExpiresAt(),
                 message.getEditedAt(),
-                message.getDeletedAt()
+                message.getDeletedAt(),
+                content.disableLinkPreview(),
+                linkPreview
         );
     }
 
@@ -2142,6 +2257,7 @@ public class MessageService {
         MessageTextContent content = message.getDeletedAt() != null
                 ? new MessageTextContent("", List.of())
                 : decodeMessageContent(message);
+        var linkPreview = message.getDeletedAt() != null ? null : messageLinkPreviewService.resolvePreview(content);
         ChatService.MessageAuthorView author = chatService.resolveMessageAuthor(
                 requesterId,
                 message.getChatId(),
@@ -2194,7 +2310,9 @@ public class MessageService {
                 message.getReadAt(),
                 message.getExpiresAt(),
                 message.getEditedAt(),
-                message.getDeletedAt()
+                message.getDeletedAt(),
+                content.disableLinkPreview(),
+                linkPreview
         );
     }
 
@@ -2207,6 +2325,7 @@ public class MessageService {
         MessageTextContent content = message.getDeletedAt() != null
                 ? new MessageTextContent("", List.of())
                 : decodeMessageContent(message);
+        var linkPreview = message.getDeletedAt() != null ? null : messageLinkPreviewService.resolvePreview(content);
         ChatService.MessageAuthorView author = chatService.resolveMessageAuthor(
                 requesterId,
                 message.getChatId(),
@@ -2259,7 +2378,9 @@ public class MessageService {
                 message.getReadAt(),
                 message.getExpiresAt(),
                 message.getEditedAt(),
-                message.getDeletedAt()
+                message.getDeletedAt(),
+                content.disableLinkPreview(),
+                linkPreview
         );
     }
 
@@ -2553,6 +2674,7 @@ public class MessageService {
             MessageLiveLocationPayload liveLocation,
             MessageContactCardPayload contactCard,
             Boolean silent,
+            Boolean disableLinkPreview,
             List<UUID> attachmentIds,
             UUID stickerId
     ) {
@@ -2595,7 +2717,8 @@ public class MessageService {
                 liveLocation,
                 contactCard,
                 null,
-                silent
+                silent,
+                disableLinkPreview
         );
     }
 
@@ -2773,11 +2896,79 @@ public class MessageService {
                 lookup.getDeletedAt()
         );
         chatMessagePublisher.publish(event);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", lookup.getChatId());
+        payload.put("messageId", lookup.getMessageId());
+        payload.put("clientMessageId", clientMessageId);
+        payload.put("senderId", lookup.getSenderId());
+        payload.put("recipientIds", recipientIds);
+        payload.put("topicId", lookup.getTopicId());
+        payload.put("threadRootMessageId", lookup.getThreadRootMessageId());
+        payload.put("createdAt", lookup.getCreatedAt());
+        payload.put("editedAt", lookup.getEditedAt());
+        payload.put("deletedAt", lookup.getDeletedAt());
+        userSyncService.recordForUsers(
+                userSyncService.participantsIncludingActor(lookup.getSenderId(), recipientIds),
+                "MESSAGE_UPSERT",
+                "MESSAGE",
+                lookup.getMessageId(),
+                lookup.getChatId(),
+                payload
+        );
+        recordCanonicalMessageDeletedSync(
+                userSyncService.participantsIncludingActor(lookup.getSenderId(), recipientIds),
+                lookup,
+                payload
+        );
     }
 
     private void publishToChatMembers(UUID requesterId, MessageLookupEntity lookup) {
+        publishToChatMembers(requesterId, lookup, true);
+    }
+
+    private void publishToChatMembers(UUID requesterId, MessageLookupEntity lookup, boolean publishChatSummaryRefresh) {
         ChatEntity chat = chatService.getOwnedChat(requesterId, lookup.getChatId());
-        publish(lookup, chatService.getRecipientIds(chat, requesterId));
+        List<UUID> recipientIds = chatService.getRecipientIds(chat, requesterId);
+        publish(lookup, recipientIds);
+        if (!requesterId.equals(lookup.getSenderId())) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("chatId", lookup.getChatId());
+            payload.put("messageId", lookup.getMessageId());
+            payload.put("senderId", lookup.getSenderId());
+            payload.put("actorId", requesterId);
+            payload.put("editedAt", lookup.getEditedAt());
+            payload.put("deletedAt", lookup.getDeletedAt());
+            userSyncService.recordForUsers(
+                    List.of(requesterId),
+                    "MESSAGE_UPSERT",
+                    "MESSAGE",
+                    lookup.getMessageId(),
+                    lookup.getChatId(),
+                    payload
+            );
+            recordCanonicalMessageDeletedSync(List.of(requesterId), lookup, payload);
+        }
+        if (publishChatSummaryRefresh) {
+            publishChatSummaryRefresh(requesterId, lookup.getChatId(), recipientIds, lookup);
+        }
+    }
+
+    private void recordCanonicalMessageDeletedSync(
+            java.util.Collection<UUID> userIds,
+            MessageLookupEntity lookup,
+            Map<String, Object> payload
+    ) {
+        if (lookup == null || lookup.getDeletedAt() == null || userIds == null || userIds.isEmpty()) {
+            return;
+        }
+        userSyncService.recordForUsers(
+                userIds,
+                "MESSAGE_DELETED",
+                "MESSAGE",
+                lookup.getMessageId(),
+                lookup.getChatId(),
+                payload != null ? payload : Map.of()
+        );
     }
 
     private void publishExpiredDeletion(MessageLookupEntity lookup) {
@@ -2809,6 +3000,89 @@ public class MessageService {
         return messageLookupRepository.findById(replyToMessageId)
                 .map(MessageLookupEntity::getSenderId)
                 .orElse(null);
+    }
+
+    private void recordMessageUsage(UUID userId, UUID stickerId, List<UUID> attachmentIds) {
+        stickerService.recordUsage(userId, stickerId);
+        stickerService.recordGifUsage(userId, attachmentIds);
+    }
+
+    private void applyDeletion(UUID actorId, MessageLookupEntity lookup) {
+        MessageTextContent content = decodeMessageContent(lookup);
+        if ("LIVE_LOCATION".equals(content.messageType()) && content.liveLocation() != null) {
+            try {
+                messageLiveLocationService.stop(lookup);
+            } catch (ResponseStatusException ignored) {
+                // Best-effort shutdown for live location state.
+            }
+        }
+        lookup.setDeletedAt(Instant.now());
+        persistMessage(lookup);
+        publishToChatMembers(actorId, lookup, false);
+        chatService.reconcileUnreadState(lookup.getChatId());
+        refreshChatLastMessageAt(lookup.getChatId());
+        publishChatSummaryRefreshForSystem(actorId, lookup);
+    }
+
+    private void refreshChatLastMessageAt(UUID chatId) {
+        ChatEntity chat = chatService.getChat(chatId);
+        Instant lastMessageAt = messageRepository.findRecentByChatId(chatId, 200).stream()
+                .filter(message -> message.getDeletedAt() == null)
+                .map(MessageEntity::getCreatedAt)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(null);
+        chatService.updateLastMessageAt(chat, lastMessageAt);
+    }
+
+    private void publishChatSummaryRefresh(UUID actorId, UUID chatId, List<UUID> recipientIds, MessageLookupEntity lookup) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("messageId", lookup.getMessageId());
+        payload.put("actorUserId", actorId);
+        payload.put("senderId", lookup.getSenderId());
+        payload.put("topicId", lookup.getTopicId());
+        payload.put("createdAt", lookup.getCreatedAt());
+        payload.put("editedAt", lookup.getEditedAt());
+        payload.put("deletedAt", lookup.getDeletedAt());
+        chatService.publishChatUpdate(
+                actorId,
+                chatId,
+                userSyncService.participantsIncludingActor(actorId, recipientIds),
+                payload
+        );
+    }
+
+    private void publishChatSummaryRefreshForSystem(UUID actorId, MessageLookupEntity lookup) {
+        ChatEntity chat = chatService.getChat(lookup.getChatId());
+        publishChatSummaryRefresh(actorId, lookup.getChatId(), chatService.getRecipientIdsForSystem(chat, actorId), lookup);
+    }
+
+    private String normalizeMessageReportCategory(String value) {
+        String normalized = value != null ? value.trim().toUpperCase() : "OTHER";
+        if (!MESSAGE_REPORT_CATEGORIES.contains(normalized)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported report category");
+        }
+        return normalized;
+    }
+
+    private String normalizeReportDetails(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        return normalized.isBlank() ? null : normalized;
+    }
+
+    private String normalizeAdminReason(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        if (normalized.isBlank()) {
+            return null;
+        }
+        return normalized.substring(0, Math.min(255, normalized.length()));
     }
 
     private MessageLookupEntity getOwnedMessage(UUID senderId, UUID messageId) {

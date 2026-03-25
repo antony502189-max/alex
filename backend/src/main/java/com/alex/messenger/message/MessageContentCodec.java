@@ -19,7 +19,7 @@ import org.springframework.web.server.ResponseStatusException;
 @Component
 public class MessageContentCodec {
 
-    private static final int PAYLOAD_VERSION = 4;
+    private static final int PAYLOAD_VERSION = 5;
     private static final Set<String> SUPPORTED_TYPES = Set.of(
             "BOLD",
             "ITALIC",
@@ -58,7 +58,7 @@ public class MessageContentCodec {
     }
 
     public MessageTextContent normalize(String text, List<MessageTextEntityPayload> entities) {
-        return normalize(text, entities, null, null, null, null, null, null, false);
+        return normalize(text, entities, null, null, null, null, null, null, false, false);
     }
 
     public MessageTextContent normalize(
@@ -71,7 +71,7 @@ public class MessageContentCodec {
             MessageServicePayload serviceMessage,
             Boolean silent
     ) {
-        return normalize(text, entities, messageType, caption, location, null, contactCard, serviceMessage, silent);
+        return normalize(text, entities, messageType, caption, location, null, contactCard, serviceMessage, silent, false);
     }
 
     public MessageTextContent normalize(
@@ -85,6 +85,32 @@ public class MessageContentCodec {
             MessageServicePayload serviceMessage,
             Boolean silent
     ) {
+        return normalize(
+                text,
+                entities,
+                messageType,
+                caption,
+                location,
+                liveLocation,
+                contactCard,
+                serviceMessage,
+                silent,
+                false
+        );
+    }
+
+    public MessageTextContent normalize(
+            String text,
+            List<MessageTextEntityPayload> entities,
+            String messageType,
+            String caption,
+            MessageLocationPayload location,
+            MessageLiveLocationPayload liveLocation,
+            MessageContactCardPayload contactCard,
+            MessageServicePayload serviceMessage,
+            Boolean silent,
+            Boolean disableLinkPreview
+    ) {
         String normalizedText = text != null ? text : "";
         List<MessageTextEntityPayload> normalizedEntities = normalizeEntities(normalizedText, entities);
         String normalizedMessageType = normalizeMessageType(messageType);
@@ -94,6 +120,7 @@ public class MessageContentCodec {
         MessageServicePayload normalizedServiceMessage = normalizeServiceMessage(serviceMessage);
         String normalizedCaption = trimToNull(caption);
         boolean normalizedSilent = Boolean.TRUE.equals(silent);
+        boolean normalizedDisableLinkPreview = Boolean.TRUE.equals(disableLinkPreview);
 
         if ("LOCATION".equals(normalizedMessageType) && normalizedLocation == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Location payload is required");
@@ -117,7 +144,8 @@ public class MessageContentCodec {
                 normalizedLiveLocation,
                 normalizedContactCard,
                 normalizedServiceMessage,
-                normalizedSilent
+                normalizedSilent,
+                normalizedDisableLinkPreview
         );
     }
 
@@ -131,7 +159,8 @@ public class MessageContentCodec {
                 content.liveLocation(),
                 content.contactCard(),
                 content.serviceMessage(),
-                content.silent()
+                content.silent(),
+                content.disableLinkPreview()
         );
         try {
             return objectMapper.writeValueAsString(
@@ -145,7 +174,8 @@ public class MessageContentCodec {
                             normalized.liveLocation(),
                             normalized.contactCard(),
                             normalized.serviceMessage(),
-                            normalized.silent()
+                            normalized.silent(),
+                            normalized.disableLinkPreview()
                     )
             );
         } catch (Exception exception) {
@@ -169,7 +199,7 @@ public class MessageContentCodec {
             }
 
             int version = root.path("version").asInt(-1);
-            if (version != 1 && version != 2 && version != 3 && version != PAYLOAD_VERSION) {
+            if (version != 1 && version != 2 && version != 3 && version != 4 && version != PAYLOAD_VERSION) {
                 return new MessageTextContent(rawPayload, List.of());
             }
 
@@ -216,7 +246,19 @@ public class MessageContentCodec {
                     ? objectMapper.treeToValue(root.path("serviceMessage"), MessageServicePayload.class)
                     : null;
             boolean silent = root.path("silent").asBoolean(false);
-            return normalize(text, entities, messageType, caption, location, liveLocation, contactCard, serviceMessage, silent);
+            boolean disableLinkPreview = root.path("disableLinkPreview").asBoolean(false);
+            return normalize(
+                    text,
+                    entities,
+                    messageType,
+                    caption,
+                    location,
+                    liveLocation,
+                    contactCard,
+                    serviceMessage,
+                    silent,
+                    disableLinkPreview
+            );
         } catch (Exception ignored) {
             return new MessageTextContent(rawPayload, List.of());
         }
@@ -417,7 +459,8 @@ public class MessageContentCodec {
             MessageLiveLocationPayload liveLocation,
             MessageContactCardPayload contactCard,
             MessageServicePayload serviceMessage,
-            boolean silent
+            boolean silent,
+            boolean disableLinkPreview
     ) {
     }
 }

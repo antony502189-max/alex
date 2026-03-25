@@ -3,12 +3,15 @@ package com.alex.messenger.chat;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.alex.messenger.abuse.AbuseProtectionService;
 import com.alex.messenger.attachment.AttachmentEntity;
 import com.alex.messenger.attachment.AttachmentRepository;
 import com.alex.messenger.chat.draft.ChatDraftId;
@@ -25,6 +28,7 @@ import com.alex.messenger.message.MessageReactionRepository;
 import com.alex.messenger.message.MessageRepository;
 import com.alex.messenger.message.MessageLookupEntity;
 import com.alex.messenger.message.MessageLookupRepository;
+import com.alex.messenger.message.MessageStorageService;
 import com.alex.messenger.message.MessagePrimaryKey;
 import com.alex.messenger.message.MessageTextContent;
 import com.alex.messenger.chat.dto.AddMembersRequest;
@@ -36,6 +40,7 @@ import com.alex.messenger.chat.dto.TypingEventResponse;
 import com.alex.messenger.message.dto.MessageTextEntityPayload;
 import com.alex.messenger.media.PhotoAccess;
 import com.alex.messenger.search.PublicPostSearchService;
+import com.alex.messenger.sync.UserSyncService;
 import com.alex.messenger.user.BlockedUserRepository;
 import com.alex.messenger.user.UserEntity;
 import com.alex.messenger.user.UserPresenceService;
@@ -50,6 +55,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -81,6 +88,9 @@ class ChatServiceTest {
     private ForumTopicRepository forumTopicRepository;
 
     @Mock
+    private ChatReportRepository chatReportRepository;
+
+    @Mock
     private ChatAdminLogService chatAdminLogService;
 
     @Mock
@@ -94,6 +104,9 @@ class ChatServiceTest {
 
     @Mock
     private AttachmentRepository attachmentRepository;
+
+    @Mock
+    private MessageStorageService messageStorageService;
 
     @Mock
     private ChatEncryptionService chatEncryptionService;
@@ -116,6 +129,15 @@ class ChatServiceTest {
     @Mock
     private PublicPostSearchService publicPostSearchService;
 
+    @Mock
+    private UserSyncService userSyncService;
+
+    @Mock
+    private ApplicationEventPublisher applicationEventPublisher;
+
+    @Mock
+    private AbuseProtectionService abuseProtectionService;
+
     private ChatService chatService;
 
     @BeforeEach
@@ -129,18 +151,23 @@ class ChatServiceTest {
                 chatDraftRepository,
                 chatInviteLinkRepository,
                 forumTopicRepository,
+                chatReportRepository,
                 chatAdminLogService,
                 messageRepository,
                 messageLookupRepository,
                 messageReactionRepository,
                 attachmentRepository,
+                messageStorageService,
                 chatEncryptionService,
                 messageContentCodec,
                 userRepository,
                 blockedUserRepository,
                 profilePhotoService,
                 userPresenceService,
-                publicPostSearchService
+                publicPostSearchService,
+                userSyncService,
+                applicationEventPublisher,
+                abuseProtectionService
         );
         lenient().when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
     }
@@ -262,6 +289,363 @@ class ChatServiceTest {
         assertThat(exception).isNotNull();
         assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(exception.getReason()).isEqualTo("limit must be between 1 and 50");
+    }
+
+    @Test
+    void createGroupChatRejectsWhenChatCreationThrottleExceeded() {
+        UUID requesterId = UUID.randomUUID();
+        UUID memberId = UUID.randomUUID();
+        doThrow(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many chats created recently"))
+                .when(abuseProtectionService)
+                .assertChatCreationAllowed(requesterId);
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.createGroupChat(
+                        requesterId,
+                        new com.alex.messenger.chat.dto.CreateGroupChatRequest(
+                                "Ops room",
+                                null,
+                                null,
+                                false,
+                                false,
+                                List.of(memberId)
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        verify(chatRepository, never()).save(any(ChatEntity.class));
+    }
+
+    @Test
+    void getOrCreateDirectChatPublishesCreatedEventWhenImplicitlyCreatingDirectChat() {
+        UUID requesterId = UUID.fromString("00000000-0000-0000-0000-000000000010");
+        UUID peerId = UUID.fromString("00000000-0000-0000-0000-000000000020");
+        UUID chatId = UUID.randomUUID();
+        Instant createdAt = Instant.parse("2026-03-25T01:00:00Z");
+        UUID lowId = requesterId.compareTo(peerId) <= 0 ? requesterId : peerId;
+        UUID highId = requesterId.compareTo(peerId) <= 0 ? peerId : requesterId;
+
+        when(userRepository.existsById(peerId)).thenReturn(true);
+        when(chatRepository.findByParticipantLowIdAndParticipantHighId(lowId, highId)).thenReturn(Optional.empty());
+        when(chatRepository.save(any(ChatEntity.class))).thenAnswer(invocation -> {
+            ChatEntity chat = invocation.getArgument(0);
+            chat.setId(chatId);
+            chat.setCreatedAt(createdAt);
+            return chat;
+        });
+
+        ChatEntity result = chatService.getOrCreateDirectChat(requesterId, peerId);
+
+        assertThat(result.getId()).isEqualTo(chatId);
+        verify(userSyncService).recordForUsers(
+                eq(List.of(requesterId, peerId)),
+                eq("CHAT_CREATED"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+        verify(userSyncService).recordForUsers(
+                eq(List.of(requesterId, peerId)),
+                eq("CHAT_UPSERT"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_CREATED");
+        assertThat(eventCaptor.getValue().chatId()).isEqualTo(chatId);
+        assertThat(eventCaptor.getValue().userIds()).containsExactly(requesterId, peerId);
+        assertThat(eventCaptor.getValue().removedUserIds()).isEmpty();
+    }
+
+    @Test
+    void getOrCreateDirectChatSkipsCreatedEventWhenDuplicateRaceReturnsExistingChat() {
+        UUID requesterId = UUID.fromString("00000000-0000-0000-0000-000000000030");
+        UUID peerId = UUID.fromString("00000000-0000-0000-0000-000000000040");
+        UUID lowId = requesterId.compareTo(peerId) <= 0 ? requesterId : peerId;
+        UUID highId = requesterId.compareTo(peerId) <= 0 ? peerId : requesterId;
+
+        ChatEntity existingChat = new ChatEntity();
+        existingChat.setId(UUID.randomUUID());
+        existingChat.setChatType("DIRECT");
+        existingChat.setCreatedAt(Instant.parse("2026-03-25T01:05:00Z"));
+        existingChat.setParticipantLowId(lowId);
+        existingChat.setParticipantHighId(highId);
+
+        when(userRepository.existsById(peerId)).thenReturn(true);
+        when(chatRepository.findByParticipantLowIdAndParticipantHighId(lowId, highId))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(existingChat));
+        when(chatRepository.save(any(ChatEntity.class))).thenThrow(new DataIntegrityViolationException("duplicate"));
+
+        ChatEntity result = chatService.getOrCreateDirectChat(requesterId, peerId);
+
+        assertThat(result).isSameAs(existingChat);
+        verify(userSyncService, never()).recordForUsers(
+                any(),
+                eq("CHAT_CREATED"),
+                eq("CHAT"),
+                any(),
+                any(),
+                any()
+        );
+        verify(applicationEventPublisher, never()).publishEvent(any(ChatInboxFanoutEvent.class));
+    }
+
+    @Test
+    void getOrCreateDirectChatPublishesCreatedEventWhenImplicitlyCreatingSavedMessages() {
+        UUID requesterId = UUID.fromString("00000000-0000-0000-0000-000000000050");
+        UUID chatId = UUID.randomUUID();
+        Instant createdAt = Instant.parse("2026-03-25T01:10:00Z");
+
+        when(chatRepository.findByChatTypeAndCreatedBy("SAVED", requesterId)).thenReturn(Optional.empty());
+        when(chatRepository.save(any(ChatEntity.class))).thenAnswer(invocation -> {
+            ChatEntity chat = invocation.getArgument(0);
+            chat.setId(chatId);
+            chat.setCreatedAt(createdAt);
+            return chat;
+        });
+        when(chatMemberRepository.save(any(ChatMemberEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        ChatEntity result = chatService.getOrCreateDirectChat(requesterId, requesterId);
+
+        assertThat(result.getId()).isEqualTo(chatId);
+        verify(userSyncService).recordForUsers(
+                eq(List.of(requesterId)),
+                eq("CHAT_CREATED"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_CREATED");
+        assertThat(eventCaptor.getValue().chatId()).isEqualTo(chatId);
+        assertThat(eventCaptor.getValue().userIds()).containsExactly(requesterId);
+        assertThat(eventCaptor.getValue().removedUserIds()).isEmpty();
+    }
+
+    @Test
+    void leaveChatRejectsOwnerUntilOwnershipIsTransferred() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+
+        ChatMemberEntity membership = member(chatId, requesterId);
+        membership.setRole("OWNER");
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(membership));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.leaveChat(requesterId, chatId),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(exception.getReason()).isEqualTo("Transfer ownership before leaving the chat");
+        verify(chatMemberRepository, never()).delete(any(ChatMemberEntity.class));
+    }
+
+    @Test
+    void markChatUnreadPersistsManualUnreadFlagInSummary() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+        chat.setTitle("Ops room");
+        chat.setCreatedAt(Instant.parse("2026-03-24T10:00:00Z"));
+
+        ChatMemberEntity membership = member(chatId, requesterId);
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(membership));
+        when(chatMemberRepository.save(any(ChatMemberEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(chatDraftRepository.findById(new ChatDraftId(requesterId, chatId))).thenReturn(Optional.empty());
+        when(chatMemberRepository.countByIdChatId(chatId)).thenReturn(3L);
+        when(messageRepository.findRecentByChatId(chatId, 1)).thenReturn(List.of());
+
+        ChatSummaryResponse response = chatService.markChatUnread(requesterId, chatId, true);
+
+        assertThat(membership.getManuallyMarkedUnread()).isTrue();
+        assertThat(response.markedUnread()).isTrue();
+        verify(userSyncService).recordForUsers(
+                any(),
+                eq("CHAT_MARKED_UNREAD"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+        verify(userSyncService).recordForUsers(
+                eq(List.of(requesterId)),
+                eq("CHAT_UPSERT"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_MARKED_UNREAD");
+        assertThat(eventCaptor.getValue().chatId()).isEqualTo(chatId);
+        assertThat(eventCaptor.getValue().userIds()).containsExactly(requesterId);
+    }
+
+    @Test
+    void archiveChatRecordsCanonicalSyncUpsertForRequester() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+        chat.setTitle("Ops room");
+        chat.setCreatedAt(Instant.parse("2026-03-24T10:00:00Z"));
+
+        ChatMemberEntity membership = member(chatId, requesterId);
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(membership));
+        when(chatMemberRepository.save(any(ChatMemberEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(chatDraftRepository.findById(new ChatDraftId(requesterId, chatId))).thenReturn(Optional.empty());
+        when(chatMemberRepository.countByIdChatId(chatId)).thenReturn(3L);
+        when(messageRepository.findRecentByChatId(chatId, 1)).thenReturn(List.of());
+
+        ChatSummaryResponse response = chatService.archiveChat(requesterId, chatId, true);
+
+        assertThat(response.archived()).isTrue();
+        assertThat(membership.getArchived()).isTrue();
+        verify(userSyncService).recordForUsers(
+                eq(List.of(requesterId)),
+                eq("CHAT_UPSERT"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_UPDATED");
+        assertThat(eventCaptor.getValue().userIds()).containsExactly(requesterId);
+    }
+
+    @Test
+    void createInviteLinkRejectsWhenThrottleExceeded() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+
+        ChatMemberEntity membership = member(chatId, requesterId);
+        membership.setRole("OWNER");
+        membership.setCanManageInviteLinks(true);
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(membership));
+        doThrow(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many invite links created recently"))
+                .when(abuseProtectionService)
+                .assertInviteLinkCreationAllowed(requesterId, chatId);
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.createInviteLink(
+                        requesterId,
+                        chatId,
+                        new com.alex.messenger.chat.dto.CreateInviteLinkRequest(
+                                "Primary",
+                                5,
+                                Instant.now().plusSeconds(3600)
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        verify(chatInviteLinkRepository, never()).save(any(ChatInviteLinkEntity.class));
+    }
+
+    @Test
+    void reportChatRejectsWhenThrottleExceeded() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        doThrow(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many chat reports submitted recently"))
+                .when(abuseProtectionService)
+                .assertChatReportAllowed(requesterId);
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.reportChat(
+                        requesterId,
+                        chatId,
+                        new com.alex.messenger.chat.dto.ReportChatRequest("spam", "bulk abuse")
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        verify(chatReportRepository, never()).save(any(ChatReportEntity.class));
+    }
+
+    @Test
+    void joinByInviteLinkRejectsWhenJoinRequestThrottleExceeded() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatInviteLinkEntity inviteLink = new ChatInviteLinkEntity();
+        inviteLink.setChatId(chatId);
+        inviteLink.setToken("invite-token");
+        inviteLink.setExpiresAt(Instant.now().plusSeconds(3600));
+        inviteLink.setUsageCount(0);
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+        chat.setJoinRequiresApproval(true);
+
+        when(chatInviteLinkRepository.findByToken("invite-token")).thenReturn(Optional.of(inviteLink));
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatBanRepository.findById(any(ChatBanId.class))).thenReturn(Optional.empty());
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(false);
+        when(chatJoinRequestRepository.findByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(Optional.empty());
+        doThrow(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many join requests created recently"))
+                .when(abuseProtectionService)
+                .assertJoinRequestCreationAllowed(requesterId, chatId);
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> chatService.joinByInviteLink(requesterId, "invite-token"),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        verify(chatJoinRequestRepository, never()).save(any(ChatJoinRequestEntity.class));
     }
 
     @Test
@@ -508,6 +892,63 @@ class ChatServiceTest {
         assertThat(response.readAt()).isEqualTo(Instant.parse("2026-03-14T12:00:00Z"));
         assertThat(membership.getLastReadMessageId()).isEqualTo(currentLastReadMessageId);
         verify(chatMemberRepository, never()).save(any(ChatMemberEntity.class));
+    }
+
+    @Test
+    void markReadRecordsSyncEventWhenClearingManualUnreadAtSameBoundary() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID messageId = UUID.randomUUID();
+        Instant readAt = Instant.parse("2026-03-14T12:00:00Z");
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+
+        ChatMemberEntity membership = member(chatId, requesterId);
+        membership.setLastReadMessageId(messageId);
+        membership.setLastReadAt(readAt);
+        membership.setManuallyMarkedUnread(true);
+
+        MessageLookupEntity currentReadMessage = new MessageLookupEntity();
+        currentReadMessage.setMessageId(messageId);
+        currentReadMessage.setChatId(chatId);
+        currentReadMessage.setCreatedAt(Instant.parse("2026-03-14T11:00:00Z"));
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(membership));
+        when(messageLookupRepository.findById(messageId)).thenReturn(Optional.of(currentReadMessage));
+
+        ChatReadEventResponse response = chatService.markRead(requesterId, chatId, messageId);
+
+        assertThat(response.messageId()).isEqualTo(messageId);
+        assertThat(response.readAt()).isEqualTo(readAt);
+        assertThat(membership.getManuallyMarkedUnread()).isFalse();
+        verify(chatMemberRepository).save(membership);
+        ArgumentCaptor<java.util.Map<String, Object>> payloadCaptor = ArgumentCaptor.forClass(java.util.Map.class);
+        verify(userSyncService).recordForUsers(
+                eq(List.of(requesterId)),
+                eq("CHAT_READ"),
+                eq("MESSAGE"),
+                eq(messageId),
+                eq(chatId),
+                payloadCaptor.capture()
+        );
+        assertThat(payloadCaptor.getValue()).containsEntry("chatId", chatId);
+        assertThat(payloadCaptor.getValue()).containsEntry("messageId", messageId);
+        assertThat(payloadCaptor.getValue()).containsEntry("userId", requesterId);
+        assertThat(payloadCaptor.getValue()).containsEntry("readAt", readAt);
+        assertThat(payloadCaptor.getValue()).containsEntry("unreadCount", 0);
+        assertThat(payloadCaptor.getValue()).containsEntry("mentionCount", 0);
+        assertThat(payloadCaptor.getValue()).containsEntry("replyCount", 0);
+        assertThat(payloadCaptor.getValue()).containsEntry("manuallyMarkedUnread", false);
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_READ");
+        assertThat(eventCaptor.getValue().chatId()).isEqualTo(chatId);
+        assertThat(eventCaptor.getValue().userIds()).containsExactly(requesterId);
+        assertThat(eventCaptor.getValue().removedUserIds()).isEmpty();
     }
 
     @Test
@@ -1114,6 +1555,43 @@ class ChatServiceTest {
     }
 
     @Test
+    void sliceChatListUsesChatIdTieBreakerForStableSeekPagination() {
+        ChatSummaryResponse firstChat = chatSummary(
+                UUID.fromString("11111111-1111-1111-1111-111111111111"),
+                false,
+                null,
+                Instant.parse("2026-03-12T12:00:00Z")
+        );
+        ChatSummaryResponse secondChat = chatSummary(
+                UUID.fromString("22222222-2222-2222-2222-222222222222"),
+                false,
+                null,
+                Instant.parse("2026-03-12T12:00:00Z")
+        );
+        ChatSummaryResponse thirdChat = chatSummary(
+                UUID.fromString("33333333-3333-3333-3333-333333333333"),
+                false,
+                null,
+                Instant.parse("2026-03-12T12:00:00Z")
+        );
+
+        List<ChatSummaryResponse> chats = List.of(firstChat, secondChat, thirdChat);
+
+        ChatService.ChatListSlice firstPage = chatService.sliceChatList(chats, null, 2);
+        ChatService.ChatListSlice secondPage = chatService.sliceChatList(chats, firstPage.nextCursor(), 2);
+
+        assertThat(firstPage.chats()).extracting(ChatSummaryResponse::chatId)
+                .containsExactly(firstChat.chatId(), secondChat.chatId());
+        assertThat(firstPage.nextCursor()).isNotBlank();
+        assertThat(firstPage.hasMore()).isTrue();
+
+        assertThat(secondPage.chats()).extracting(ChatSummaryResponse::chatId)
+                .containsExactly(thirdChat.chatId());
+        assertThat(secondPage.hasMore()).isFalse();
+        assertThat(secondPage.nextCursor()).isNull();
+    }
+
+    @Test
     void listAllChatsSortsPinnedChatsAheadOfNewerUnpinnedEntries() {
         UUID requesterId = UUID.randomUUID();
         UUID pinnedChatId = UUID.randomUUID();
@@ -1286,14 +1764,19 @@ class ChatServiceTest {
         when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(membership));
         when(chatRepository.save(any(ChatEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
         when(chatDraftRepository.findById(any(ChatDraftId.class))).thenReturn(Optional.empty());
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(membership));
 
         chatService.updatePublicUsername(
                 requesterId,
                 chatId,
-                new com.alex.messenger.chat.dto.UpdateChatPublicUsernameRequest("news")
+                new com.alex.messenger.chat.dto.UpdateChatPublicUsernameRequest("newsroom")
         );
 
         org.mockito.Mockito.verify(publicPostSearchService).refreshChatIndex(chatId);
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_UPDATED");
+        assertThat(eventCaptor.getValue().userIds()).containsExactly(requesterId);
     }
 
     @Test
@@ -1331,6 +1814,7 @@ class ChatServiceTest {
         when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(owner));
         when(chatMemberRepository.findById(new ChatMemberId(chatId, newOwnerUserId))).thenReturn(Optional.of(target));
         when(chatMemberRepository.saveAll(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(owner, target));
 
         TransferChatOwnershipResponse response = chatService.transferOwnership(requesterId, chatId, newOwnerUserId);
 
@@ -1347,6 +1831,10 @@ class ChatServiceTest {
         assertThat(target.getCanPostMessages()).isTrue();
         assertThat(target.getCanSendMessages()).isTrue();
         assertThat(target.getRestrictedUntil()).isNull();
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_OWNERSHIP_TRANSFERRED");
+        assertThat(eventCaptor.getValue().userIds()).containsExactlyInAnyOrder(requesterId, newOwnerUserId);
     }
 
     @Test
@@ -1475,6 +1963,61 @@ class ChatServiceTest {
     }
 
     @Test
+    void approveJoinRequestPublishesApprovalEvent() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID pendingUserId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+
+        ChatMemberEntity requesterMembership = member(chatId, requesterId);
+        requesterMembership.setRole("ADMIN");
+        requesterMembership.setCanApproveJoinRequests(true);
+
+        ChatJoinRequestEntity joinRequest = new ChatJoinRequestEntity();
+        joinRequest.setId(new ChatJoinRequestId(chatId, pendingUserId));
+        joinRequest.setStatus("PENDING");
+
+        UserEntity pendingUser = new UserEntity();
+        pendingUser.setId(pendingUserId);
+        pendingUser.setDisplayName("Pending");
+
+        final ChatMemberEntity[] approvedMembership = new ChatMemberEntity[1];
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(requesterMembership));
+        when(chatJoinRequestRepository.findByIdChatIdAndIdUserId(chatId, pendingUserId)).thenReturn(Optional.of(joinRequest));
+        when(chatBanRepository.findById(new ChatBanId(chatId, pendingUserId))).thenReturn(Optional.empty());
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, pendingUserId))).thenReturn(Optional.empty());
+        when(chatMemberRepository.save(any(ChatMemberEntity.class))).thenAnswer(invocation -> {
+            ChatMemberEntity saved = invocation.getArgument(0);
+            approvedMembership[0] = saved;
+            return saved;
+        });
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenAnswer(invocation ->
+                approvedMembership[0] == null ? List.of(requesterMembership) : List.of(requesterMembership, approvedMembership[0]));
+        when(userRepository.findById(pendingUserId)).thenReturn(Optional.of(pendingUser));
+
+        chatService.approveJoinRequest(requesterId, chatId, pendingUserId);
+
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_JOIN_REQUEST_APPROVED");
+        assertThat(eventCaptor.getValue().userIds()).containsExactlyInAnyOrder(requesterId, pendingUserId);
+        verify(userSyncService).recordForUsers(
+                any(),
+                eq("CHAT_JOIN_REQUEST_APPROVED"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+    }
+
+    @Test
     void slowModeBlocksMemberPostingUntilCooldownExpires() {
         UUID requesterId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();
@@ -1574,6 +2117,90 @@ class ChatServiceTest {
     }
 
     @Test
+    void addMembersPublishesMemberAddedEventForParticipants() {
+        UUID requesterId = UUID.randomUUID();
+        UUID addedUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+        chat.setTitle("Ops");
+        chat.setCreatedAt(Instant.parse("2026-03-25T10:00:00Z"));
+
+        ChatMemberEntity requesterMembership = member(chatId, requesterId);
+        requesterMembership.setRole("ADMIN");
+        requesterMembership.setCanManageMembers(true);
+
+        UserEntity requesterUser = new UserEntity();
+        requesterUser.setId(requesterId);
+        requesterUser.setDisplayName("Requester");
+
+        UserEntity addedUser = new UserEntity();
+        addedUser.setId(addedUserId);
+        addedUser.setDisplayName("Added");
+
+        final ChatMemberEntity[] addedMembership = new ChatMemberEntity[1];
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, addedUserId)).thenReturn(false);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(requesterMembership));
+        when(chatMemberRepository.save(any(ChatMemberEntity.class))).thenAnswer(invocation -> {
+            ChatMemberEntity saved = invocation.getArgument(0);
+            addedMembership[0] = saved;
+            return saved;
+        });
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenAnswer(invocation ->
+                addedMembership[0] == null ? List.of(requesterMembership) : List.of(requesterMembership, addedMembership[0]));
+        when(userRepository.findAllById(any())).thenAnswer(invocation -> {
+            Iterable<UUID> ids = invocation.getArgument(0);
+            java.util.List<UUID> resolvedIds = new java.util.ArrayList<>();
+            ids.forEach(resolvedIds::add);
+            java.util.List<UserEntity> users = new java.util.ArrayList<>();
+            if (resolvedIds.contains(requesterId)) {
+                users.add(requesterUser);
+            }
+            if (resolvedIds.contains(addedUserId)) {
+                users.add(addedUser);
+            }
+            return users;
+        });
+        when(chatBanRepository.findById(new ChatBanId(chatId, addedUserId))).thenReturn(Optional.empty());
+
+        chatService.addMembers(requesterId, chatId, new AddMembersRequest(List.of(addedUserId)));
+
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_MEMBER_ADDED");
+        assertThat(eventCaptor.getValue().userIds()).containsExactlyInAnyOrder(requesterId, addedUserId);
+        verify(userSyncService).recordForUsers(
+                any(),
+                eq("CHAT_MEMBER_ADDED"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+        verify(userSyncService).recordForUsers(
+                any(),
+                eq("CHAT_UPSERT"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+        verify(userSyncService).recordForUsers(
+                any(),
+                eq("MEMBER_STATE_CHANGED"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+    }
+
+    @Test
     void discoverPublicChatsRejectsTooLongQuery() {
         UUID requesterId = UUID.randomUUID();
 
@@ -1585,6 +2212,104 @@ class ChatServiceTest {
         assertThat(exception).isNotNull();
         assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         verify(chatRepository, never()).searchPublicChats(anyString());
+    }
+
+    @Test
+    void removeMemberPublishesRemovalEventForRemainingAndRemovedUsers() {
+        UUID requesterId = UUID.randomUUID();
+        UUID removedUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+
+        ChatMemberEntity requesterMembership = member(chatId, requesterId);
+        requesterMembership.setRole("ADMIN");
+        requesterMembership.setCanManageMembers(true);
+
+        ChatMemberEntity targetMembership = member(chatId, removedUserId);
+
+        final boolean[] removed = {false};
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(requesterMembership));
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, removedUserId))).thenReturn(Optional.of(targetMembership));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenAnswer(invocation ->
+                removed[0] ? List.of(requesterMembership) : List.of(requesterMembership, targetMembership));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            removed[0] = true;
+            return null;
+        }).when(chatMemberRepository).delete(targetMembership);
+
+        chatService.removeMember(requesterId, chatId, removedUserId);
+
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_MEMBER_REMOVED");
+        assertThat(eventCaptor.getValue().userIds()).containsExactly(requesterId);
+        assertThat(eventCaptor.getValue().removedUserIds()).containsExactly(removedUserId);
+        verify(userSyncService).recordForUsers(
+                eq(List.of(removedUserId)),
+                eq("CHAT_REMOVED"),
+                eq("CHAT"),
+                eq(chatId),
+                eq(chatId),
+                any()
+        );
+    }
+
+    @Test
+    void banMemberPublishesBanEventForRemainingAndRemovedUsers() {
+        UUID requesterId = UUID.randomUUID();
+        UUID bannedUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+        chat.setChatType("GROUP");
+
+        ChatMemberEntity requesterMembership = member(chatId, requesterId);
+        requesterMembership.setRole("ADMIN");
+        requesterMembership.setCanManageMessages(true);
+
+        ChatMemberEntity bannedMembership = member(chatId, bannedUserId);
+
+        UserEntity bannedUser = new UserEntity();
+        bannedUser.setId(bannedUserId);
+        bannedUser.setDisplayName("Banned");
+
+        final boolean[] removed = {false};
+
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, requesterId)).thenReturn(true);
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, requesterId))).thenReturn(Optional.of(requesterMembership));
+        when(chatMemberRepository.findById(new ChatMemberId(chatId, bannedUserId))).thenReturn(Optional.of(bannedMembership));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenAnswer(invocation ->
+                removed[0] ? List.of(requesterMembership) : List.of(requesterMembership, bannedMembership));
+        org.mockito.Mockito.doAnswer(invocation -> {
+            removed[0] = true;
+            return null;
+        }).when(chatMemberRepository).delete(bannedMembership);
+        when(chatBanRepository.findById(new ChatBanId(chatId, bannedUserId))).thenReturn(Optional.empty());
+        when(chatBanRepository.save(any(ChatBanEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(chatJoinRequestRepository.findByIdChatIdAndIdUserId(chatId, bannedUserId)).thenReturn(Optional.empty());
+        when(userRepository.existsById(bannedUserId)).thenReturn(true);
+        when(userRepository.findById(bannedUserId)).thenReturn(Optional.of(bannedUser));
+
+        chatService.banMember(
+                requesterId,
+                chatId,
+                bannedUserId,
+                new com.alex.messenger.chat.dto.UpdateChatBanRequest(null, "spam")
+        );
+
+        ArgumentCaptor<ChatInboxFanoutEvent> eventCaptor = ArgumentCaptor.forClass(ChatInboxFanoutEvent.class);
+        verify(applicationEventPublisher).publishEvent(eventCaptor.capture());
+        assertThat(eventCaptor.getValue().eventType()).isEqualTo("CHAT_MEMBER_BANNED");
+        assertThat(eventCaptor.getValue().userIds()).containsExactly(requesterId);
+        assertThat(eventCaptor.getValue().removedUserIds()).containsExactly(bannedUserId);
     }
 
     @Test
@@ -1715,5 +2440,49 @@ class ChatServiceTest {
         member.setMentionCount(0);
         member.setReplyCount(0);
         return member;
+    }
+
+    private ChatSummaryResponse chatSummary(UUID chatId, boolean pinned, Integer pinOrder, Instant lastMessageAt) {
+        return new ChatSummaryResponse(
+                chatId,
+                "GROUP",
+                "Chat",
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                null,
+                false,
+                false,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                0,
+                null,
+                null,
+                lastMessageAt,
+                1,
+                null,
+                0,
+                0,
+                0,
+                false,
+                null,
+                null,
+                null,
+                pinned,
+                pinOrder,
+                null,
+                false,
+                true,
+                true,
+                true,
+                null
+        );
     }
 }

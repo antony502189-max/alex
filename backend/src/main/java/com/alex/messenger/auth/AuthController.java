@@ -2,6 +2,7 @@ package com.alex.messenger.auth;
 
 import com.alex.messenger.auth.dto.AuthRequest;
 import com.alex.messenger.auth.dto.AuthResponse;
+import com.alex.messenger.auth.dto.AuthSecurityEventResponse;
 import com.alex.messenger.auth.dto.DisableTwoFactorRequest;
 import com.alex.messenger.auth.dto.EnableTwoFactorRequest;
 import com.alex.messenger.auth.dto.GenerateQrLoginResponse;
@@ -56,6 +57,7 @@ public class AuthController {
     private final PasskeyService passkeyService;
     private final PhoneChangeService phoneChangeService;
     private final IdentityTokenService identityTokenService;
+    private final AuthSecurityEventService authSecurityEventService;
 
     @PostMapping("/request-code")
     public ResponseEntity<RequestLoginCodeResponse> requestCode(
@@ -197,7 +199,12 @@ public class AuthController {
     public ResponseEntity<TwoFactorStatusResponse> disableTwoFactor(
             @Valid @RequestBody DisableTwoFactorRequest request
     ) {
-        return ResponseEntity.ok(authService.disableTwoFactor(CurrentUser.id(), request));
+        return ResponseEntity.ok(authService.disableTwoFactor(CurrentUser.id(), CurrentSession.id(), request));
+    }
+
+    @GetMapping("/security/events")
+    public ResponseEntity<List<AuthSecurityEventResponse>> securityEvents() {
+        return ResponseEntity.ok(authSecurityEventService.listEvents(CurrentUser.id(), 50));
     }
 
     @PostMapping("/qr/generate")

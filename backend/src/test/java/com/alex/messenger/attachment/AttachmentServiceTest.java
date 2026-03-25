@@ -6,6 +6,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
@@ -19,10 +20,13 @@ import com.alex.messenger.media.MediaObjectReference;
 import com.alex.messenger.media.MediaProcessingService;
 import com.alex.messenger.media.MediaService;
 import com.alex.messenger.media.PresignedMediaAccess;
+import com.alex.messenger.message.dto.MessageAttachmentResponse;
+import com.alex.messenger.sticker.StickerService;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -56,6 +60,12 @@ class AttachmentServiceTest {
     @Mock
     private MediaProcessingService mediaProcessingService;
 
+    @Mock
+    private StickerService stickerService;
+
+    @Mock
+    private AttachmentAccessTokenService attachmentAccessTokenService;
+
     private AttachmentService attachmentService;
 
     @BeforeEach
@@ -66,8 +76,17 @@ class AttachmentServiceTest {
                 chatEncryptionService,
                 mediaService,
                 mediaProcessingService,
+                stickerService,
+                attachmentAccessTokenService,
                 25L * 1024L * 1024L
         );
+        lenient().when(attachmentAccessTokenService.issue(any(UUID.class), any(UUID.class))).thenAnswer(invocation -> {
+            UUID attachmentId = invocation.getArgument(1, UUID.class);
+            return new AttachmentAccessTokenService.IssuedAttachmentAccessToken(
+                    "token-" + attachmentId,
+                    Instant.parse("2026-03-12T12:15:00Z")
+            );
+        });
     }
 
     @Test
@@ -98,11 +117,6 @@ class AttachmentServiceTest {
                 "attachments/voice-message.ogg",
                 "s3://media/attachments/voice-message.ogg"
         ));
-        when(mediaService.buildDownloadAccess("media", "attachments/voice-message.ogg"))
-                .thenReturn(new PresignedMediaAccess(
-                        "https://cdn.example/attachments/voice-message.ogg",
-                        Instant.parse("2026-03-12T12:00:00Z")
-                ));
         when(attachmentRepository.save(any(AttachmentEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         var response = attachmentService.upload(
@@ -133,7 +147,10 @@ class AttachmentServiceTest {
         assertThat(response.voiceNote()).isTrue();
         assertThat(response.roundMessage()).isFalse();
         assertThat(response.previewUrl()).isNull();
-        assertThat(response.downloadUrl()).isEqualTo("https://cdn.example/attachments/voice-message.ogg");
+        assertThat(response.downloadUrl()).isEqualTo(
+                "/api/attachments/" + response.attachmentId() + "/download?accessToken=token-" + response.attachmentId()
+        );
+        assertThat(response.accessExpiresAt()).isEqualTo(Instant.parse("2026-03-12T12:15:00Z"));
     }
 
     @Test
@@ -165,11 +182,6 @@ class AttachmentServiceTest {
                 "attachments/photo.png",
                 "s3://media/attachments/photo.png"
         ));
-        when(mediaService.buildDownloadAccess("media", "attachments/photo.png"))
-                .thenReturn(new PresignedMediaAccess(
-                        "https://cdn.example/attachments/photo.png",
-                        Instant.parse("2026-03-12T12:05:00Z")
-                ));
         when(attachmentRepository.save(any(AttachmentEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         var response = attachmentService.upload(
@@ -200,8 +212,16 @@ class AttachmentServiceTest {
         assertThat(response.albumId()).isEqualTo(UUID.fromString("11111111-1111-1111-1111-111111111111"));
         assertThat(response.albumItemIndex()).isEqualTo(2);
         assertThat(response.hdPhoto()).isTrue();
-        assertThat(response.previewUrl()).isEqualTo("https://cdn.example/attachments/photo.png");
-        assertThat(response.thumbnailUrl()).isEqualTo("https://cdn.example/attachments/photo.png");
+        assertThat(response.downloadUrl()).isEqualTo(
+                "/api/attachments/" + response.attachmentId() + "/download?accessToken=token-" + response.attachmentId()
+        );
+        assertThat(response.previewUrl()).isEqualTo(
+                "/api/attachments/" + response.attachmentId() + "/preview?accessToken=token-" + response.attachmentId()
+        );
+        assertThat(response.thumbnailUrl()).isEqualTo(
+                "/api/attachments/" + response.attachmentId() + "/thumbnail?accessToken=token-" + response.attachmentId()
+        );
+        assertThat(response.accessExpiresAt()).isEqualTo(Instant.parse("2026-03-12T12:15:00Z"));
         assertThat(response.waveform()).isEmpty();
     }
 
@@ -238,16 +258,6 @@ class AttachmentServiceTest {
         when(chatService.getOwnedChat(viewerId, chatId)).thenReturn(chat);
         when(chatService.hasMessageModerationPermission(moderatorId, chatId)).thenReturn(true);
         when(chatService.hasMessageModerationPermission(viewerId, chatId)).thenReturn(false);
-        when(mediaService.buildDownloadAccess("media", "attachments/photo.png"))
-                .thenReturn(new PresignedMediaAccess(
-                        "https://cdn.example/attachments/photo.png",
-                        Instant.parse("2026-03-12T12:05:00Z")
-                ));
-        when(mediaService.buildDownloadAccess("media", "attachments/photo-preview.jpg"))
-                .thenReturn(new PresignedMediaAccess(
-                        "https://cdn.example/attachments/photo-preview.jpg",
-                        Instant.parse("2026-03-12T12:05:00Z")
-                ));
 
         var moderated = attachmentService.reviewModeration(
                 moderatorId,
@@ -314,6 +324,157 @@ class AttachmentServiceTest {
         assertThat(response.thumbnailUrl()).isNull();
         assertThat(response.requiresAuthorization()).isTrue();
         verify(mediaService, never()).buildDownloadAccess(anyString(), anyString());
+    }
+
+    @Test
+    void getAccessReturnsTokenizedUrlsBoundToAttachment() {
+        UUID requesterId = UUID.randomUUID();
+        UUID attachmentId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        AttachmentEntity attachment = new AttachmentEntity();
+        attachment.setId(attachmentId);
+        attachment.setChatId(chatId);
+        attachment.setOriginalFileName("photo.png");
+        attachment.setContentType("image/png");
+        attachment.setKind("IMAGE");
+        attachment.setStorageProvider("S3");
+        attachment.setBucketName("media");
+        attachment.setObjectKey("attachments/photo.png");
+        attachment.setPreviewBucketName("media");
+        attachment.setPreviewObjectKey("attachments/photo-preview.jpg");
+
+        when(attachmentRepository.findById(attachmentId)).thenReturn(Optional.of(attachment));
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+
+        AttachmentAccessResponse response = attachmentService.getAccess(requesterId, attachmentId);
+
+        assertThat(response.downloadUrl()).isEqualTo(
+                "/api/attachments/" + attachmentId + "/download?accessToken=token-" + attachmentId
+        );
+        assertThat(response.previewUrl()).isEqualTo(
+                "/api/attachments/" + attachmentId + "/preview?accessToken=token-" + attachmentId
+        );
+        assertThat(response.accessExpiresAt()).isEqualTo(Instant.parse("2026-03-12T12:15:00Z"));
+        assertThat(response.requiresAuthorization()).isFalse();
+    }
+
+    @Test
+    void getResponsesReturnTokenizedUrlsBoundToAttachment() {
+        UUID viewerId = UUID.randomUUID();
+        UUID attachmentId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        AttachmentEntity attachment = new AttachmentEntity();
+        attachment.setId(attachmentId);
+        attachment.setChatId(chatId);
+        attachment.setOriginalFileName("photo.png");
+        attachment.setContentType("image/png");
+        attachment.setKind("IMAGE");
+        attachment.setFileSizeBytes(10L);
+        attachment.setStorageProvider("S3");
+        attachment.setBucketName("media");
+        attachment.setObjectKey("attachments/photo.png");
+        attachment.setPreviewBucketName("media");
+        attachment.setPreviewObjectKey("attachments/photo-preview.jpg");
+        attachment.setThumbnailBucketName("media");
+        attachment.setThumbnailObjectKey("attachments/photo-thumbnail.jpg");
+
+        when(attachmentRepository.findAllByIdIn(any())).thenReturn(List.of(attachment));
+        when(chatService.getOwnedChat(viewerId, chatId)).thenReturn(chat);
+
+        MessageAttachmentResponse response = attachmentService.getResponses(viewerId, List.of(attachmentId)).get(0);
+
+        assertThat(response.downloadUrl()).isEqualTo(
+                "/api/attachments/" + attachmentId + "/download?accessToken=token-" + attachmentId
+        );
+        assertThat(response.previewUrl()).isEqualTo(
+                "/api/attachments/" + attachmentId + "/preview?accessToken=token-" + attachmentId
+        );
+        assertThat(response.thumbnailUrl()).isEqualTo(
+                "/api/attachments/" + attachmentId + "/thumbnail?accessToken=token-" + attachmentId
+        );
+        assertThat(response.accessExpiresAt()).isEqualTo(Instant.parse("2026-03-12T12:15:00Z"));
+    }
+
+    @Test
+    void downloadCapsRedirectTtlToAttachmentAccessTokenExpiry() {
+        UUID requesterId = UUID.randomUUID();
+        UUID attachmentId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        AttachmentEntity attachment = new AttachmentEntity();
+        attachment.setId(attachmentId);
+        attachment.setChatId(chatId);
+        attachment.setOriginalFileName("photo.png");
+        attachment.setContentType("image/png");
+        attachment.setKind("IMAGE");
+        attachment.setStorageProvider("S3");
+        attachment.setBucketName("media");
+        attachment.setObjectKey("attachments/photo.png");
+
+        when(attachmentRepository.findById(attachmentId)).thenReturn(Optional.of(attachment));
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(mediaService.buildDownloadAccess(eq("media"), eq("attachments/photo.png"), any(Duration.class)))
+                .thenReturn(new PresignedMediaAccess(
+                        "https://cdn.example/attachments/photo.png",
+                        Instant.parse("2026-03-12T12:00:20Z")
+                ));
+
+        AttachmentDownloadResult result = attachmentService.download(
+                requesterId,
+                attachmentId,
+                Instant.now().plusSeconds(20)
+        );
+
+        ArgumentCaptor<Duration> durationCaptor = ArgumentCaptor.forClass(Duration.class);
+        verify(mediaService).buildDownloadAccess(eq("media"), eq("attachments/photo.png"), durationCaptor.capture());
+        assertThat(durationCaptor.getValue()).isGreaterThan(Duration.ZERO);
+        assertThat(durationCaptor.getValue()).isLessThanOrEqualTo(Duration.ofSeconds(20));
+        assertThat(result.redirectUrl()).isEqualTo("https://cdn.example/attachments/photo.png");
+    }
+
+    @Test
+    void previewRejectsSensitiveAttachmentForRegularViewer() {
+        UUID viewerId = UUID.randomUUID();
+        UUID attachmentId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        AttachmentEntity attachment = new AttachmentEntity();
+        attachment.setId(attachmentId);
+        attachment.setChatId(chatId);
+        attachment.setOriginalFileName("photo.png");
+        attachment.setContentType("image/png");
+        attachment.setKind("IMAGE");
+        attachment.setStorageProvider("S3");
+        attachment.setBucketName("media");
+        attachment.setObjectKey("attachments/photo.png");
+        attachment.setModerationStatus("APPROVED");
+        attachment.setModerationSensitive(true);
+
+        when(attachmentRepository.findById(attachmentId)).thenReturn(Optional.of(attachment));
+        when(chatService.getOwnedChat(viewerId, chatId)).thenReturn(chat);
+        when(chatService.hasMessageModerationPermission(viewerId, chatId)).thenReturn(false);
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> attachmentService.preview(viewerId, attachmentId, null),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 
     @Test
@@ -512,11 +673,6 @@ class AttachmentServiceTest {
 
         when(attachmentRepository.findById(sourceAttachmentId)).thenReturn(Optional.of(source));
         when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
-        when(mediaService.buildDownloadAccess("media", "attachments/voice-message.ogg"))
-                .thenReturn(new PresignedMediaAccess(
-                        "https://cdn.example/attachments/voice-message.ogg",
-                        Instant.parse("2026-03-19T12:00:00Z")
-                ));
         when(attachmentRepository.save(any(AttachmentEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
         var response = attachmentService.trim(

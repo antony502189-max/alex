@@ -28,7 +28,6 @@ public class MessageKafkaListener {
     private final MessageReactionService messageReactionService;
     private final AttachmentService attachmentService;
     private final ChatService chatService;
-    private final MessageDeliveryService messageDeliveryService;
     private final MessagePushNotificationService messagePushNotificationService;
     private final PollService pollService;
     private final StickerService stickerService;
@@ -39,9 +38,6 @@ public class MessageKafkaListener {
 
     @KafkaListener(topics = "${alex.kafka.chat-messages-topic}", containerFactory = "kafkaListenerContainerFactory")
     public void listen(MessageEvent event) {
-        MessageLookupEntity current = "SENT".equals(event.deliveryStatus())
-                ? messageDeliveryService.markDelivered(event.messageId())
-                : null;
         MessageTextContent content = event.deletedAt() != null
                 ? new MessageTextContent("", List.of())
                 : messageContentCodec.decode(chatEncryptionService.decrypt(
@@ -103,9 +99,9 @@ public class MessageKafkaListener {
                     stickerService.getStickerResponse(event.stickerId()),
                     attachments,
                     messageReactionService.getSummaries(event.messageId()),
-                    current != null ? current.getDeliveryStatus() : event.deliveryStatus(),
-                    current != null ? current.getDeliveredAt() : event.deliveredAt(),
-                    current != null ? current.getReadAt() : event.readAt(),
+                    event.deliveryStatus(),
+                    event.deliveredAt(),
+                    event.readAt(),
                     event.expiresAt(),
                     event.editedAt(),
                     event.deletedAt()

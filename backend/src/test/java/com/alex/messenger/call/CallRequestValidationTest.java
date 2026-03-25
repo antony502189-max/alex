@@ -2,6 +2,7 @@ package com.alex.messenger.call;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.alex.messenger.call.dto.CallSignalRequest;
 import com.alex.messenger.call.dto.CreateCallJoinLinkRequest;
 import com.alex.messenger.call.dto.StartCallRequest;
 import jakarta.validation.ConstraintViolation;
@@ -49,5 +50,31 @@ class CallRequestValidationTest {
         Set<ConstraintViolation<CreateCallJoinLinkRequest>> violations = validator.validate(request);
 
         assertThat(violations).isEmpty();
+    }
+
+    @Test
+    void callSignalAllowsTrimmedLowercaseSupportedAlias() {
+        CallSignalRequest request = new CallSignalRequest(
+                UUID.randomUUID(),
+                " ice-candidate ",
+                "{\"candidate\":\"x\"}"
+        );
+
+        Set<ConstraintViolation<CallSignalRequest>> violations = validator.validate(request);
+
+        assertThat(violations).isEmpty();
+    }
+
+    @Test
+    void callSignalRejectsUnsupportedType() {
+        CallSignalRequest request = new CallSignalRequest(
+                UUID.randomUUID(),
+                " teleport ",
+                "{\"value\":1}"
+        );
+
+        Set<ConstraintViolation<CallSignalRequest>> violations = validator.validate(request);
+
+        assertThat(violations).isNotEmpty();
     }
 }

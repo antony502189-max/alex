@@ -136,6 +136,21 @@ class StompOutboundAuthorizationInterceptorTest {
     }
 
     @Test
+    void outboundChatsQueueAllowsActiveSession() {
+        UUID userId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+
+        when(userSessionService.isActive(sessionId, userId)).thenReturn(true);
+
+        Message<?> result = interceptor.preSend(
+                outboundMessage(userId, sessionId, "/user/queue/chats", new byte[0]),
+                null
+        );
+
+        assertThat(result).isNotNull();
+    }
+
+    @Test
     void outboundCallsQueueRejectsRevokedSession() {
         UUID userId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
@@ -169,8 +184,6 @@ class StompOutboundAuthorizationInterceptorTest {
     void outboundUnknownUserQueueIsRejected() {
         UUID userId = UUID.randomUUID();
         UUID sessionId = UUID.randomUUID();
-
-        when(userSessionService.isActive(sessionId, userId)).thenReturn(true);
 
         Message<?> result = interceptor.preSend(
                 outboundMessage(userId, sessionId, "/user/queue/internal-audit", new byte[0]),

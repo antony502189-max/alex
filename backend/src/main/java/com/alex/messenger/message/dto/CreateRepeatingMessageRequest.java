@@ -28,6 +28,7 @@ public record CreateRepeatingMessageRequest(
         UUID stickerId,
         Boolean silent,
         UUID clientRuleId,
+        Boolean disableLinkPreview,
         @NotNull @Future Instant firstScheduledAt,
         @NotNull @Min(1) @Max(10080) Integer intervalMinutes,
         @Min(1) @Max(365) Integer maxOccurrences
@@ -67,6 +68,7 @@ public record CreateRepeatingMessageRequest(
                 stickerId,
                 silent,
                 clientRuleId,
+                null,
                 firstScheduledAt,
                 intervalMinutes,
                 maxOccurrences

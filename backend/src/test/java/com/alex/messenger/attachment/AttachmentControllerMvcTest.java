@@ -1,6 +1,8 @@
 package com.alex.messenger.attachment;
 
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -12,6 +14,7 @@ import com.alex.messenger.attachment.dto.UploadAttachmentChunkRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.UUID;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -20,6 +23,8 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.mock.web.MockMultipartFile;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.validation.beanvalidation.LocalValidatorFactoryBean;
@@ -33,20 +38,33 @@ class AttachmentControllerMvcTest {
     @Mock
     private AttachmentUploadSessionService attachmentUploadSessionService;
 
+    @Mock
+    private AttachmentAccessTokenService attachmentAccessTokenService;
+
     private MockMvc mockMvc;
     private ObjectMapper objectMapper;
+    private UUID currentUserId;
 
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper();
+        currentUserId = UUID.randomUUID();
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(currentUserId.toString(), "test")
+        );
         LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
         validator.afterPropertiesSet();
         mockMvc = MockMvcBuilders.standaloneSetup(
-                        new AttachmentController(attachmentService, attachmentUploadSessionService)
+                        new AttachmentController(attachmentService, attachmentUploadSessionService, attachmentAccessTokenService)
                 )
                 .setValidator(validator)
                 .setMessageConverters(new MappingJackson2HttpMessageConverter(objectMapper))
                 .build();
+    }
+
+    @AfterEach
+    void tearDown() {
+        SecurityContextHolder.clearContext();
     }
 
     @Test
@@ -173,5 +191,40 @@ class AttachmentControllerMvcTest {
                 .andExpect(status().isBadRequest());
 
         verifyNoInteractions(attachmentService, attachmentUploadSessionService);
+    }
+
+    @Test
+    void downloadReturnsUnauthorizedWithoutAuthOrToken() throws Exception {
+        SecurityContextHolder.clearContext();
+
+        mockMvc.perform(get("/api/attachments/{attachmentId}/download", UUID.randomUUID()))
+                .andExpect(status().isUnauthorized());
+
+        verifyNoInteractions(attachmentService, attachmentUploadSessionService, attachmentAccessTokenService);
+    }
+
+    @Test
+    void downloadAcceptsAccessTokenWithoutAuthenticatedSession() throws Exception {
+        UUID attachmentId = UUID.randomUUID();
+        UUID tokenUserId = UUID.randomUUID();
+        SecurityContextHolder.clearContext();
+
+        when(attachmentAccessTokenService.validate("signed-token", attachmentId))
+                .thenReturn(new AttachmentAccessTokenService.ValidatedAttachmentAccessToken(
+                        tokenUserId,
+                        attachmentId,
+                        java.time.Instant.parse("2026-03-12T12:15:00Z")
+                ));
+        when(attachmentService.download(
+                tokenUserId,
+                attachmentId,
+                java.time.Instant.parse("2026-03-12T12:15:00Z")
+        )).thenReturn(new AttachmentDownloadResult("https://cdn.example/attachments/photo.png", null));
+
+        mockMvc.perform(
+                        get("/api/attachments/{attachmentId}/download", attachmentId)
+                                .param(AttachmentAccessTokenService.QUERY_PARAMETER, "signed-token")
+                )
+                .andExpect(status().isTemporaryRedirect());
     }
 }

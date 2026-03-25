@@ -41,6 +41,13 @@ public class SecurityConfig {
                         ).permitAll()
                         .requestMatchers("/ws/**", "/error").permitAll()
                         .requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/health/**").permitAll()
+                        .requestMatchers(
+                                HttpMethod.GET,
+                                "/api/attachments/*/download",
+                                "/api/attachments/*/preview",
+                                "/api/attachments/*/thumbnail"
+                        ).permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/photos/download").permitAll()
                         .requestMatchers("/api/internal/**").hasRole("INTERNAL_SYSTEM")
                         .requestMatchers("/api/bot-api/**").hasRole("BOT_API")
                         .anyRequest().authenticated()

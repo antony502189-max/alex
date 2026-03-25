@@ -93,6 +93,7 @@ class MessageLiveLocationValidationTest {
                 List.of(),
                 null,
                 false,
+                null,
                 null
         );
 

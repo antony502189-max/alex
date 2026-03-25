@@ -50,9 +50,6 @@ class MessageKafkaListenerTest {
     private ChatService chatService;
 
     @Mock
-    private MessageDeliveryService messageDeliveryService;
-
-    @Mock
     private MessagePushNotificationService messagePushNotificationService;
 
     @Mock
@@ -83,7 +80,6 @@ class MessageKafkaListenerTest {
                 messageReactionService,
                 attachmentService,
                 chatService,
-                messageDeliveryService,
                 messagePushNotificationService,
                 pollService,
                 stickerService,

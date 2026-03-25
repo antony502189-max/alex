@@ -13,6 +13,8 @@ public interface UserSessionRepository extends JpaRepository<UserSessionEntity, 
 
     List<UserSessionEntity> findAllByUserIdAndRevokedAtIsNullOrderByLastActiveAtDesc(UUID userId);
 
+    List<UserSessionEntity> findTop5ByUserIdAndRevokedAtIsNullOrderByLastActiveAtDesc(UUID userId);
+
     List<UserSessionEntity> findAllByUserIdAndRevokedAtIsNullAndNotificationsEnabledTrueAndPushTokenIsNotNull(UUID userId);
 
     Optional<UserSessionEntity> findByIdAndRevokedAtIsNull(UUID sessionId);

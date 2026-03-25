@@ -26,6 +26,7 @@ import com.alex.messenger.story.dto.CreateStoryHighlightRequest;
 import com.alex.messenger.story.dto.CreateStoryLiveCommentRequest;
 import com.alex.messenger.story.dto.GoLiveStoryRequest;
 import com.alex.messenger.story.dto.StoryReactionRequest;
+import com.alex.messenger.story.dto.UpdateStoryHighlightStoriesRequest;
 import com.alex.messenger.user.ContactRepository;
 import com.alex.messenger.user.UserEntity;
 import com.alex.messenger.user.UserPrivacyService;

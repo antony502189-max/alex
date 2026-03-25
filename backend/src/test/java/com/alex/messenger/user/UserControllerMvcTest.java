@@ -15,6 +15,7 @@ import com.alex.messenger.user.dto.UpdateProfileTabRequest;
 import com.alex.messenger.user.dto.UpsertProfileAudioRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Collections;
+import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;

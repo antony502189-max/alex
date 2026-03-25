@@ -10,11 +10,13 @@ import com.alex.messenger.media.MediaObjectReference;
 import com.alex.messenger.media.MediaService;
 import com.alex.messenger.media.PresignedMediaAccess;
 import com.alex.messenger.message.dto.MessageAttachmentResponse;
+import com.alex.messenger.sticker.StickerService;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -23,8 +25,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
-import java.util.stream.Collectors;
 import javax.imageio.ImageIO;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -43,6 +45,8 @@ public class AttachmentService {
     private final ChatEncryptionService chatEncryptionService;
     private final MediaService mediaService;
     private final MediaProcessingService mediaProcessingService;
+    private final StickerService stickerService;
+    private final AttachmentAccessTokenService attachmentAccessTokenService;
     private final long maxFileSizeBytes;
 
     public AttachmentService(
@@ -51,6 +55,8 @@ public class AttachmentService {
             ChatEncryptionService chatEncryptionService,
             MediaService mediaService,
             MediaProcessingService mediaProcessingService,
+            StickerService stickerService,
+            AttachmentAccessTokenService attachmentAccessTokenService,
             @Value("${alex.storage.attachments.max-file-size-bytes}") long maxFileSizeBytes
     ) {
         this.attachmentRepository = attachmentRepository;
@@ -58,6 +64,8 @@ public class AttachmentService {
         this.chatEncryptionService = chatEncryptionService;
         this.mediaService = mediaService;
         this.mediaProcessingService = mediaProcessingService;
+        this.stickerService = stickerService;
+        this.attachmentAccessTokenService = attachmentAccessTokenService;
         this.maxFileSizeBytes = maxFileSizeBytes;
     }
 
@@ -85,14 +93,24 @@ public class AttachmentService {
             throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "Attachment is too large");
         }
 
-        String contentType = normalizeContentType(file.getContentType());
-        String normalizedKind = normalizeKind(kind, contentType);
-        validateAttachmentMetadata(normalizedKind, durationMs, width, height, contentType);
-        boolean normalizedHdPhoto = normalizeHdPhoto(hdPhoto, normalizedKind);
-        validateAlbumMetadata(normalizedKind, albumId, albumItemIndex);
-        List<Integer> waveformSamples = parseWaveform(waveform, normalizedKind);
-        ImageDimensions imageDimensions = resolveImageDimensions(file, normalizedKind, width, height);
-        String originalFileName = safeFileName(file.getOriginalFilename());
+        AttachmentMetadataSupport.UploadMetadata metadata = AttachmentMetadataSupport.prepareMultipartUpload(
+                file.getOriginalFilename(),
+                file.getContentType(),
+                kind,
+                durationMs,
+                width,
+                height,
+                hdPhoto,
+                waveform,
+                albumId,
+                albumItemIndex
+        );
+        ImageDimensions imageDimensions = resolveImageDimensions(
+                file,
+                metadata.kind(),
+                metadata.width(),
+                metadata.height()
+        );
 
         UUID attachmentId = UUID.randomUUID();
         MediaObjectReference mediaObjectReference;
@@ -100,8 +118,8 @@ public class AttachmentService {
             mediaObjectReference = mediaService.upload(
                     chatId,
                     attachmentId,
-                    originalFileName,
-                    contentType,
+                    metadata.originalFileName(),
+                    metadata.contentType(),
                     file.getSize(),
                     inputStream
             );
@@ -113,16 +131,16 @@ public class AttachmentService {
                 requesterId,
                 chatId,
                 attachmentId,
-                originalFileName,
-                contentType,
-                normalizedKind,
+                metadata.originalFileName(),
+                metadata.contentType(),
+                metadata.kind(),
                 file.getSize(),
-                durationMs,
+                metadata.durationMs(),
                 imageDimensions,
-                normalizedHdPhoto,
-                waveformSamples,
-                albumId,
-                albumItemIndex,
+                metadata.hdPhoto(),
+                metadata.waveformSamples(),
+                metadata.albumId(),
+                metadata.albumItemIndex(),
                 mediaObjectReference
         );
     }
@@ -154,14 +172,24 @@ public class AttachmentService {
             throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "Attachment is too large");
         }
 
-        String normalizedContentType = normalizeContentType(contentType);
-        String normalizedKind = normalizeKind(kind, normalizedContentType);
-        validateAttachmentMetadata(normalizedKind, durationMs, width, height, normalizedContentType);
-        boolean normalizedHdPhoto = normalizeHdPhoto(hdPhoto, normalizedKind);
-        validateAlbumMetadata(normalizedKind, albumId, albumItemIndex);
-        List<Integer> waveformSamples = parseWaveform(waveform, normalizedKind);
-        ImageDimensions imageDimensions = resolveImageDimensions(sourcePath, normalizedKind, width, height);
-        String safeOriginalFileName = safeFileName(originalFileName);
+        AttachmentMetadataSupport.UploadMetadata metadata = AttachmentMetadataSupport.prepareMultipartUpload(
+                originalFileName,
+                contentType,
+                kind,
+                durationMs,
+                width,
+                height,
+                hdPhoto,
+                waveform,
+                albumId,
+                albumItemIndex
+        );
+        ImageDimensions imageDimensions = resolveImageDimensions(
+                sourcePath,
+                metadata.kind(),
+                metadata.width(),
+                metadata.height()
+        );
 
         UUID attachmentId = UUID.randomUUID();
         MediaObjectReference mediaObjectReference;
@@ -169,8 +197,8 @@ public class AttachmentService {
             mediaObjectReference = mediaService.upload(
                     chatId,
                     attachmentId,
-                    safeOriginalFileName,
-                    normalizedContentType,
+                    metadata.originalFileName(),
+                    metadata.contentType(),
                     fileSizeBytes,
                     inputStream
             );
@@ -182,16 +210,16 @@ public class AttachmentService {
                 requesterId,
                 chatId,
                 attachmentId,
-                safeOriginalFileName,
-                normalizedContentType,
-                normalizedKind,
+                metadata.originalFileName(),
+                metadata.contentType(),
+                metadata.kind(),
                 fileSizeBytes,
-                durationMs,
+                metadata.durationMs(),
                 imageDimensions,
-                normalizedHdPhoto,
-                waveformSamples,
-                albumId,
-                albumItemIndex,
+                metadata.hdPhoto(),
+                metadata.waveformSamples(),
+                metadata.albumId(),
+                metadata.albumItemIndex(),
                 mediaObjectReference
         );
     }
@@ -219,6 +247,11 @@ public class AttachmentService {
     @Transactional(readOnly = true)
     public List<MessageAttachmentResponse> getResponses(List<UUID> attachmentIds) {
         return getResponses(currentAuthenticatedUserId().orElse(null), attachmentIds);
+    }
+
+    @Transactional(readOnly = true)
+    public List<MessageAttachmentResponse> listRecentGifs(UUID requesterId) {
+        return getResponses(requesterId, stickerService.listRecentGifIds(requesterId));
     }
 
     @Transactional(readOnly = true)
@@ -357,41 +390,58 @@ public class AttachmentService {
     public AttachmentAccessResponse getAccess(UUID requesterId, UUID attachmentId) {
         AttachmentEntity attachment = getOwnedAttachment(requesterId, attachmentId);
         ensureModerationAccessAllowed(requesterId, attachment);
-        return buildAccessResponse(attachment);
+        AttachmentResolvedAccess access = resolveAccess(attachment, requesterId);
+        return new AttachmentAccessResponse(
+                access.downloadUrl(),
+                access.previewUrl(),
+                access.accessExpiresAt(),
+                access.requiresAuthorization()
+        );
     }
 
     @Transactional(readOnly = true)
     public AttachmentDownloadResult download(UUID requesterId, UUID attachmentId) {
+        return download(requesterId, attachmentId, null);
+    }
+
+    @Transactional(readOnly = true)
+    public AttachmentDownloadResult download(UUID requesterId, UUID attachmentId, Instant accessExpiresAt) {
+        return accessMedia(requesterId, attachmentId, accessExpiresAt, AttachmentMediaVariant.DOWNLOAD);
+    }
+
+    @Transactional(readOnly = true)
+    public AttachmentDownloadResult preview(UUID requesterId, UUID attachmentId, Instant accessExpiresAt) {
+        return accessMedia(requesterId, attachmentId, accessExpiresAt, AttachmentMediaVariant.PREVIEW);
+    }
+
+    @Transactional(readOnly = true)
+    public AttachmentDownloadResult thumbnail(UUID requesterId, UUID attachmentId, Instant accessExpiresAt) {
+        return accessMedia(requesterId, attachmentId, accessExpiresAt, AttachmentMediaVariant.THUMBNAIL);
+    }
+
+    private AttachmentDownloadResult accessMedia(
+            UUID requesterId,
+            UUID attachmentId,
+            Instant accessExpiresAt,
+            AttachmentMediaVariant variant
+    ) {
         AttachmentEntity attachment = getOwnedAttachment(requesterId, attachmentId);
-        ensureModerationAccessAllowed(requesterId, attachment);
-        if (isS3Stored(attachment)) {
-            AttachmentAccessResponse accessResponse = buildAccessResponse(attachment);
-            return new AttachmentDownloadResult(accessResponse.downloadUrl(), null);
+        if (variant == AttachmentMediaVariant.DOWNLOAD) {
+            ensureModerationAccessAllowed(requesterId, attachment);
+        } else {
+            ensurePreviewAccessAllowed(requesterId, attachment);
         }
 
-        AttachmentEntity binarySource = resolveBinarySource(attachment);
-        byte[] ciphertext;
-        try {
-            ciphertext = Files.readAllBytes(Path.of(binarySource.getStoragePath()));
-        } catch (IOException exception) {
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Unable to read attachment", exception);
+        RedirectTarget redirectTarget = resolveRedirectTarget(attachment, variant, accessExpiresAt);
+        if (redirectTarget != null) {
+            return new AttachmentDownloadResult(redirectTarget.downloadUrl(), null);
         }
 
-        byte[] plaintext = chatEncryptionService.decryptBytes(
-                binarySource.getChatId(),
-                ciphertext,
-                binarySource.getNonce(),
-                binarySource.getKeyVersion()
+        DownloadedAttachment downloadedAttachment = loadVariantBytes(
+                attachment,
+                variant
         );
-
-        return new AttachmentDownloadResult(
-                null,
-                new DownloadedAttachment(
-                        attachment.getOriginalFileName(),
-                        attachment.getContentType(),
-                        plaintext
-                )
-        );
+        return new AttachmentDownloadResult(null, downloadedAttachment);
     }
 
     @Transactional(readOnly = true)
@@ -530,13 +580,12 @@ public class AttachmentService {
     private MessageAttachmentResponse toResponse(AttachmentEntity attachment, UUID requesterId) {
         boolean blockedByModeration = isBlockedByModeration(requesterId, attachment);
         boolean hidePreviewForSensitive = shouldHidePreviewForSensitiveContent(requesterId, attachment);
-        AttachmentAccessResponse accessResponse = requesterId == null
-                ? new AttachmentAccessResponse(null, null, null, true)
-                : blockedByModeration
-                        ? new AttachmentAccessResponse(null, null, null, true)
-                        : buildAccessResponse(attachment);
-        String previewUrl = requesterId == null || hidePreviewForSensitive ? null : accessResponse.previewUrl();
-        String thumbnailUrl = requesterId == null || hidePreviewForSensitive ? null : resolveThumbnailUrl(attachment);
+        AttachmentResolvedAccess access = requesterId == null || blockedByModeration
+                ? authorizationRequiredAccess()
+                : resolveAccess(attachment, requesterId);
+        String previewUrl = requesterId == null || hidePreviewForSensitive ? null : access.previewUrl();
+        String thumbnailUrl = requesterId == null || hidePreviewForSensitive ? null : access.thumbnailUrl();
+        Instant accessExpiresAt = requesterId == null || blockedByModeration ? null : access.accessExpiresAt();
         return new MessageAttachmentResponse(
                 attachment.getId(),
                 attachment.getOriginalFileName(),
@@ -544,14 +593,14 @@ public class AttachmentService {
                 attachment.getKind(),
                 attachment.getFileSizeBytes(),
                 attachment.getDurationMs(),
-                accessResponse.downloadUrl(),
+                access.downloadUrl(),
                 previewUrl,
                 thumbnailUrl,
                 attachment.getWidth(),
                 attachment.getHeight(),
                 parseWaveform(attachment.getWaveform()),
-                accessResponse.accessExpiresAt(),
-                accessResponse.requiresAuthorization(),
+                accessExpiresAt,
+                access.requiresAuthorization(),
                 isStreamingSupported(attachment),
                 isVoiceNote(attachment),
                 isRoundMessage(attachment),
@@ -568,56 +617,115 @@ public class AttachmentService {
         );
     }
 
-    private AttachmentAccessResponse buildAccessResponse(AttachmentEntity attachment) {
-        if (isS3Stored(attachment)) {
-            PresignedMediaAccess access = mediaService.buildDownloadAccess(attachment.getBucketName(), attachment.getObjectKey());
-            String previewUrl = resolvePreviewUrl(attachment);
-            return new AttachmentAccessResponse(
-                    access.downloadUrl(),
-                    previewUrl,
-                    access.expiresAt(),
-                    false
-            );
-        }
-
-        return new AttachmentAccessResponse(
-                "/api/attachments/" + attachment.getId() + "/download",
-                null,
-                null,
-                true
+    private AttachmentResolvedAccess resolveAccess(AttachmentEntity attachment, UUID requesterId) {
+        AttachmentAccessTokenService.IssuedAttachmentAccessToken accessToken =
+                attachmentAccessTokenService.issue(requesterId, attachment.getId());
+        return new AttachmentResolvedAccess(
+                buildAccessUrl(attachment.getId(), "download", accessToken.token()),
+                isPreviewableAttachment(attachment) ? buildAccessUrl(attachment.getId(), "preview", accessToken.token()) : null,
+                isPreviewableAttachment(attachment) ? buildAccessUrl(attachment.getId(), "thumbnail", accessToken.token()) : null,
+                accessToken.expiresAt(),
+                false
         );
     }
 
-    private String resolvePreviewUrl(AttachmentEntity attachment) {
+    private AttachmentResolvedAccess authorizationRequiredAccess() {
+        return new AttachmentResolvedAccess(null, null, null, null, true);
+    }
+
+    private String buildAccessUrl(UUID attachmentId, String action, String accessToken) {
+        return "/api/attachments/" + attachmentId + "/" + action + "?"
+                + AttachmentAccessTokenService.QUERY_PARAMETER + "=" + accessToken;
+    }
+
+    private RedirectTarget resolveRedirectTarget(
+            AttachmentEntity attachment,
+            AttachmentMediaVariant variant,
+            Instant accessExpiresAt
+    ) {
+        StoredObjectReference objectReference = switch (variant) {
+            case DOWNLOAD -> isS3Stored(attachment)
+                    ? new StoredObjectReference(attachment.getBucketName(), attachment.getObjectKey())
+                    : null;
+            case PREVIEW -> resolvePreviewObjectReference(attachment);
+            case THUMBNAIL -> resolveThumbnailObjectReference(attachment);
+        };
+        if (objectReference == null) {
+            return null;
+        }
+        PresignedMediaAccess access = accessExpiresAt == null
+                ? mediaService.buildDownloadAccess(objectReference.bucketName(), objectReference.objectKey())
+                : mediaService.buildDownloadAccess(
+                        objectReference.bucketName(),
+                        objectReference.objectKey(),
+                        Duration.between(Instant.now(), accessExpiresAt)
+                );
+        return new RedirectTarget(access.downloadUrl());
+    }
+
+    private StoredObjectReference resolvePreviewObjectReference(AttachmentEntity attachment) {
         if (!isPreviewableAttachment(attachment)) {
             return null;
         }
         if (attachment.getPreviewBucketName() != null && attachment.getPreviewObjectKey() != null) {
-            return mediaService.buildDownloadAccess(
-                    attachment.getPreviewBucketName(),
-                    attachment.getPreviewObjectKey()
-            ).downloadUrl();
+            return new StoredObjectReference(attachment.getPreviewBucketName(), attachment.getPreviewObjectKey());
         }
         if (isS3Stored(attachment)) {
-            return mediaService.buildDownloadAccess(
-                    attachment.getBucketName(),
-                    attachment.getObjectKey()
-            ).downloadUrl();
+            return new StoredObjectReference(attachment.getBucketName(), attachment.getObjectKey());
         }
         return null;
     }
 
-    private String resolveThumbnailUrl(AttachmentEntity attachment) {
+    private StoredObjectReference resolveThumbnailObjectReference(AttachmentEntity attachment) {
         if (!isPreviewableAttachment(attachment)) {
             return null;
         }
         if (attachment.getThumbnailBucketName() != null && attachment.getThumbnailObjectKey() != null) {
-            return mediaService.buildDownloadAccess(
-                    attachment.getThumbnailBucketName(),
-                    attachment.getThumbnailObjectKey()
-            ).downloadUrl();
+            return new StoredObjectReference(attachment.getThumbnailBucketName(), attachment.getThumbnailObjectKey());
         }
-        return resolvePreviewUrl(attachment);
+        StoredObjectReference previewReference = resolvePreviewObjectReference(attachment);
+        if (previewReference != null) {
+            return previewReference;
+        }
+        if (isS3Stored(attachment)) {
+            return new StoredObjectReference(attachment.getBucketName(), attachment.getObjectKey());
+        }
+        return null;
+    }
+
+    private DownloadedAttachment loadVariantBytes(AttachmentEntity attachment, AttachmentMediaVariant variant) {
+        if (variant != AttachmentMediaVariant.DOWNLOAD && !isPreviewableAttachment(attachment)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Attachment preview is unavailable");
+        }
+        AttachmentEntity binarySource = resolveBinarySource(attachment);
+        byte[] ciphertext;
+        try {
+            ciphertext = Files.readAllBytes(Path.of(binarySource.getStoragePath()));
+        } catch (IOException exception) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Unable to read attachment", exception);
+        }
+
+        byte[] plaintext = chatEncryptionService.decryptBytes(
+                binarySource.getChatId(),
+                ciphertext,
+                binarySource.getNonce(),
+                binarySource.getKeyVersion()
+        );
+        return new DownloadedAttachment(
+                attachment.getOriginalFileName(),
+                attachment.getContentType(),
+                plaintext
+        );
+    }
+
+    private void ensurePreviewAccessAllowed(UUID requesterId, AttachmentEntity attachment) {
+        ensureModerationAccessAllowed(requesterId, attachment);
+        if (!isPreviewableAttachment(attachment)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Attachment preview is unavailable");
+        }
+        if (shouldHidePreviewForSensitiveContent(requesterId, attachment)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Attachment preview is restricted");
+        }
     }
 
     private boolean isS3Stored(AttachmentEntity attachment) {
@@ -667,90 +775,6 @@ public class AttachmentService {
         return "VIDEO_NOTE".equalsIgnoreCase(attachment.getKind());
     }
 
-    private String normalizeKind(String kind, String contentType) {
-        String normalizedKind = kind != null ? kind.trim().toUpperCase() : "";
-        if (normalizedKind.isBlank()) {
-            if ("image/gif".equalsIgnoreCase(contentType)) {
-                return "GIF";
-            }
-            if (contentType.toLowerCase().startsWith("image/")) {
-                return "IMAGE";
-            }
-            if (contentType.toLowerCase().startsWith("video/")) {
-                return "VIDEO";
-            }
-            if (contentType.toLowerCase().startsWith("audio/")) {
-                return "AUDIO";
-            }
-            return "FILE";
-        }
-        if (!List.of("FILE", "VOICE", "IMAGE", "VIDEO", "AUDIO", "GIF", "VIDEO_NOTE").contains(normalizedKind)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported attachment kind");
-        }
-        return normalizedKind;
-    }
-
-    private void validateAttachmentMetadata(
-            String kind,
-            Long durationMs,
-            Integer width,
-            Integer height,
-            String contentType
-    ) {
-        if ("VOICE".equals(kind)) {
-            if (durationMs == null || durationMs <= 0 || durationMs > 60 * 60 * 1000L) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Voice attachment duration is invalid");
-            }
-            if (!contentType.toLowerCase().startsWith("audio/")) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Voice attachment must be audio");
-            }
-        } else if ("AUDIO".equals(kind) && !contentType.toLowerCase().startsWith("audio/")) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Audio attachment must be audio");
-        } else if ("IMAGE".equals(kind) && !contentType.toLowerCase().startsWith("image/")) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Image attachment must be an image");
-        } else if ("GIF".equals(kind) && !"image/gif".equalsIgnoreCase(contentType)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "GIF attachment must be a GIF image");
-        } else if ("VIDEO".equals(kind) && !contentType.toLowerCase().startsWith("video/")) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Video attachment must be a video");
-        } else if ("VIDEO_NOTE".equals(kind)) {
-            if (durationMs == null || durationMs <= 0 || durationMs > 60 * 60 * 1000L) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Video note duration is invalid");
-            }
-            if (!contentType.toLowerCase().startsWith("video/")) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Video note attachment must be a video");
-            }
-        }
-
-        if (width != null && width <= 0) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Attachment width is invalid");
-        }
-        if (height != null && height <= 0) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Attachment height is invalid");
-        }
-        if ((width != null || height != null)
-                && !List.of("IMAGE", "GIF", "VIDEO", "VIDEO_NOTE").contains(kind)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Dimensions are supported only for visual attachments");
-        }
-        if ("VIDEO_NOTE".equals(kind)
-                && width != null
-                && height != null
-                && !width.equals(height)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Video note must use square dimensions");
-        }
-    }
-
-    private void validateAlbumMetadata(String kind, UUID albumId, Integer albumItemIndex) {
-        if (albumItemIndex != null && albumItemIndex < 0) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Album item index is invalid");
-        }
-        if (albumItemIndex != null && albumId == null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Album item index requires album id");
-        }
-        if (albumId != null && !List.of("IMAGE", "VIDEO", "GIF", "VIDEO_NOTE").contains(kind)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Album attachments must be visual media");
-        }
-    }
-
     private boolean isStreamingSupported(AttachmentEntity attachment) {
         return List.of("VOICE", "AUDIO", "VIDEO", "VIDEO_NOTE").contains(attachment.getKind());
     }
@@ -761,21 +785,6 @@ public class AttachmentService {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Media groups support only visual attachments");
             }
         }
-    }
-
-    private String normalizeContentType(String contentType) {
-        if (contentType == null || contentType.isBlank()) {
-            return "application/octet-stream";
-        }
-        return contentType.trim().toLowerCase();
-    }
-
-    private String safeFileName(String originalFileName) {
-        if (originalFileName == null || originalFileName.isBlank()) {
-            return "file";
-        }
-        String normalized = originalFileName.replace("\\", "_").replace("/", "_").trim();
-        return normalized.length() > 255 ? normalized.substring(0, 255) : normalized;
     }
 
     private String normalizeOptional(String value, int maxLength) {
@@ -802,14 +811,6 @@ public class AttachmentService {
         if (attachment.getDurationMs() == null || attachment.getDurationMs() <= 0) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Attachment duration is unavailable for trimming");
         }
-    }
-
-    private boolean normalizeHdPhoto(Boolean hdPhoto, String kind) {
-        boolean enabled = Boolean.TRUE.equals(hdPhoto);
-        if (enabled && !"IMAGE".equals(kind)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "HD photo is supported only for image attachments");
-        }
-        return enabled;
     }
 
     private TrimWindow normalizeTrimWindow(AttachmentEntity attachment, TrimAttachmentRequest request) {
@@ -903,40 +904,11 @@ public class AttachmentService {
     }
 
     private List<Integer> parseWaveform(String waveform) {
-        if (waveform == null || waveform.isBlank()) {
-            return List.of();
-        }
-        String[] parts = waveform.split(",");
-        if (parts.length > 96) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Waveform is too large");
-        }
-        List<Integer> values = new ArrayList<>(parts.length);
-        for (String part : parts) {
-            String normalized = part.trim();
-            if (normalized.isBlank()) {
-                continue;
-            }
-            int value;
-            try {
-                value = Integer.parseInt(normalized);
-            } catch (NumberFormatException exception) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Waveform contains invalid sample", exception);
-            }
-            if (value < 0 || value > 100) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Waveform sample is out of range");
-            }
-            values.add(value);
-        }
-        return values;
+        return AttachmentMetadataSupport.parseWaveformString(waveform);
     }
 
     private String serializeWaveform(List<Integer> waveformSamples) {
-        if (waveformSamples == null || waveformSamples.isEmpty()) {
-            return null;
-        }
-        return waveformSamples.stream()
-                .map(String::valueOf)
-                .collect(Collectors.joining(","));
+        return AttachmentMetadataSupport.serializeWaveform(waveformSamples);
     }
 
     private MessageAttachmentResponse saveUploadedAttachment(
@@ -1028,9 +1000,30 @@ public class AttachmentService {
         }
     }
 
+    private record AttachmentResolvedAccess(
+            String downloadUrl,
+            String previewUrl,
+            String thumbnailUrl,
+            Instant accessExpiresAt,
+            boolean requiresAuthorization
+    ) {
+    }
+
+    private record RedirectTarget(String downloadUrl) {
+    }
+
+    private record StoredObjectReference(String bucketName, String objectKey) {
+    }
+
     private record ImageDimensions(Integer width, Integer height) {
     }
 
     private record TrimWindow(Long startMs, Long endMs, Long durationMs) {
+    }
+
+    private enum AttachmentMediaVariant {
+        DOWNLOAD,
+        PREVIEW,
+        THUMBNAIL
     }
 }

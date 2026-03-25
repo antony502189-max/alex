@@ -51,6 +51,9 @@ public class LoginCodeChallengeEntity {
     @Column(name = "requested_by_user_agent", length = 255)
     private String requestedByUserAgent;
 
+    @Column(name = "request_fingerprint_hash", length = 128)
+    private String requestFingerprintHash;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

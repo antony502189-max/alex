@@ -1,6 +1,7 @@
 package com.alex.messenger.attachment;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -121,6 +122,124 @@ class AttachmentUploadSessionServiceTest {
     }
 
     @Test
+    void uploadChunkExtendsSessionExpiryOnProgress() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        AtomicReference<AttachmentUploadSessionEntity> storedSession = new AtomicReference<>();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(attachmentUploadSessionRepository.save(any(AttachmentUploadSessionEntity.class))).thenAnswer(invocation -> {
+            AttachmentUploadSessionEntity session = invocation.getArgument(0);
+            storedSession.set(session);
+            return session;
+        });
+        when(attachmentUploadSessionRepository.findByIdAndUploaderUserId(any(UUID.class), eq(requesterId))).thenAnswer(invocation -> {
+            AttachmentUploadSessionEntity session = storedSession.get();
+            if (session == null || !session.getId().equals(invocation.getArgument(0))) {
+                return Optional.empty();
+            }
+            return Optional.of(session);
+        });
+
+        var session = attachmentUploadSessionService.createSession(
+                requesterId,
+                new CreateAttachmentUploadSessionRequest(
+                        chatId,
+                        "photo.png",
+                        "image/png",
+                        "IMAGE",
+                        5L,
+                        null,
+                        null,
+                        null,
+                        true,
+                        null,
+                        null,
+                        null
+                )
+        );
+
+        Instant shortExpiry = Instant.now().plusSeconds(5);
+        storedSession.get().setExpiresAt(shortExpiry);
+
+        var updatedSession = attachmentUploadSessionService.uploadChunk(
+                requesterId,
+                session.uploadSessionId(),
+                new UploadAttachmentChunkRequest(
+                        0L,
+                        Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8))
+                )
+        );
+
+        assertThat(updatedSession.expiresAt()).isAfter(shortExpiry.plus(Duration.ofHours(1)));
+    }
+
+    @Test
+    void uploadChunkAbortsSessionWhenStagedFileIsInconsistent() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        AtomicReference<AttachmentUploadSessionEntity> storedSession = new AtomicReference<>();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(attachmentUploadSessionRepository.save(any(AttachmentUploadSessionEntity.class))).thenAnswer(invocation -> {
+            AttachmentUploadSessionEntity session = invocation.getArgument(0);
+            storedSession.set(session);
+            return session;
+        });
+        when(attachmentUploadSessionRepository.findByIdAndUploaderUserId(any(UUID.class), eq(requesterId))).thenAnswer(invocation -> {
+            AttachmentUploadSessionEntity session = storedSession.get();
+            if (session == null || !session.getId().equals(invocation.getArgument(0))) {
+                return Optional.empty();
+            }
+            return Optional.of(session);
+        });
+
+        var session = attachmentUploadSessionService.createSession(
+                requesterId,
+                new CreateAttachmentUploadSessionRequest(
+                        chatId,
+                        "photo.png",
+                        "image/png",
+                        "IMAGE",
+                        5L,
+                        null,
+                        null,
+                        null,
+                        true,
+                        null,
+                        null,
+                        null
+                )
+        );
+
+        Path stagedFile = Path.of(storedSession.get().getStoragePath());
+        storedSession.get().setUploadedBytes(4L);
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> attachmentUploadSessionService.uploadChunk(
+                        requesterId,
+                        session.uploadSessionId(),
+                        new UploadAttachmentChunkRequest(
+                                4L,
+                                Base64.getEncoder().encodeToString("x".getBytes(StandardCharsets.UTF_8))
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.CONFLICT);
+        assertThat(storedSession.get().getStatus()).isEqualTo("ABORTED");
+        assertThat(Files.exists(stagedFile)).isFalse();
+    }
+
+    @Test
     void completeSessionMarksUploadCompletedAndDeletesTempFile() throws Exception {
         UUID requesterId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();
@@ -217,6 +336,90 @@ class AttachmentUploadSessionServiceTest {
     }
 
     @Test
+    void completeSessionRejectsWhenStagedFileIsInconsistent() throws Exception {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        Path stagedFile = tempDirectory.resolve("session-corrupt.part");
+
+        Files.writeString(stagedFile, "bad");
+
+        AttachmentUploadSessionEntity session = new AttachmentUploadSessionEntity();
+        session.setId(sessionId);
+        session.setChatId(chatId);
+        session.setUploaderUserId(requesterId);
+        session.setOriginalFileName("clip.mp4");
+        session.setContentType("video/mp4");
+        session.setKind("VIDEO");
+        session.setTotalSizeBytes(4L);
+        session.setUploadedBytes(4L);
+        session.setStoragePath(stagedFile.toString());
+        session.setStatus("ACTIVE");
+        session.setExpiresAt(Instant.now().plus(Duration.ofHours(1)));
+
+        when(attachmentUploadSessionRepository.findByIdAndUploaderUserId(sessionId, requesterId)).thenReturn(Optional.of(session));
+        when(attachmentUploadSessionRepository.save(any(AttachmentUploadSessionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> attachmentUploadSessionService.completeSession(requesterId, sessionId),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.CONFLICT);
+        assertThat(session.getStatus()).isEqualTo("ABORTED");
+        assertThat(Files.exists(stagedFile)).isFalse();
+        verify(attachmentService, org.mockito.Mockito.never()).uploadFromPath(
+                any(UUID.class),
+                any(UUID.class),
+                any(String.class),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(),
+                any(String.class),
+                any(String.class),
+                org.mockito.ArgumentMatchers.anyLong(),
+                any(Path.class)
+        );
+    }
+
+    @Test
+    void getSessionExpiresStaleActiveSession() throws Exception {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+        Path stagedFile = tempDirectory.resolve("session-expired.part");
+
+        Files.writeString(stagedFile, "data");
+
+        AttachmentUploadSessionEntity session = new AttachmentUploadSessionEntity();
+        session.setId(sessionId);
+        session.setChatId(chatId);
+        session.setUploaderUserId(requesterId);
+        session.setOriginalFileName("clip.mp4");
+        session.setContentType("video/mp4");
+        session.setKind("VIDEO");
+        session.setTotalSizeBytes(4L);
+        session.setUploadedBytes(4L);
+        session.setStoragePath(stagedFile.toString());
+        session.setStatus("ACTIVE");
+        session.setExpiresAt(Instant.now().minus(Duration.ofMinutes(1)));
+
+        when(attachmentUploadSessionRepository.findByIdAndUploaderUserId(sessionId, requesterId)).thenReturn(Optional.of(session));
+        when(attachmentUploadSessionRepository.save(any(AttachmentUploadSessionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        var response = attachmentUploadSessionService.getSession(requesterId, sessionId);
+
+        assertThat(response.status()).isEqualTo("EXPIRED");
+        assertThat(session.getStatus()).isEqualTo("EXPIRED");
+        assertThat(Files.exists(stagedFile)).isFalse();
+    }
+
+    @Test
     void createSessionRejectsHdPhotoForNonImageKind() {
         UUID requesterId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();
@@ -249,5 +452,77 @@ class AttachmentUploadSessionServiceTest {
 
         assertThat(exception).isNotNull();
         assertThat(exception.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
+    void createSessionRejectsVoiceKindForNonAudioContentType() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+
+        ResponseStatusException exception = org.assertj.core.api.Assertions.catchThrowableOfType(
+                () -> attachmentUploadSessionService.createSession(
+                        requesterId,
+                        new CreateAttachmentUploadSessionRequest(
+                                chatId,
+                                "voice.png",
+                                "image/png",
+                                "VOICE",
+                                5L,
+                                500L,
+                                null,
+                                null,
+                                false,
+                                List.of(1, 2, 3),
+                                null,
+                                null
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST);
+        verify(attachmentUploadSessionRepository, org.mockito.Mockito.never()).save(any(AttachmentUploadSessionEntity.class));
+    }
+
+    @Test
+    void createSessionRejectsAlbumForAudioAttachment() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+
+        ChatEntity chat = new ChatEntity();
+        chat.setId(chatId);
+
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+
+        ResponseStatusException exception = org.assertj.core.api.Assertions.catchThrowableOfType(
+                () -> attachmentUploadSessionService.createSession(
+                        requesterId,
+                        new CreateAttachmentUploadSessionRequest(
+                                chatId,
+                                "song.ogg",
+                                "audio/ogg",
+                                "AUDIO",
+                                5L,
+                                500L,
+                                null,
+                                null,
+                                false,
+                                List.of(1, 2, 3),
+                                UUID.randomUUID(),
+                                0
+                        )
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(org.springframework.http.HttpStatus.BAD_REQUEST);
+        verify(attachmentUploadSessionRepository, org.mockito.Mockito.never()).save(any(AttachmentUploadSessionEntity.class));
     }
 }

@@ -25,7 +25,6 @@ import org.springframework.stereotype.Service;
 public class CallNotificationService {
 
     private static final List<String> PUSH_ELIGIBLE_PARTICIPANT_STATES = List.of("RINGING", "INVITED");
-    private static final List<String> PUSH_ELIGIBLE_SESSION_STATUSES = List.of("RINGING", "ACTIVE");
 
     private final PushNotificationService pushNotificationService;
     private final UserSessionService userSessionService;
@@ -39,7 +38,7 @@ public class CallNotificationService {
                 || session.getId() == null
                 || session.getChatId() == null
                 || session.getMode() == null
-                || !PUSH_ELIGIBLE_SESSION_STATUSES.contains(session.getStatus())) {
+                || !isPushEligibleSession(session)) {
             return;
         }
 
@@ -143,5 +142,16 @@ public class CallNotificationService {
     private String describeKind(String kind) {
         String normalized = kind == null ? "VOICE" : kind.trim().toUpperCase(Locale.ROOT);
         return "VIDEO".equals(normalized) ? "video" : "voice";
+    }
+
+    private boolean isPushEligibleSession(CallSessionEntity session) {
+        if (session == null || session.getMode() == null || session.getStatus() == null) {
+            return false;
+        }
+        return switch (session.getMode()) {
+            case "DIRECT", "GROUP" -> "RINGING".equals(session.getStatus());
+            case "VOICE_CHAT", "LIVE_STREAM" -> "ACTIVE".equals(session.getStatus());
+            default -> false;
+        };
     }
 }

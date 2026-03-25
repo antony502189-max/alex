@@ -14,9 +14,7 @@ import com.alex.messenger.chat.dto.UpdateMemberPermissionsRequest;
 import com.alex.messenger.chat.folder.ChatFolderService;
 import com.alex.messenger.chat.forum.ForumTopicService;
 import com.alex.messenger.message.MessageDeliveryService;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
@@ -90,12 +88,16 @@ class ChatControllerTest {
         UUID firstChatId = UUID.randomUUID();
         UUID secondChatId = UUID.randomUUID();
         UUID thirdChatId = UUID.randomUUID();
-
-        when(chatFolderService.listChats(currentUserId, folderId, null)).thenReturn(List.of(
+        List<ChatSummaryResponse> folderChats = List.of(
                 chat(firstChatId, false, null),
                 chat(secondChatId, false, null),
                 chat(thirdChatId, false, null)
-        ));
+        );
+
+        when(chatFolderService.listChats(currentUserId, folderId, null)).thenReturn(folderChats);
+        when(chatService.sliceChatList(folderChats, null, 2)).thenReturn(
+                new ChatService.ChatListSlice(folderChats.subList(0, 2), "opaque-cursor", true)
+        );
 
         ResponseEntity<List<ChatSummaryResponse>> response = chatController.listChats(null, folderId, 2, null);
 
@@ -104,14 +106,20 @@ class ChatControllerTest {
                 .containsExactly(firstChatId, secondChatId);
         assertThat(response.getHeaders().getFirst("X-Chat-Has-More")).isEqualTo("true");
         assertThat(response.getHeaders().getFirst("X-Chat-Limit")).isEqualTo("2");
-        assertThat(decodeCursor(response.getHeaders().getFirst("X-Chat-Next-Cursor"))).isEqualTo(2);
+        assertThat(response.getHeaders().getFirst("X-Chat-Next-Cursor")).isEqualTo("opaque-cursor");
 
         verify(chatFolderService).listChats(currentUserId, folderId, null);
+        verify(chatService).sliceChatList(folderChats, null, 2);
     }
 
     @Test
     void listChatsByFolderRejectsMalformedCursor() {
         UUID folderId = UUID.randomUUID();
+        List<ChatSummaryResponse> folderChats = List.of(chat(UUID.randomUUID(), false, null));
+
+        when(chatFolderService.listChats(currentUserId, folderId, null)).thenReturn(folderChats);
+        when(chatService.sliceChatList(folderChats, "%%%bad%%%", 2))
+                .thenThrow(new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is invalid"));
 
         assertThatThrownBy(() -> chatController.listChats(null, folderId, 2, "%%%bad%%%"))
                 .isInstanceOf(ResponseStatusException.class)
@@ -247,9 +255,5 @@ class ChatControllerTest {
                 true,
                 new ChatLastMessagePreviewResponse(null, null, null, false, false, null, null, null, null, null)
         );
-    }
-
-    private int decodeCursor(String cursor) {
-        return Integer.parseInt(new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8));
     }
 }

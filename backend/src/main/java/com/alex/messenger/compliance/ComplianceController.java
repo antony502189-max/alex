@@ -1,11 +1,15 @@
 package com.alex.messenger.compliance;
 
 import com.alex.messenger.compliance.dto.ComplianceCaseApproveRequest;
+import com.alex.messenger.compliance.dto.ComplianceCaseArtifactDownloadResponse;
 import com.alex.messenger.compliance.dto.ComplianceCaseCreateRequest;
+import com.alex.messenger.compliance.dto.ComplianceCaseExportArtifactResponse;
+import com.alex.messenger.compliance.dto.ComplianceCaseExportDownloadAuditResponse;
 import com.alex.messenger.compliance.dto.ComplianceCaseExportResponse;
 import com.alex.messenger.compliance.dto.ComplianceCaseResponse;
 import com.alex.messenger.feature.FeatureFlagService;
 import jakarta.validation.Valid;
+import java.util.List;
 import java.util.UUID;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
@@ -47,7 +51,7 @@ public class ComplianceController {
         if (operatorId == null || operatorId.isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Operator id is required");
         }
-        return ResponseEntity.ok(complianceService.getCase(caseId));
+        return ResponseEntity.ok(complianceService.getCase(operatorId, caseId));
     }
 
     @PostMapping("/{caseId}/approve")
@@ -71,5 +75,86 @@ public class ComplianceController {
     ) {
         featureFlagService.requireAdminComplianceEnabled();
         return ResponseEntity.ok(complianceService.exportCase(operatorId, caseId));
+    }
+
+    @GetMapping("/{caseId}/exports")
+    public ResponseEntity<List<ComplianceCaseExportArtifactResponse>> listExports(
+            @RequestHeader(OPERATOR_ID_HEADER) String operatorId,
+            @PathVariable UUID caseId
+    ) {
+        featureFlagService.requireAdminComplianceEnabled();
+        if (operatorId == null || operatorId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Operator id is required");
+        }
+        return ResponseEntity.ok(complianceService.listArtifacts(operatorId, caseId));
+    }
+
+    @GetMapping("/{caseId}/exports/latest/metadata")
+    public ResponseEntity<ComplianceCaseExportArtifactResponse> latestExportMetadata(
+            @RequestHeader(OPERATOR_ID_HEADER) String operatorId,
+            @PathVariable UUID caseId
+    ) {
+        featureFlagService.requireAdminComplianceEnabled();
+        if (operatorId == null || operatorId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Operator id is required");
+        }
+        return ResponseEntity.ok(complianceService.getLatestArtifactMetadata(operatorId, caseId));
+    }
+
+    @GetMapping("/{caseId}/exports/{artifactId}/metadata")
+    public ResponseEntity<ComplianceCaseExportArtifactResponse> exportMetadata(
+            @RequestHeader(OPERATOR_ID_HEADER) String operatorId,
+            @PathVariable UUID caseId,
+            @PathVariable UUID artifactId
+    ) {
+        featureFlagService.requireAdminComplianceEnabled();
+        if (operatorId == null || operatorId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Operator id is required");
+        }
+        return ResponseEntity.ok(complianceService.getArtifactMetadata(operatorId, caseId, artifactId));
+    }
+
+    @GetMapping("/{caseId}/exports/latest")
+    public ResponseEntity<ComplianceCaseArtifactDownloadResponse> downloadLatestExport(
+            @RequestHeader(OPERATOR_ID_HEADER) String operatorId,
+            @PathVariable UUID caseId
+    ) {
+        featureFlagService.requireAdminComplianceEnabled();
+        return ResponseEntity.ok(complianceService.downloadLatestArtifact(operatorId, caseId));
+    }
+
+    @GetMapping("/{caseId}/exports/{artifactId}")
+    public ResponseEntity<ComplianceCaseArtifactDownloadResponse> downloadExport(
+            @RequestHeader(OPERATOR_ID_HEADER) String operatorId,
+            @PathVariable UUID caseId,
+            @PathVariable UUID artifactId
+    ) {
+        featureFlagService.requireAdminComplianceEnabled();
+        return ResponseEntity.ok(complianceService.downloadArtifact(operatorId, caseId, artifactId));
+    }
+
+    @GetMapping("/{caseId}/exports/downloads")
+    public ResponseEntity<List<ComplianceCaseExportDownloadAuditResponse>> listDownloadAudits(
+            @RequestHeader(OPERATOR_ID_HEADER) String operatorId,
+            @PathVariable UUID caseId
+    ) {
+        featureFlagService.requireAdminComplianceEnabled();
+        if (operatorId == null || operatorId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Operator id is required");
+        }
+        return ResponseEntity.ok(complianceService.listDownloadAudits(operatorId, caseId));
+    }
+
+    @GetMapping("/{caseId}/exports/{artifactId}/downloads")
+    public ResponseEntity<List<ComplianceCaseExportDownloadAuditResponse>> listArtifactDownloadAudits(
+            @RequestHeader(OPERATOR_ID_HEADER) String operatorId,
+            @PathVariable UUID caseId,
+            @PathVariable UUID artifactId
+    ) {
+        featureFlagService.requireAdminComplianceEnabled();
+        if (operatorId == null || operatorId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Operator id is required");
+        }
+        return ResponseEntity.ok(complianceService.listArtifactDownloadAudits(operatorId, caseId, artifactId));
     }
 }

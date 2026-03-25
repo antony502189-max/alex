@@ -8,6 +8,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.lenient;
 
 import com.alex.messenger.call.dto.CreateCallCommentRequest;
 import com.alex.messenger.call.dto.CreateCallReactionRequest;
@@ -36,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -105,6 +107,7 @@ class CallServiceTest {
                 featureFlagService,
                 callLifecycleProperties
         );
+        lenient().when(featureFlagService.isGroupCallsEnabled()).thenReturn(true);
     }
 
     @Test
@@ -518,7 +521,6 @@ class CallServiceTest {
         when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
         when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
         when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "GROUP"));
-        when(chatService.getMembership(chatId, requesterId)).thenReturn(requesterMembership);
 
         assertThatThrownBy(() -> callService.moderateParticipant(
                 requesterId,
@@ -620,6 +622,95 @@ class CallServiceTest {
         ))
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode().value()).isEqualTo(404));
+
+        verify(callRealtimeService, never()).publishSignalEvent(any(), any());
+    }
+
+    @Test
+    void sendSignalNormalizesSupportedAliases() {
+        UUID requesterId = UUID.randomUUID();
+        UUID targetUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(callId);
+        session.setChatId(chatId);
+        session.setStatus("ACTIVE");
+
+        CallParticipantEntity sender = participant(callId, requesterId, "JOINED");
+        CallParticipantEntity target = participant(callId, targetUserId, "JOINED");
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "DIRECT"));
+        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId))).thenReturn(Optional.of(sender));
+        when(callParticipantRepository.findById(new CallParticipantId(callId, targetUserId))).thenReturn(Optional.of(target));
+        when(chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, targetUserId)).thenReturn(true);
+
+        var response = callService.sendSignal(
+                requesterId,
+                callId,
+                new CallSignalRequest(targetUserId, " ice-candidate ", "  {\"candidate\":\"x\"}  ")
+        );
+
+        assertThat(response.signalType()).isEqualTo("CANDIDATE");
+        assertThat(response.payload()).isEqualTo("{\"candidate\":\"x\"}");
+        verify(callRealtimeService).publishSignalEvent(eq(targetUserId), any());
+    }
+
+    @Test
+    void sendSignalRejectsUnsupportedSignalType() {
+        UUID requesterId = UUID.randomUUID();
+        UUID targetUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(callId);
+        session.setChatId(chatId);
+        session.setStatus("ACTIVE");
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "DIRECT"));
+
+        assertThatThrownBy(() -> callService.sendSignal(
+                requesterId,
+                callId,
+                new CallSignalRequest(targetUserId, "teleport", "{\"value\":1}")
+        ))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode())
+                        .isEqualTo(HttpStatus.BAD_REQUEST));
+
+        verify(callRealtimeService, never()).publishSignalEvent(any(), any());
+    }
+
+    @Test
+    void sendSignalRejectsBlankPayloadWhenCalledDirectly() {
+        UUID requesterId = UUID.randomUUID();
+        UUID targetUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(callId);
+        session.setChatId(chatId);
+        session.setStatus("ACTIVE");
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "DIRECT"));
+
+        assertThatThrownBy(() -> callService.sendSignal(
+                requesterId,
+                callId,
+                new CallSignalRequest(targetUserId, "offer", "   ")
+        ))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode())
+                        .isEqualTo(HttpStatus.BAD_REQUEST));
 
         verify(callRealtimeService, never()).publishSignalEvent(any(), any());
     }
@@ -885,6 +976,268 @@ class CallServiceTest {
     }
 
     @Test
+    void acceptDirectCallUnmutesCalleeAndMarksSessionActive() {
+        UUID requesterId = UUID.randomUUID();
+        UUID callerUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "DIRECT");
+        chat.setParticipantLowId(requesterId);
+        chat.setParticipantHighId(callerUserId);
+        UserEntity requester = user(requesterId, "Requester");
+        UserEntity caller = user(callerUserId, "Caller");
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(callId);
+        session.setChatId(chatId);
+        session.setCreatedByUserId(callerUserId);
+        session.setKind("VOICE");
+        session.setMode("DIRECT");
+        session.setStatus("RINGING");
+        session.setStartedAt(Instant.parse("2026-03-14T10:00:00Z"));
+
+        CallParticipantEntity callerParticipant = participant(callId, callerUserId, "JOINED");
+        CallParticipantEntity requesterParticipant = participant(callId, requesterId, "RINGING");
+        requesterParticipant.setAudioMuted(true);
+        requesterParticipant.setMutedByModerator(true);
+        requesterParticipant.setMutedByUserId(callerUserId);
+        requesterParticipant.setMutedAt(Instant.parse("2026-03-14T10:00:30Z"));
+
+        AtomicReference<List<CallParticipantEntity>> participantsRef = new AtomicReference<>(new ArrayList<>(List.of(
+                callerParticipant,
+                requesterParticipant
+        )));
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId)))
+                .thenAnswer(invocation -> participantsRef.get().stream()
+                        .filter(participant -> participant.getId().getUserId().equals(requesterId))
+                        .findFirst());
+        when(callParticipantRepository.save(any(CallParticipantEntity.class))).thenAnswer(invocation -> {
+            CallParticipantEntity saved = invocation.getArgument(0);
+            List<CallParticipantEntity> updated = new ArrayList<>(participantsRef.get());
+            for (int index = 0; index < updated.size(); index++) {
+                if (updated.get(index).getId().equals(saved.getId())) {
+                    updated.set(index, saved);
+                }
+            }
+            participantsRef.set(updated);
+            return saved;
+        });
+        when(callSessionRepository.save(any(CallSessionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(callParticipantRepository.findAllByIdCallId(callId)).thenAnswer(invocation -> participantsRef.get());
+        when(userRepository.findAllById(any())).thenReturn(List.of(requester, caller));
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(
+                member(chatId, requesterId),
+                member(chatId, callerUserId)
+        ));
+
+        var response = callService.acceptCall(requesterId, callId);
+
+        assertThat(response.status()).isEqualTo("ACTIVE");
+        assertThat(session.getAnsweredAt()).isNotNull();
+        assertThat(participantsRef.get()).filteredOn(participant -> participant.getId().getUserId().equals(requesterId))
+                .singleElement()
+                .satisfies(participant -> {
+                    assertThat(participant.getState()).isEqualTo("JOINED");
+                    assertThat(participant.getAudioMuted()).isFalse();
+                    assertThat(participant.getMutedByModerator()).isFalse();
+                    assertThat(participant.getMutedByUserId()).isNull();
+                    assertThat(participant.getMutedAt()).isNull();
+                });
+        assertThat(response.participants()).filteredOn(participant -> participant.userId().equals(requesterId))
+                .singleElement()
+                .satisfies(participant -> assertThat(participant.audioMuted()).isFalse());
+    }
+
+    @Test
+    void acceptDirectCallRejectsDeclinedParticipant() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = session(callId, chatId, UUID.randomUUID(), "ACTIVE", "DIRECT");
+        CallParticipantEntity participant = participant(callId, requesterId, "DECLINED");
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "DIRECT"));
+        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId))).thenReturn(Optional.of(participant));
+
+        ResponseStatusException exception = org.assertj.core.api.Assertions.catchThrowableOfType(
+                () -> callService.acceptCall(requesterId, callId),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        verify(callParticipantRepository, never()).save(any(CallParticipantEntity.class));
+    }
+
+    @Test
+    void acceptDirectCallRejectsInitiatorWhileStillRinging() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = session(callId, chatId, requesterId, "RINGING", "DIRECT");
+        CallParticipantEntity participant = participant(callId, requesterId, "JOINED");
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "DIRECT"));
+        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId))).thenReturn(Optional.of(participant));
+
+        ResponseStatusException exception = org.assertj.core.api.Assertions.catchThrowableOfType(
+                () -> callService.acceptCall(requesterId, callId),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        verify(callParticipantRepository, never()).save(any(CallParticipantEntity.class));
+    }
+
+    @Test
+    void acceptDirectCallIsIdempotentForAlreadyAnsweredCallee() {
+        UUID requesterId = UUID.randomUUID();
+        UUID callerUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "DIRECT");
+        chat.setParticipantLowId(requesterId);
+        chat.setParticipantHighId(callerUserId);
+        UserEntity requester = user(requesterId, "Requester");
+        UserEntity caller = user(callerUserId, "Caller");
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(callId);
+        session.setChatId(chatId);
+        session.setCreatedByUserId(callerUserId);
+        session.setKind("VOICE");
+        session.setMode("DIRECT");
+        session.setStatus("ACTIVE");
+        session.setStartedAt(Instant.parse("2026-03-14T10:00:00Z"));
+        session.setAnsweredAt(Instant.parse("2026-03-14T10:00:05Z"));
+
+        CallParticipantEntity callerParticipant = participant(callId, callerUserId, "JOINED");
+        CallParticipantEntity requesterParticipant = participant(callId, requesterId, "JOINED");
+        requesterParticipant.setAudioMuted(false);
+
+        AtomicReference<List<CallParticipantEntity>> participantsRef = new AtomicReference<>(new ArrayList<>(List.of(
+                callerParticipant,
+                requesterParticipant
+        )));
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId)))
+                .thenAnswer(invocation -> participantsRef.get().stream()
+                        .filter(participant -> participant.getId().getUserId().equals(requesterId))
+                        .findFirst());
+        when(callParticipantRepository.save(any(CallParticipantEntity.class))).thenAnswer(invocation -> {
+            CallParticipantEntity saved = invocation.getArgument(0);
+            List<CallParticipantEntity> updated = new ArrayList<>(participantsRef.get());
+            for (int index = 0; index < updated.size(); index++) {
+                if (updated.get(index).getId().equals(saved.getId())) {
+                    updated.set(index, saved);
+                }
+            }
+            participantsRef.set(updated);
+            return saved;
+        });
+        when(callSessionRepository.save(any(CallSessionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(callParticipantRepository.findAllByIdCallId(callId)).thenAnswer(invocation -> participantsRef.get());
+        when(userRepository.findAllById(any())).thenReturn(List.of(requester, caller));
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(
+                member(chatId, requesterId),
+                member(chatId, callerUserId)
+        ));
+
+        Instant answeredAtBefore = session.getAnsweredAt();
+        var response = callService.acceptCall(requesterId, callId);
+
+        assertThat(response.status()).isEqualTo("ACTIVE");
+        assertThat(session.getAnsweredAt()).isEqualTo(answeredAtBefore);
+        assertThat(response.participants()).filteredOn(participant -> participant.userId().equals(requesterId))
+                .singleElement()
+                .satisfies(participant -> assertThat(participant.state()).isEqualTo("JOINED"));
+    }
+
+    @Test
+    void acceptVoiceChatAllowsParticipantToRejoinAfterLeaving() {
+        UUID requesterId = UUID.randomUUID();
+        UUID hostUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "GROUP");
+        UserEntity requester = user(requesterId, "Requester");
+        UserEntity host = user(hostUserId, "Host");
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(callId);
+        session.setChatId(chatId);
+        session.setCreatedByUserId(hostUserId);
+        session.setKind("VOICE");
+        session.setMode("VOICE_CHAT");
+        session.setStatus("ACTIVE");
+        session.setStartedAt(Instant.parse("2026-03-14T10:00:00Z"));
+
+        CallParticipantEntity hostParticipant = participant(callId, hostUserId, "JOINED");
+        CallParticipantEntity requesterParticipant = participant(callId, requesterId, "LEFT");
+        requesterParticipant.setLeftAt(Instant.parse("2026-03-14T10:10:00Z"));
+        requesterParticipant.setAudioMuted(true);
+
+        AtomicReference<List<CallParticipantEntity>> participantsRef = new AtomicReference<>(new ArrayList<>(List.of(
+                hostParticipant,
+                requesterParticipant
+        )));
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId)))
+                .thenAnswer(invocation -> participantsRef.get().stream()
+                        .filter(participant -> participant.getId().getUserId().equals(requesterId))
+                        .findFirst());
+        when(callParticipantRepository.save(any(CallParticipantEntity.class))).thenAnswer(invocation -> {
+            CallParticipantEntity saved = invocation.getArgument(0);
+            List<CallParticipantEntity> updated = new ArrayList<>(participantsRef.get());
+            for (int index = 0; index < updated.size(); index++) {
+                if (updated.get(index).getId().equals(saved.getId())) {
+                    updated.set(index, saved);
+                }
+            }
+            participantsRef.set(updated);
+            return saved;
+        });
+        when(callSessionRepository.save(any(CallSessionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(callParticipantRepository.findAllByIdCallId(callId)).thenAnswer(invocation -> participantsRef.get());
+        when(userRepository.findAllById(any())).thenReturn(List.of(requester, host));
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(
+                member(chatId, requesterId),
+                member(chatId, hostUserId)
+        ));
+
+        var response = callService.acceptCall(requesterId, callId);
+
+        assertThat(response.status()).isEqualTo("ACTIVE");
+        assertThat(participantsRef.get()).filteredOn(participant -> participant.getId().getUserId().equals(requesterId))
+                .singleElement()
+                .satisfies(participant -> {
+                    assertThat(participant.getState()).isEqualTo("JOINED");
+                    assertThat(participant.getLeftAt()).isNull();
+                    assertThat(participant.getAudioMuted()).isTrue();
+                });
+    }
+
+    @Test
     void declineCallRejectsJoinedParticipant() {
         UUID requesterId = UUID.randomUUID();
         UUID chatId = UUID.randomUUID();
@@ -906,6 +1259,74 @@ class CallServiceTest {
         assertThat(exception).isNotNull();
         assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
         verify(callParticipantRepository, never()).save(any(CallParticipantEntity.class));
+    }
+
+    @Test
+    void declineDirectCallEndsSessionAndMarksCallerLeft() {
+        UUID requesterId = UUID.randomUUID();
+        UUID callerUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "DIRECT");
+        chat.setParticipantLowId(requesterId);
+        chat.setParticipantHighId(callerUserId);
+        UserEntity requester = user(requesterId, "Requester");
+        UserEntity caller = user(callerUserId, "Caller");
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(callId);
+        session.setChatId(chatId);
+        session.setCreatedByUserId(callerUserId);
+        session.setKind("VOICE");
+        session.setMode("DIRECT");
+        session.setStatus("RINGING");
+        session.setStartedAt(Instant.parse("2026-03-14T10:00:00Z"));
+
+        AtomicReference<List<CallParticipantEntity>> participantsRef = new AtomicReference<>(new ArrayList<>(List.of(
+                participant(callId, callerUserId, "JOINED"),
+                participant(callId, requesterId, "RINGING")
+        )));
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId)))
+                .thenAnswer(invocation -> participantsRef.get().stream()
+                        .filter(participant -> participant.getId().getUserId().equals(requesterId))
+                        .findFirst());
+        when(callParticipantRepository.save(any(CallParticipantEntity.class))).thenAnswer(invocation -> {
+            CallParticipantEntity saved = invocation.getArgument(0);
+            List<CallParticipantEntity> updated = new ArrayList<>(participantsRef.get());
+            for (int index = 0; index < updated.size(); index++) {
+                if (updated.get(index).getId().equals(saved.getId())) {
+                    updated.set(index, saved);
+                }
+            }
+            participantsRef.set(updated);
+            return saved;
+        });
+        when(callParticipantRepository.findAllByIdCallId(callId)).thenAnswer(invocation -> participantsRef.get());
+        when(callParticipantRepository.saveAll(any())).thenAnswer(invocation -> {
+            List<CallParticipantEntity> updated = new ArrayList<>();
+            for (Object item : invocation.getArgument(0, Iterable.class)) {
+                updated.add((CallParticipantEntity) item);
+            }
+            participantsRef.set(updated);
+            return updated;
+        });
+        when(callSessionRepository.save(any(CallSessionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(userRepository.findAllById(any())).thenReturn(List.of(requester, caller));
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(
+                member(chatId, requesterId),
+                member(chatId, callerUserId)
+        ));
+
+        var response = callService.declineCall(requesterId, callId);
+
+        assertThat(response.status()).isEqualTo("DECLINED");
+        assertThat(participantsRef.get()).extracting(CallParticipantEntity::getState)
+                .containsExactlyInAnyOrder("DECLINED", "LEFT");
     }
 
     @Test
@@ -973,6 +1394,77 @@ class CallServiceTest {
         assertThat(response.status()).isEqualTo("ENDED");
         assertThat(participantsRef.get()).extracting(CallParticipantEntity::getState)
                 .containsExactlyInAnyOrder("LEFT", "MISSED");
+    }
+
+    @Test
+    void leaveDirectCallEndsSessionAndMarksOtherJoinedParticipantLeft() {
+        UUID requesterId = UUID.randomUUID();
+        UUID secondUserId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        ChatEntity chat = chat(chatId, "DIRECT");
+        chat.setParticipantLowId(requesterId);
+        chat.setParticipantHighId(secondUserId);
+        UserEntity requester = user(requesterId, "Requester");
+        UserEntity secondUser = user(secondUserId, "Second");
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(callId);
+        session.setChatId(chatId);
+        session.setCreatedByUserId(requesterId);
+        session.setKind("VOICE");
+        session.setMode("DIRECT");
+        session.setStatus("ACTIVE");
+        session.setStartedAt(Instant.parse("2026-03-14T10:00:00Z"));
+        session.setAnsweredAt(Instant.parse("2026-03-14T10:00:05Z"));
+
+        AtomicReference<List<CallParticipantEntity>> participantsRef = new AtomicReference<>(new ArrayList<>(List.of(
+                participant(callId, requesterId, "JOINED"),
+                participant(callId, secondUserId, "JOINED")
+        )));
+
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+        when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
+        when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat);
+        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId)))
+                .thenAnswer(invocation -> participantsRef.get().stream()
+                        .filter(participant -> participant.getId().getUserId().equals(requesterId))
+                        .findFirst());
+        when(callParticipantRepository.save(any(CallParticipantEntity.class))).thenAnswer(invocation -> {
+            CallParticipantEntity saved = invocation.getArgument(0);
+            List<CallParticipantEntity> updated = new ArrayList<>(participantsRef.get());
+            for (int index = 0; index < updated.size(); index++) {
+                if (updated.get(index).getId().equals(saved.getId())) {
+                    updated.set(index, saved);
+                }
+            }
+            participantsRef.set(updated);
+            return saved;
+        });
+        when(callParticipantRepository.findAllByIdCallId(callId)).thenAnswer(invocation -> participantsRef.get());
+        when(callParticipantRepository.saveAll(any())).thenAnswer(invocation -> {
+            List<CallParticipantEntity> updated = new ArrayList<>();
+            for (Object item : invocation.getArgument(0, Iterable.class)) {
+                updated.add((CallParticipantEntity) item);
+            }
+            participantsRef.set(updated);
+            return updated;
+        });
+        when(callParticipantRepository.countByIdCallIdAndStateIn(callId, List.of("JOINED"))).thenReturn(1L);
+        when(callParticipantRepository.countByIdCallIdAndStateIn(callId, List.of("RINGING"))).thenReturn(0L);
+        when(callSessionRepository.save(any(CallSessionEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(userRepository.findAllById(any())).thenReturn(List.of(requester, secondUser));
+        when(chatRepository.findById(chatId)).thenReturn(Optional.of(chat));
+        when(chatMemberRepository.findAllByIdChatId(chatId)).thenReturn(List.of(
+                member(chatId, requesterId),
+                member(chatId, secondUserId)
+        ));
+
+        var response = callService.leaveCall(requesterId, callId);
+
+        assertThat(response.status()).isEqualTo("ENDED");
+        assertThat(participantsRef.get()).extracting(CallParticipantEntity::getState)
+                .containsExactlyInAnyOrder("LEFT", "LEFT");
     }
 
     @Test
@@ -1116,6 +1608,59 @@ class CallServiceTest {
     }
 
     @Test
+    void getRecentCallsBackfillsPastActiveSessionsUntilLimitIsReached() {
+        UUID requesterId = UUID.randomUUID();
+        List<CallSessionEntity> firstPageSessions = new ArrayList<>();
+        List<ChatMemberEntity> memberships = new ArrayList<>();
+        List<UUID> firstPageCallIds = new ArrayList<>();
+        List<CallParticipantEntity> firstPageParticipants = new ArrayList<>();
+
+        for (int index = 0; index < 12; index++) {
+            UUID chatId = UUID.randomUUID();
+            UUID callId = UUID.randomUUID();
+            CallSessionEntity activeSession = session(callId, chatId, requesterId, "ACTIVE", "VOICE_CHAT");
+            activeSession.setStartedAt(Instant.parse("2026-03-14T10:00:00Z").minusSeconds(index * 30L));
+            firstPageSessions.add(activeSession);
+            firstPageCallIds.add(callId);
+            memberships.add(member(chatId, requesterId));
+            firstPageParticipants.add(participant(callId, requesterId, "JOINED"));
+        }
+
+        UUID endedChatIdOne = UUID.randomUUID();
+        UUID endedChatIdTwo = UUID.randomUUID();
+        UUID endedCallIdOne = UUID.randomUUID();
+        UUID endedCallIdTwo = UUID.randomUUID();
+        CallSessionEntity endedSessionOne = session(endedCallIdOne, endedChatIdOne, requesterId, "ENDED", "DIRECT");
+        endedSessionOne.setEndedAt(Instant.parse("2026-03-14T09:30:00Z"));
+        CallSessionEntity endedSessionTwo = session(endedCallIdTwo, endedChatIdTwo, requesterId, "ENDED", "DIRECT");
+        endedSessionTwo.setEndedAt(Instant.parse("2026-03-14T09:25:00Z"));
+        memberships.add(member(endedChatIdOne, requesterId));
+        memberships.add(member(endedChatIdTwo, requesterId));
+
+        when(callSessionRepository.findRecentByParticipant(requesterId, PageRequest.of(0, 12)))
+                .thenReturn(firstPageSessions);
+        when(callSessionRepository.findRecentByParticipant(requesterId, PageRequest.of(1, 12)))
+                .thenReturn(List.of(endedSessionOne, endedSessionTwo));
+        when(chatMemberRepository.findAllByIdUserId(requesterId)).thenReturn(memberships);
+        when(callParticipantRepository.findAllByIdCallIdIn(firstPageCallIds)).thenReturn(firstPageParticipants);
+        when(callParticipantRepository.findAllByIdCallIdIn(List.of(endedCallIdOne, endedCallIdTwo))).thenReturn(List.of(
+                participant(endedCallIdOne, requesterId, "MISSED"),
+                participant(endedCallIdTwo, requesterId, "LEFT")
+        ));
+        when(chatRepository.findAllById(List.of(endedChatIdOne, endedChatIdTwo))).thenReturn(List.of(
+                chat(endedChatIdOne, "GROUP"),
+                chat(endedChatIdTwo, "GROUP")
+        ));
+        when(userRepository.findAllById(List.of())).thenReturn(List.of());
+        when(profilePhotoService.buildPhotoAccess(any(), any(), any())).thenReturn(new PhotoAccess(null, null));
+
+        var recentCalls = callService.getRecentCalls(requesterId, 2);
+
+        assertThat(recentCalls).extracting(com.alex.messenger.call.dto.CallHistoryEntryResponse::callId)
+                .containsExactly(endedCallIdOne, endedCallIdTwo);
+    }
+
+    @Test
     void getRecentCallsSkipsChatsWithoutCurrentMembership() {
         UUID requesterId = UUID.randomUUID();
         UUID visibleChatId = UUID.randomUUID();
@@ -1232,8 +1777,6 @@ class CallServiceTest {
         when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
         when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
         when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "DIRECT"));
-        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId)))
-                .thenReturn(Optional.of(requesterParticipant));
 
         assertThatThrownBy(() -> callService.createComment(
                 requesterId,
@@ -1327,8 +1870,6 @@ class CallServiceTest {
         when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
         when(callParticipantRepository.existsByIdCallIdAndIdUserId(callId, requesterId)).thenReturn(true);
         when(chatService.getOwnedChat(requesterId, chatId)).thenReturn(chat(chatId, "DIRECT"));
-        when(callParticipantRepository.findById(new CallParticipantId(callId, requesterId)))
-                .thenReturn(Optional.of(requesterParticipant));
 
         assertThatThrownBy(() -> callService.createReaction(
                 requesterId,
@@ -1363,6 +1904,65 @@ class CallServiceTest {
                         .isEqualTo(HttpStatus.BAD_REQUEST));
 
         verify(callReactionRepository, never()).save(any(CallReactionEntity.class));
+    }
+
+    @Test
+    void getActiveCallsSkipsGroupSessionsWhenGroupCallsFeatureIsDisabled() {
+        UUID requesterId = UUID.randomUUID();
+        UUID directChatId = UUID.randomUUID();
+        UUID groupChatId = UUID.randomUUID();
+        UUID directCallId = UUID.randomUUID();
+        UUID groupCallId = UUID.randomUUID();
+
+        CallSessionEntity directSession = session(directCallId, directChatId, requesterId, "RINGING", "DIRECT");
+        CallSessionEntity groupSession = session(groupCallId, groupChatId, requesterId, "ACTIVE", "VOICE_CHAT");
+
+        when(featureFlagService.isGroupCallsEnabled()).thenReturn(false);
+        when(callSessionRepository.findByParticipantAndStatuses(requesterId, List.of("RINGING", "ACTIVE")))
+                .thenReturn(List.of(groupSession, directSession));
+        when(chatMemberRepository.findAllByIdUserId(requesterId)).thenReturn(List.of(
+                member(directChatId, requesterId),
+                member(groupChatId, requesterId)
+        ));
+        when(callParticipantRepository.findAllByIdUserIdAndIdCallIdIn(requesterId, List.of(directCallId)))
+                .thenReturn(List.of(participant(directCallId, requesterId, "JOINED")));
+        when(callParticipantRepository.findAllByIdCallId(directCallId))
+                .thenReturn(List.of(
+                        participant(directCallId, requesterId, "JOINED"),
+                        participant(directCallId, UUID.randomUUID(), "RINGING")
+                ));
+        when(chatRepository.findById(directChatId)).thenReturn(Optional.of(chat(directChatId, "DIRECT")));
+        when(chatMemberRepository.findAllByIdChatId(directChatId)).thenReturn(List.of(
+                member(directChatId, requesterId),
+                member(directChatId, UUID.randomUUID())
+        ));
+        when(userRepository.findAllById(any())).thenReturn(List.of(user(requesterId, "Requester")));
+
+        var activeCalls = callService.getActiveCalls(requesterId);
+
+        assertThat(activeCalls).extracting(com.alex.messenger.call.dto.CallSessionResponse::callId)
+                .containsExactly(directCallId);
+    }
+
+    @Test
+    void acceptCallRejectsGroupSessionWhenGroupCallsFeatureIsDisabled() {
+        UUID requesterId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        UUID callId = UUID.randomUUID();
+
+        CallSessionEntity session = session(callId, chatId, requesterId, "ACTIVE", "VOICE_CHAT");
+
+        org.mockito.Mockito.doThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "Group calls is disabled"))
+                .when(featureFlagService)
+                .requireGroupCallsEnabled();
+        when(callSessionRepository.findById(callId)).thenReturn(Optional.of(session));
+
+        assertThatThrownBy(() -> callService.acceptCall(requesterId, callId))
+                .isInstanceOf(ResponseStatusException.class)
+                .satisfies(exception -> assertThat(((ResponseStatusException) exception).getStatusCode())
+                        .isEqualTo(HttpStatus.NOT_FOUND));
+
+        verify(callParticipantRepository, never()).existsByIdCallIdAndIdUserId(callId, requesterId);
     }
     private ChatEntity chat(UUID chatId, String type) {
         ChatEntity chat = new ChatEntity();

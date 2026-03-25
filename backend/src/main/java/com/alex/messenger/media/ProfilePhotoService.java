@@ -1,6 +1,8 @@
 package com.alex.messenger.media;
 
 import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,13 +18,16 @@ public class ProfilePhotoService {
     private static final Logger log = LoggerFactory.getLogger(ProfilePhotoService.class);
 
     private final MediaService mediaService;
+    private final PhotoAccessTokenService photoAccessTokenService;
     private final long maxFileSizeBytes;
 
     public ProfilePhotoService(
             MediaService mediaService,
+            PhotoAccessTokenService photoAccessTokenService,
             @Value("${alex.storage.profile-photos.max-file-size-bytes}") long maxFileSizeBytes
     ) {
         this.mediaService = mediaService;
+        this.photoAccessTokenService = photoAccessTokenService;
         this.maxFileSizeBytes = maxFileSizeBytes;
     }
 
@@ -72,8 +77,27 @@ public class ProfilePhotoService {
         if (!"S3".equalsIgnoreCase(storageProvider) || bucketName == null || objectKey == null) {
             return new PhotoAccess(null, null);
         }
-        PresignedMediaAccess access = mediaService.buildDownloadAccess(bucketName, objectKey);
-        return new PhotoAccess(access.downloadUrl(), access.expiresAt());
+        PhotoAccessTokenService.IssuedPhotoAccessToken accessToken =
+                photoAccessTokenService.issue(storageProvider, bucketName, objectKey);
+        return new PhotoAccess(
+                "/api/photos/download?" + PhotoAccessTokenService.QUERY_PARAMETER + "=" + accessToken.token(),
+                accessToken.expiresAt()
+        );
+    }
+
+    public PhotoDownloadResult downloadByAccessToken(String accessToken) {
+        PhotoAccessTokenService.ValidatedPhotoAccessToken validated = photoAccessTokenService.validate(accessToken);
+        if (!"S3".equalsIgnoreCase(validated.storageProvider())
+                || validated.bucketName() == null
+                || validated.objectKey() == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Photo is unavailable");
+        }
+        PresignedMediaAccess access = mediaService.buildDownloadAccess(
+                validated.bucketName(),
+                validated.objectKey(),
+                Duration.between(Instant.now(), validated.expiresAt())
+        );
+        return new PhotoDownloadResult(access.downloadUrl());
     }
 
     public void deletePhoto(String storageProvider, String bucketName, String objectKey) {

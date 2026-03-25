@@ -204,8 +204,16 @@ public class MediaService {
     }
 
     public PresignedMediaAccess buildDownloadAccess(String bucketName, String objectKey) {
-        Instant expiresAt = Instant.now().plus(presignedUrlTtl);
-        int expirySeconds = (int) Math.max(1, Math.min(presignedUrlTtl.toSeconds(), MAX_PRESIGNED_URL_SECONDS));
+        return buildDownloadAccess(bucketName, objectKey, presignedUrlTtl);
+    }
+
+    public PresignedMediaAccess buildDownloadAccess(String bucketName, String objectKey, Duration requestedTtl) {
+        Duration effectiveTtl = requestedTtl == null ? presignedUrlTtl : requestedTtl;
+        if (effectiveTtl.isNegative() || effectiveTtl.isZero()) {
+            effectiveTtl = Duration.ofSeconds(1);
+        }
+        Instant expiresAt = Instant.now().plus(effectiveTtl);
+        int expirySeconds = (int) Math.max(1, Math.min(effectiveTtl.toSeconds(), MAX_PRESIGNED_URL_SECONDS));
         try {
             String downloadUrl = mediaPresignMinioClient.getPresignedObjectUrl(
                     GetPresignedObjectUrlArgs.builder()

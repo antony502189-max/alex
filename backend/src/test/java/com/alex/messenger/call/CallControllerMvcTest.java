@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.alex.messenger.call.dto.CreateCallJoinLinkRequest;
 import com.alex.messenger.call.dto.CreateCallCommentRequest;
 import com.alex.messenger.call.dto.CreateCallReactionRequest;
+import com.alex.messenger.call.dto.CallSignalRequest;
 import com.alex.messenger.call.dto.StartCallRequest;
 import com.alex.messenger.call.dto.UpdateCallParticipantModerationRequest;
 import com.alex.messenger.feature.FeatureFlagService;
@@ -42,7 +43,7 @@ class CallControllerMvcTest {
 
     @BeforeEach
     void setUp() {
-        objectMapper = new ObjectMapper();
+        objectMapper = new ObjectMapper().findAndRegisterModules();
         LocalValidatorFactoryBean validator = new LocalValidatorFactoryBean();
         validator.afterPropertiesSet();
         mockMvc = MockMvcBuilders.standaloneSetup(new CallController(featureFlagService, callService, callRtcConfigService))
@@ -116,6 +117,48 @@ class CallControllerMvcTest {
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content(objectMapper.writeValueAsBytes(
                                         new UpdateCallParticipantModerationRequest(null, null, null, null, null)
+                                ))
+                )
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(featureFlagService, callService, callRtcConfigService);
+    }
+
+    @Test
+    void sendSignalReturnsBadRequestForBlankPayload() throws Exception {
+        mockMvc.perform(
+                        post("/api/calls/{callId}/signal", UUID.randomUUID())
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(objectMapper.writeValueAsBytes(
+                                        new CallSignalRequest(UUID.randomUUID(), "offer", " ")
+                                ))
+                )
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(featureFlagService, callService, callRtcConfigService);
+    }
+
+    @Test
+    void sendSignalReturnsBadRequestForTooLongSignalType() throws Exception {
+        mockMvc.perform(
+                        post("/api/calls/{callId}/signal", UUID.randomUUID())
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(objectMapper.writeValueAsBytes(
+                                        new CallSignalRequest(UUID.randomUUID(), "x".repeat(33), "{\"sdp\":\"x\"}")
+                                ))
+                )
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(featureFlagService, callService, callRtcConfigService);
+    }
+
+    @Test
+    void sendSignalReturnsBadRequestForUnsupportedSignalType() throws Exception {
+        mockMvc.perform(
+                        post("/api/calls/{callId}/signal", UUID.randomUUID())
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(objectMapper.writeValueAsBytes(
+                                        new CallSignalRequest(UUID.randomUUID(), "teleport", "{\"value\":1}")
                                 ))
                 )
                 .andExpect(status().isBadRequest());

@@ -3,11 +3,14 @@ package com.alex.messenger.auth;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import com.alex.messenger.auth.dto.AuthRequest;
 import com.alex.messenger.auth.dto.AuthResponse;
 import com.alex.messenger.auth.dto.GenerateQrLoginResponse;
 import com.alex.messenger.auth.dto.QrLoginBindRequest;
@@ -59,6 +62,9 @@ class AuthServiceTest {
     @Mock
     private UserSessionService userSessionService;
 
+    @Mock
+    private AuthSecurityEventService authSecurityEventService;
+
     private AuthProperties authProperties;
     private TwoFactorPasswordService twoFactorPasswordService;
     private AuthService authService;
@@ -68,6 +74,8 @@ class AuthServiceTest {
         authProperties = new AuthProperties();
         authProperties.getCode().setExposeDebugCode(true);
         authProperties.getCode().setMaxRequestsPerWindow(3);
+        authProperties.getCode().setMaxRequestsPerIpWindow(5);
+        authProperties.getCode().setMaxRequestsPerFingerprintWindow(2);
         authProperties.getCode().setRequestWindow(Duration.ofMinutes(10));
         authProperties.getRefresh().setTtl(Duration.ofDays(30));
         twoFactorPasswordService = new TwoFactorPasswordService(authProperties);
@@ -79,7 +87,8 @@ class AuthServiceTest {
                 jwtService,
                 userSessionService,
                 authProperties,
-                twoFactorPasswordService
+                twoFactorPasswordService,
+                authSecurityEventService
         );
     }
 
@@ -119,6 +128,54 @@ class AuthServiceTest {
 
         assertThat(response.challengeId()).isNotNull();
         assertThat(response.debugCode()).hasSize(authProperties.getCode().getLength());
+    }
+
+    @Test
+    void requestCodeRejectsWhenIpRateLimitIsReached() {
+        when(userRepository.findByPhoneNumber("+375291234567")).thenReturn(Optional.empty());
+        when(loginCodeChallengeRepository.countByPhoneNumberAndCreatedAtAfter(eq("+375291234567"), any()))
+                .thenReturn(0L);
+        when(loginCodeChallengeRepository.countByRequestedByIpAndCreatedAtAfter(eq("127.0.0.1"), any()))
+                .thenReturn((long) authProperties.getCode().getMaxRequestsPerIpWindow());
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> authService.requestCode(
+                        new RequestLoginCodeRequest("+375291234567", "Alex", "Pixel", "android", "0.1.0"),
+                        "127.0.0.1",
+                        "JUnit"
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(exception.getReason()).isEqualTo("Too many login code requests from this IP");
+        verify(loginCodeChallengeRepository, never()).save(any());
+    }
+
+    @Test
+    void requestCodeRejectsWhenFingerprintRateLimitIsReached() {
+        when(userRepository.findByPhoneNumber("+375291234567")).thenReturn(Optional.empty());
+        when(loginCodeChallengeRepository.countByPhoneNumberAndCreatedAtAfter(eq("+375291234567"), any()))
+                .thenReturn(0L);
+        when(loginCodeChallengeRepository.countByRequestedByIpAndCreatedAtAfter(eq("127.0.0.1"), any()))
+                .thenReturn(0L);
+        when(loginCodeChallengeRepository.countByRequestFingerprintHashAndCreatedAtAfter(anyString(), any()))
+                .thenReturn((long) authProperties.getCode().getMaxRequestsPerFingerprintWindow());
+
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> authService.requestCode(
+                        new RequestLoginCodeRequest("+375291234567", "Alex", "Pixel", "android", "0.1.0"),
+                        "127.0.0.1",
+                        "JUnit"
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
+        assertThat(exception.getReason()).isEqualTo("Too many login code requests from this device fingerprint");
+        verify(loginCodeChallengeRepository, never()).save(any());
     }
 
     @Test
@@ -165,6 +222,23 @@ class AuthServiceTest {
         assertThat(response.authenticated()).isTrue();
         assertThat(response.requiresTwoFactor()).isFalse();
         assertThat(response.trustedSession()).isFalse();
+    }
+
+    @Test
+    void loginRejectsWhenLegacyLoginIsDisabled() {
+        ResponseStatusException exception = catchThrowableOfType(
+                () -> authService.login(
+                        new AuthRequest("+375291234567", "Alex", "Pixel", "android", "1.0.0"),
+                        "127.0.0.1",
+                        "JUnit"
+                ),
+                ResponseStatusException.class
+        );
+
+        assertThat(exception).isNotNull();
+        assertThat(exception.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(exception.getReason()).isEqualTo("Legacy login is disabled");
+        verifyNoInteractions(userRepository, userSessionService, jwtService);
     }
 
     @Test
@@ -394,6 +468,40 @@ class AuthServiceTest {
 
         assertThat(deletedCount).isEqualTo(2);
         verify(loginCodeChallengeRepository).deleteAllInBatch(List.of(consumedChallenge, expiredChallenge));
+    }
+
+    @Test
+    void enableTwoFactorRecordsSecurityEvent() {
+        UUID userId = UUID.randomUUID();
+        UUID sessionId = UUID.randomUUID();
+
+        UserEntity user = new UserEntity();
+        user.setId(userId);
+        user.setPhoneNumber("+375291234567");
+        user.setDisplayName("Alex");
+
+        when(userRepository.findById(userId)).thenReturn(Optional.of(user));
+        when(userRepository.save(any(UserEntity.class))).thenAnswer(invocation -> invocation.getArgument(0));
+
+        authService.enableTwoFactor(
+                userId,
+                sessionId,
+                new com.alex.messenger.auth.dto.EnableTwoFactorRequest("very-secure-password", "hint")
+        );
+
+        verify(userSessionService).markTrusted(sessionId, userId);
+        verify(authSecurityEventService).recordEvent(
+                eq(userId),
+                eq(sessionId),
+                eq("TWO_FACTOR_ENABLED"),
+                eq("INFO"),
+                eq(null),
+                eq(null),
+                eq(null),
+                eq(null),
+                eq(null),
+                eq("Two-factor authentication enabled")
+        );
     }
 
     private String hash(String value) {

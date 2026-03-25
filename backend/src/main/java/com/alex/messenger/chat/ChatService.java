@@ -1,5 +1,6 @@
 package com.alex.messenger.chat;
 
+import com.alex.messenger.abuse.AbuseProtectionService;
 import com.alex.messenger.attachment.AttachmentEntity;
 import com.alex.messenger.attachment.AttachmentRepository;
 import com.alex.messenger.chat.draft.ChatDraftEntity;
@@ -13,15 +14,20 @@ import com.alex.messenger.chat.dto.ChatBanResponse;
 import com.alex.messenger.chat.dto.ChatJoinRequestResponse;
 import com.alex.messenger.chat.dto.ChatLastMessagePreviewResponse;
 import com.alex.messenger.chat.dto.ChatMemberResponse;
+import com.alex.messenger.chat.dto.ChatReportResponse;
 import com.alex.messenger.chat.dto.ChatReadEventResponse;
 import com.alex.messenger.chat.dto.ChatSummaryResponse;
+import com.alex.messenger.chat.dto.ClearHistoryRequest;
+import com.alex.messenger.chat.dto.ClearHistoryResponse;
 import com.alex.messenger.chat.dto.CreateChannelRequest;
 import com.alex.messenger.chat.dto.CreateGroupChatRequest;
 import com.alex.messenger.chat.dto.CreateInviteLinkRequest;
 import com.alex.messenger.chat.dto.JoinChatResultResponse;
+import com.alex.messenger.chat.dto.LeaveChatResponse;
 import com.alex.messenger.chat.dto.MemberMutationResponse;
 import com.alex.messenger.chat.dto.PinMessageEventResponse;
 import com.alex.messenger.chat.dto.PublicChatDiscoveryResponse;
+import com.alex.messenger.chat.dto.ReportChatRequest;
 import com.alex.messenger.chat.dto.TypingEventResponse;
 import com.alex.messenger.chat.dto.TransferChatOwnershipResponse;
 import com.alex.messenger.chat.dto.UpdateChatPublicUsernameRequest;
@@ -44,9 +50,11 @@ import com.alex.messenger.message.MessageLookupEntity;
 import com.alex.messenger.message.MessageLookupRepository;
 import com.alex.messenger.message.MessageReactionRepository;
 import com.alex.messenger.message.MessageRepository;
+import com.alex.messenger.message.MessageStorageService;
 import com.alex.messenger.message.MessageTextContent;
 import com.alex.messenger.search.PublicPostSearchService;
 import com.alex.messenger.shared.SearchQueryValidationSupport;
+import com.alex.messenger.sync.UserSyncService;
 import com.alex.messenger.user.BlockedUserRepository;
 import com.alex.messenger.user.UserEntity;
 import com.alex.messenger.user.UserPresenceService;
@@ -56,6 +64,7 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -69,6 +78,7 @@ import java.util.regex.Pattern;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -81,6 +91,16 @@ import org.springframework.web.server.ResponseStatusException;
 public class ChatService {
 
     private static final Pattern USERNAME_MENTION_PATTERN = Pattern.compile("(?<![A-Za-z0-9_])@([A-Za-z0-9_]{5,64})");
+    private static final Set<String> CHAT_REPORT_CATEGORIES = Set.of("SPAM", "VIOLENCE", "FRAUD", "OTHER");
+    private static final Set<String> MEMBER_STATE_EVENT_TYPES = Set.of(
+            "CHAT_MEMBER_ADDED",
+            "CHAT_MEMBER_UPDATED",
+            "CHAT_MEMBER_REMOVED",
+            "CHAT_MEMBER_BANNED",
+            "CHAT_MEMBER_LEFT",
+            "CHAT_JOIN_REQUEST_APPROVED",
+            "CHAT_OWNERSHIP_TRANSFERRED"
+    );
 
     public record MessageAuthorView(
             UUID senderId,
@@ -98,10 +118,24 @@ public class ChatService {
     ) {
     }
 
+    private record ChatListCursor(
+            boolean pinned,
+            Integer pinOrder,
+            Instant lastMessageAt,
+            UUID chatId
+    ) {
+    }
+
     private record UnreadTailCounters(
             int unreadCount,
             int mentionCount,
             int replyCount
+    ) {
+    }
+
+    private record ChatLookupResult(
+            ChatEntity chat,
+            boolean created
     ) {
     }
 
@@ -113,11 +147,13 @@ public class ChatService {
     private final ChatDraftRepository chatDraftRepository;
     private final ChatInviteLinkRepository chatInviteLinkRepository;
     private final ForumTopicRepository forumTopicRepository;
+    private final ChatReportRepository chatReportRepository;
     private final ChatAdminLogService chatAdminLogService;
     private final MessageRepository messageRepository;
     private final MessageLookupRepository messageLookupRepository;
     private final MessageReactionRepository messageReactionRepository;
     private final AttachmentRepository attachmentRepository;
+    private final MessageStorageService messageStorageService;
     private final ChatEncryptionService chatEncryptionService;
     private final MessageContentCodec messageContentCodec;
     private final UserRepository userRepository;
@@ -125,6 +161,9 @@ public class ChatService {
     private final ProfilePhotoService profilePhotoService;
     private final UserPresenceService userPresenceService;
     private final PublicPostSearchService publicPostSearchService;
+    private final UserSyncService userSyncService;
+    private final ApplicationEventPublisher applicationEventPublisher;
+    private final AbuseProtectionService abuseProtectionService;
     private final SecureRandom secureRandom = new SecureRandom();
 
     @Transactional(readOnly = true)
@@ -153,18 +192,32 @@ public class ChatService {
 
     @Transactional(readOnly = true)
     public ChatListSlice listChatsPage(UUID userId, boolean archived, String cursor, Integer limit) {
+        return sliceChatList(listChats(userId, archived), cursor, limit);
+    }
+
+    @Transactional(readOnly = true)
+    public ChatListSlice sliceChatList(List<ChatSummaryResponse> chats, String cursor, Integer limit) {
         int normalizedLimit = requireOptionalLimit(limit, 50, 100);
-        int offset = decodeChatCursor(cursor);
-        List<ChatSummaryResponse> chats = listChats(userId, archived);
-        if (offset > chats.size()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is out of range");
+        ChatListCursor decodedCursor = decodeChatCursor(cursor);
+        List<ChatSummaryResponse> page = new ArrayList<>(normalizedLimit);
+
+        for (ChatSummaryResponse chat : chats) {
+            if (decodedCursor != null && compareChatToCursor(chat, decodedCursor) <= 0) {
+                continue;
+            }
+            page.add(chat);
+            if (page.size() == normalizedLimit + 1) {
+                break;
+            }
         }
 
-        int nextOffset = Math.min(offset + normalizedLimit, chats.size());
-        boolean hasMore = nextOffset < chats.size();
+        boolean hasMore = page.size() > normalizedLimit;
+        if (hasMore) {
+            page.remove(page.size() - 1);
+        }
         return new ChatListSlice(
-                chats.subList(offset, nextOffset),
-                hasMore ? encodeChatCursor(nextOffset) : null,
+                List.copyOf(page),
+                hasMore && !page.isEmpty() ? encodeChatCursor(page.get(page.size() - 1)) : null,
                 hasMore
         );
     }
@@ -198,19 +251,43 @@ public class ChatService {
 
     @Transactional
     public ChatSummaryResponse createDirectChat(UUID requesterId, UUID peerId) {
-        ChatEntity chat = getOrCreateDirectChat(requesterId, peerId);
-        return buildChatSummary(chat, requesterId, getMembership(chat.getId(), requesterId), getDraft(chat.getId(), requesterId));
+        ChatLookupResult lookupResult = getOrCreateDirectChatInternal(requesterId, peerId);
+        ChatEntity chat = lookupResult.chat();
+        ChatSummaryResponse response = buildChatSummary(
+                chat,
+                requesterId,
+                getMembership(chat.getId(), requesterId),
+                getDraft(chat.getId(), requesterId)
+        );
+        if (lookupResult.created()) {
+            publishChatCreatedEvent(
+                    requesterId,
+                    chat,
+                    requesterId.equals(peerId) ? List.of(requesterId) : participantsIncludingSelf(requesterId, List.of(peerId))
+            );
+        }
+        return response;
     }
 
     @Transactional
     public ChatSummaryResponse createSavedMessagesChat(UUID requesterId) {
-        ChatEntity chat = chatRepository.findByChatTypeAndCreatedBy("SAVED", requesterId)
-                .orElseGet(() -> createSavedMessages(requesterId));
-        return buildChatSummary(chat, requesterId, getMembership(chat.getId(), requesterId), getDraft(chat.getId(), requesterId));
+        ChatLookupResult lookupResult = getOrCreateSavedMessagesInternal(requesterId);
+        ChatEntity chat = lookupResult.chat();
+        ChatSummaryResponse response = buildChatSummary(
+                chat,
+                requesterId,
+                getMembership(chat.getId(), requesterId),
+                getDraft(chat.getId(), requesterId)
+        );
+        if (lookupResult.created()) {
+            publishChatCreatedEvent(requesterId, chat, List.of(requesterId));
+        }
+        return response;
     }
 
     @Transactional
     public ChatSummaryResponse createGroupChat(UUID requesterId, CreateGroupChatRequest request) {
+        abuseProtectionService.assertChatCreationAllowed(requesterId);
         Set<UUID> memberIds = new LinkedHashSet<>(request.memberIds());
         memberIds.remove(requesterId);
         if (memberIds.isEmpty()) {
@@ -228,11 +305,25 @@ public class ChatService {
                 Boolean.TRUE.equals(request.joinRequiresApproval()),
                 memberIds
         );
-        return buildChatSummary(savedChat, requesterId, getMembership(savedChat.getId(), requesterId), getDraft(savedChat.getId(), requesterId));
+        abuseProtectionService.recordChatCreation(requesterId);
+        ChatSummaryResponse response = buildChatSummary(
+                savedChat,
+                requesterId,
+                getMembership(savedChat.getId(), requesterId),
+                getDraft(savedChat.getId(), requesterId)
+        );
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", savedChat.getId());
+        payload.put("actorUserId", requesterId);
+        payload.put("chatType", savedChat.getChatType());
+        payload.put("createdAt", savedChat.getCreatedAt());
+        recordChatStateEvent("CHAT_CREATED", savedChat.getId(), participantsIncludingSelf(requesterId, memberIds), payload);
+        return response;
     }
 
     @Transactional
     public ChatSummaryResponse createChannel(UUID requesterId, CreateChannelRequest request) {
+        abuseProtectionService.assertChatCreationAllowed(requesterId);
         Set<UUID> subscriberIds = new LinkedHashSet<>(request.subscriberIds() != null ? request.subscriberIds() : List.of());
         subscriberIds.remove(requesterId);
         ensureUsersExist(subscriberIds);
@@ -247,7 +338,20 @@ public class ChatService {
                 Boolean.TRUE.equals(request.joinRequiresApproval()),
                 subscriberIds
         );
-        return buildChatSummary(savedChat, requesterId, getMembership(savedChat.getId(), requesterId), getDraft(savedChat.getId(), requesterId));
+        abuseProtectionService.recordChatCreation(requesterId);
+        ChatSummaryResponse response = buildChatSummary(
+                savedChat,
+                requesterId,
+                getMembership(savedChat.getId(), requesterId),
+                getDraft(savedChat.getId(), requesterId)
+        );
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", savedChat.getId());
+        payload.put("actorUserId", requesterId);
+        payload.put("chatType", savedChat.getChatType());
+        payload.put("createdAt", savedChat.getCreatedAt());
+        recordChatStateEvent("CHAT_CREATED", savedChat.getId(), participantsIncludingSelf(requesterId, subscriberIds), payload);
+        return response;
     }
 
     @Transactional
@@ -326,7 +430,15 @@ public class ChatService {
         }
 
         ChatEntity saved = chatRepository.save(chat);
-        return buildChatSummary(saved, requesterId, getMembership(chatId, requesterId), getDraft(chatId, requesterId));
+        ChatSummaryResponse response = buildChatSummary(saved, requesterId, getMembership(chatId, requesterId), getDraft(chatId, requesterId));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("actorUserId", requesterId);
+        payload.put("updatedAt", Instant.now());
+        payload.put("title", saved.getTitle());
+        payload.put("publicUsername", saved.getPublicUsername());
+        recordChatStateEvent("CHAT_UPDATED", chatId, listParticipantUserIds(chatId), payload);
+        return response;
     }
 
     @Transactional
@@ -353,6 +465,12 @@ public class ChatService {
                 getDraft(chatId, requesterId)
         );
         profilePhotoService.deletePhoto(previousStorageProvider, previousBucketName, previousObjectKey);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("actorUserId", requesterId);
+        payload.put("updatedAt", Instant.now());
+        payload.put("photoUpdated", true);
+        recordChatStateEvent("CHAT_UPDATED", chatId, listParticipantUserIds(chatId), payload);
         return response;
     }
 
@@ -379,6 +497,12 @@ public class ChatService {
                 getDraft(chatId, requesterId)
         );
         profilePhotoService.deletePhoto(previousStorageProvider, previousBucketName, previousObjectKey);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("actorUserId", requesterId);
+        payload.put("updatedAt", Instant.now());
+        payload.put("photoRemoved", true);
+        recordChatStateEvent("CHAT_UPDATED", chatId, listParticipantUserIds(chatId), payload);
         return response;
     }
 
@@ -394,6 +518,7 @@ public class ChatService {
         }
         ensureUsersExist(userIds);
 
+        List<UUID> addedUserIds = new ArrayList<>();
         for (UUID userId : userIds) {
             assertNotBanned(chatId, userId);
             if (chatMemberRepository.existsByIdChatIdAndIdUserId(chatId, userId)) {
@@ -401,11 +526,20 @@ public class ChatService {
                 continue;
             }
             chatMemberRepository.save(newMember(chat, userId, "MEMBER"));
+            addedUserIds.add(userId);
             markJoinRequestApprovedIfPresent(chatId, userId, requesterId);
             chatAdminLogService.log(chatId, requesterId, userId, "MEMBER_ADDED", "Added member to chat", null, null);
         }
-
-        return getMembers(requesterId, chatId);
+        List<ChatMemberResponse> response = getMembers(requesterId, chatId);
+        if (!addedUserIds.isEmpty()) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("chatId", chatId);
+            payload.put("actorUserId", requesterId);
+            payload.put("addedUserIds", addedUserIds);
+            payload.put("updatedAt", Instant.now());
+            recordChatStateEvent("CHAT_MEMBER_ADDED", chatId, listParticipantUserIds(chatId), payload);
+        }
+        return response;
     }
 
     @Transactional
@@ -439,6 +573,13 @@ public class ChatService {
                 null,
                 null
         );
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("actorUserId", requesterId);
+        payload.put("affectedUserId", userId);
+        payload.put("role", normalizedRole);
+        payload.put("updatedAt", Instant.now());
+        recordChatStateEvent("CHAT_MEMBER_UPDATED", chatId, listParticipantUserIds(chatId), payload);
         return new MemberMutationResponse(chatId, userId, normalizedRole);
     }
 
@@ -475,6 +616,13 @@ public class ChatService {
                 null,
                 null
         );
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("actorUserId", requesterId);
+        payload.put("previousOwnerUserId", requesterId);
+        payload.put("newOwnerUserId", newOwnerUserId);
+        payload.put("updatedAt", Instant.now());
+        recordChatStateEvent("CHAT_OWNERSHIP_TRANSFERRED", chatId, listParticipantUserIds(chatId), payload);
         return new TransferChatOwnershipResponse(chatId, requesterId, newOwnerUserId);
     }
 
@@ -567,6 +715,12 @@ public class ChatService {
                 null,
                 null
         );
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("actorUserId", requesterId);
+        payload.put("affectedUserId", userId);
+        payload.put("updatedAt", Instant.now());
+        recordChatStateEvent("CHAT_MEMBER_UPDATED", chatId, listParticipantUserIds(chatId), payload);
         UserEntity user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
         return toChatMemberResponse(saved, user);
@@ -582,9 +736,192 @@ public class ChatService {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Owner cannot be removed");
         }
 
+        List<UUID> participants = listParticipantUserIds(chatId);
         chatMemberRepository.delete(target);
         chatAdminLogService.log(chatId, requesterId, userId, "MEMBER_REMOVED", "Removed member from chat", null, null);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("actorUserId", requesterId);
+        payload.put("affectedUserId", userId);
+        payload.put("updatedAt", Instant.now());
+        recordChatStateEvent(
+                "CHAT_MEMBER_REMOVED",
+                chatId,
+                participants.stream().filter(participantId -> !userId.equals(participantId)).toList(),
+                List.of(userId),
+                payload
+        );
         return new MemberMutationResponse(chatId, userId, "REMOVED");
+    }
+
+    @Transactional
+    public LeaveChatResponse leaveChat(UUID requesterId, UUID chatId) {
+        ChatEntity chat = getOwnedChat(requesterId, chatId);
+        if (!List.of("GROUP", "CHANNEL").contains(chat.getChatType())) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Leave chat is only available for groups and channels"
+            );
+        }
+
+        ChatMemberEntity membership = getMembership(chatId, requesterId);
+        if ("OWNER".equals(membership.getRole())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Transfer ownership before leaving the chat");
+        }
+
+        List<UUID> participants = chatMemberRepository.findAllByIdChatId(chatId).stream()
+                .map(member -> member.getId().getUserId())
+                .toList();
+        Instant leftAt = Instant.now();
+        chatMemberRepository.delete(membership);
+        chatAdminLogService.log(chatId, requesterId, requesterId, "MEMBER_LEFT", "Left the chat", null, null);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("userId", requesterId);
+        payload.put("leftAt", leftAt);
+        userSyncService.recordForUsers(
+                userSyncService.participantsIncludingActor(requesterId, participants),
+                "CHAT_MEMBER_LEFT",
+                "CHAT",
+                chatId,
+                chatId,
+                payload
+        );
+        publishChatInboxEvent(
+                "CHAT_MEMBER_LEFT",
+                chatId,
+                participants.stream()
+                        .filter(participantId -> !requesterId.equals(participantId))
+                        .toList(),
+                List.of(requesterId)
+        );
+        return new LeaveChatResponse(chatId, requesterId, "LEFT", leftAt);
+    }
+
+    @Transactional
+    public ClearHistoryResponse clearHistory(UUID requesterId, UUID chatId, ClearHistoryRequest request) {
+        ChatEntity chat = getOwnedChat(requesterId, chatId);
+        UUID topicId = request != null ? request.topicId() : null;
+        UUID upToMessageId = request != null ? request.upToMessageId() : null;
+
+        if (List.of("GROUP", "CHANNEL").contains(chat.getChatType()) && !canManageMessages(requesterId, chatId)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "Only moderators can clear chat history");
+        }
+        if (topicId != null) {
+            ForumTopicEntity topic = forumTopicRepository.findByIdAndChatId(topicId, chatId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Topic not found"));
+            if (Boolean.TRUE.equals(topic.getHidden())) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Topic not found");
+            }
+        }
+        if (upToMessageId != null) {
+            MessageLookupEntity anchor = requireReadableMessageInChat(chat, requesterId, upToMessageId);
+            if (!Objects.equals(anchor.getTopicId(), topicId)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message does not belong to the requested topic");
+            }
+        }
+
+        List<MessageEntity> messages = upToMessageId != null
+                ? messageRepository.findAllByChatIdUpToMessageId(chatId, upToMessageId)
+                : messageRepository.findAllByChatId(chatId);
+        List<UUID> targetMessageIds = messages.stream()
+                .filter(message -> message.getDeletedAt() == null)
+                .filter(message -> topicId == null || Objects.equals(message.getTopicId(), topicId))
+                .map(message -> message.getKey().getMessageId())
+                .distinct()
+                .toList();
+        Instant clearedAt = Instant.now();
+        if (targetMessageIds.isEmpty()) {
+            return new ClearHistoryResponse(chatId, topicId, upToMessageId, 0, clearedAt);
+        }
+
+        Map<UUID, MessageLookupEntity> lookupsById = loadMessagesById(targetMessageIds);
+        int clearedCount = 0;
+        for (UUID messageId : targetMessageIds) {
+            MessageLookupEntity lookup = lookupsById.get(messageId);
+            if (lookup == null || lookup.getDeletedAt() != null) {
+                continue;
+            }
+            lookup.setDeletedAt(clearedAt);
+            messageStorageService.save(lookup);
+            clearedCount++;
+        }
+        refreshChatLastMessageAt(chat);
+        reconcileUnreadState(chatId);
+        chatAdminLogService.log(
+                chatId,
+                requesterId,
+                null,
+                "CHAT_HISTORY_CLEARED",
+                topicId != null ? "Cleared topic history" : "Cleared chat history",
+                upToMessageId,
+                null
+        );
+
+        List<UUID> participants = chatMemberRepository.findAllByIdChatId(chatId).stream()
+                .map(member -> member.getId().getUserId())
+                .toList();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("topicId", topicId);
+        payload.put("upToMessageId", upToMessageId);
+        payload.put("clearedMessageCount", clearedCount);
+        payload.put("clearedAt", clearedAt);
+        userSyncService.recordForUsers(
+                userSyncService.participantsIncludingActor(requesterId, participants),
+                "CHAT_HISTORY_CLEARED",
+                "CHAT",
+                chatId,
+                chatId,
+                payload
+        );
+        publishChatInboxEvent(
+                "CHAT_HISTORY_CLEARED",
+                chatId,
+                userSyncService.participantsIncludingActor(requesterId, participants)
+        );
+        return new ClearHistoryResponse(chatId, topicId, upToMessageId, clearedCount, clearedAt);
+    }
+
+    @Transactional
+    public ChatSummaryResponse markChatUnread(UUID requesterId, UUID chatId, boolean unread) {
+        ChatEntity chat = getOwnedChat(requesterId, chatId);
+        ChatMemberEntity membership = getMembership(chatId, requesterId);
+        membership.setManuallyMarkedUnread(unread);
+        chatMemberRepository.save(membership);
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("userId", requesterId);
+        payload.put("markedUnread", unread);
+        payload.put("updatedAt", Instant.now());
+        userSyncService.recordForUsers(
+                List.of(requesterId),
+                "CHAT_MARKED_UNREAD",
+                "CHAT",
+                chatId,
+                chatId,
+                payload
+        );
+        recordChatUpsertSync(List.of(requesterId), chatId, payload, "CHAT_MARKED_UNREAD");
+        ChatSummaryResponse response = buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        publishChatInboxEvent("CHAT_MARKED_UNREAD", chatId, List.of(requesterId));
+        return response;
+    }
+
+    @Transactional
+    public ChatReportResponse reportChat(UUID requesterId, UUID chatId, ReportChatRequest request) {
+        getOwnedChat(requesterId, chatId);
+        abuseProtectionService.assertChatReportAllowed(requesterId);
+        ChatReportEntity report = new ChatReportEntity();
+        report.setReporterUserId(requesterId);
+        report.setChatId(chatId);
+        report.setCategory(normalizeChatReportCategory(request != null ? request.category() : null));
+        report.setDetails(normalizeReportDetails(request != null ? request.details() : null));
+        ChatReportEntity saved = chatReportRepository.save(report);
+        abuseProtectionService.recordChatReport(requesterId, chatId);
+        return new ChatReportResponse(saved.getId(), saved.getChatId(), saved.getCategory(), saved.getCreatedAt());
     }
 
     @Transactional
@@ -593,7 +930,15 @@ public class ChatService {
         ChatMemberEntity membership = getMembership(chatId, requesterId);
         membership.setArchived(archived);
         chatMemberRepository.save(membership);
-        return buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("userId", requesterId);
+        payload.put("archived", archived);
+        payload.put("updatedAt", Instant.now());
+        recordChatUpsertSync(List.of(requesterId), chatId, payload, "CHAT_UPDATED");
+        ChatSummaryResponse response = buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        publishChatInboxEvent("CHAT_UPDATED", chatId, List.of(requesterId));
+        return response;
     }
 
     @Transactional
@@ -605,7 +950,15 @@ public class ChatService {
         }
         membership.setMutedUntil(mutedUntil);
         chatMemberRepository.save(membership);
-        return buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("userId", requesterId);
+        payload.put("mutedUntil", mutedUntil);
+        payload.put("updatedAt", Instant.now());
+        recordChatUpsertSync(List.of(requesterId), chatId, payload, "CHAT_UPDATED");
+        ChatSummaryResponse response = buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        publishChatInboxEvent("CHAT_UPDATED", chatId, List.of(requesterId));
+        return response;
     }
 
     @Transactional
@@ -627,7 +980,16 @@ public class ChatService {
         membership.setListPinned(true);
         membership.setListPinOrder(nextPinOrder);
         chatMemberRepository.save(membership);
-        return buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("userId", requesterId);
+        payload.put("listPinned", true);
+        payload.put("pinOrder", nextPinOrder);
+        payload.put("updatedAt", Instant.now());
+        recordChatUpsertSync(List.of(requesterId), chatId, payload, "CHAT_UPDATED");
+        ChatSummaryResponse response = buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        publishChatInboxEvent("CHAT_UPDATED", chatId, List.of(requesterId));
+        return response;
     }
 
     @Transactional
@@ -643,7 +1005,16 @@ public class ChatService {
         membership.setListPinOrder(null);
         chatMemberRepository.save(membership);
         normalizePinnedOrder(requesterId, archived);
-        return buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("userId", requesterId);
+        payload.put("listPinned", false);
+        payload.put("pinOrder", null);
+        payload.put("updatedAt", Instant.now());
+        recordChatUpsertSync(List.of(requesterId), chatId, payload, "CHAT_UPDATED");
+        ChatSummaryResponse response = buildChatSummary(chat, requesterId, membership, getDraft(chatId, requesterId));
+        publishChatInboxEvent("CHAT_UPDATED", chatId, List.of(requesterId));
+        return response;
     }
 
     @Transactional
@@ -661,7 +1032,15 @@ public class ChatService {
         }
         draft.setDraftText(normalizedText);
         chatDraftRepository.save(draft);
-        return buildChatSummary(chat, requesterId, getMembership(chatId, requesterId), draft);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("userId", requesterId);
+        payload.put("draftText", normalizedText);
+        payload.put("draftUpdatedAt", draft.getUpdatedAt());
+        recordChatUpsertSync(List.of(requesterId), chatId, payload, "CHAT_UPDATED");
+        ChatSummaryResponse response = buildChatSummary(chat, requesterId, getMembership(chatId, requesterId), draft);
+        publishChatInboxEvent("CHAT_UPDATED", chatId, List.of(requesterId));
+        return response;
     }
 
     @Transactional
@@ -669,7 +1048,15 @@ public class ChatService {
         ChatEntity chat = getOwnedChat(requesterId, chatId);
         ChatDraftId draftId = new ChatDraftId(requesterId, chatId);
         chatDraftRepository.findById(draftId).ifPresent(chatDraftRepository::delete);
-        return buildChatSummary(chat, requesterId, getMembership(chatId, requesterId), null);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("userId", requesterId);
+        payload.put("draftText", null);
+        payload.put("updatedAt", Instant.now());
+        recordChatUpsertSync(List.of(requesterId), chatId, payload, "CHAT_UPDATED");
+        ChatSummaryResponse response = buildChatSummary(chat, requesterId, getMembership(chatId, requesterId), null);
+        publishChatInboxEvent("CHAT_UPDATED", chatId, List.of(requesterId));
+        return response;
     }
 
     @Transactional(readOnly = true)
@@ -685,6 +1072,7 @@ public class ChatService {
     public ChatInviteLinkResponse createInviteLink(UUID requesterId, UUID chatId, CreateInviteLinkRequest request) {
         ChatEntity chat = getOwnedChat(requesterId, chatId);
         ensureCanManageInviteLinks(chat, requesterId);
+        abuseProtectionService.assertInviteLinkCreationAllowed(requesterId, chatId);
 
         Instant expiresAt = request.expiresAt();
         if (expiresAt != null && !expiresAt.isAfter(Instant.now())) {
@@ -708,6 +1096,7 @@ public class ChatService {
                 null,
                 savedInviteLink.getId()
         );
+        abuseProtectionService.recordInviteLinkCreation(requesterId, chatId);
         return toInviteLinkResponse(savedInviteLink);
     }
 
@@ -762,6 +1151,12 @@ public class ChatService {
                     null,
                     null
             );
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("chatId", chatId);
+            payload.put("actorUserId", requesterId);
+            payload.put("updatedAt", Instant.now());
+            payload.put("publicUsername", chat.getPublicUsername());
+            recordChatStateEvent("CHAT_UPDATED", chatId, listParticipantUserIds(chatId), payload);
             return response;
         } catch (DataIntegrityViolationException duplicateUsername) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Public username already taken");
@@ -902,6 +1297,12 @@ public class ChatService {
                 .orElseGet(() -> chatMemberRepository.save(newMember(chat, userId, "MEMBER")));
         markJoinRequestDecision(joinRequest, "APPROVED", requesterId);
         chatAdminLogService.log(chatId, requesterId, userId, "JOIN_REQUEST_APPROVED", "Approved join request", null, null);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("actorUserId", requesterId);
+        payload.put("affectedUserId", userId);
+        payload.put("updatedAt", Instant.now());
+        recordChatStateEvent("CHAT_JOIN_REQUEST_APPROVED", chatId, listParticipantUserIds(chatId), payload);
 
         UserEntity user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
@@ -964,6 +1365,14 @@ public class ChatService {
                 null,
                 null
         );
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("actorUserId", requesterId);
+        payload.put("affectedUserId", userId);
+        payload.put("canSendMessages", saved.getCanSendMessages());
+        payload.put("restrictedUntil", saved.getRestrictedUntil());
+        payload.put("updatedAt", Instant.now());
+        recordChatStateEvent("CHAT_MEMBER_UPDATED", chatId, listParticipantUserIds(chatId), payload);
 
         UserEntity user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
@@ -1019,10 +1428,30 @@ public class ChatService {
         ban.setBannedAt(Instant.now());
         ChatBanEntity savedBan = chatBanRepository.save(ban);
 
-        chatMemberRepository.findById(new ChatMemberId(chatId, userId)).ifPresent(chatMemberRepository::delete);
+        boolean removedMembership = chatMemberRepository.findById(new ChatMemberId(chatId, userId))
+                .map(member -> {
+                    chatMemberRepository.delete(member);
+                    return true;
+                })
+                .orElse(false);
         chatJoinRequestRepository.findByIdChatIdAndIdUserId(chatId, userId)
                 .ifPresent(joinRequest -> markJoinRequestDecision(joinRequest, "DECLINED", requesterId));
         chatAdminLogService.log(chatId, requesterId, userId, "MEMBER_BANNED", "Banned member from chat", null, null);
+        if (removedMembership) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("chatId", chatId);
+            payload.put("actorUserId", requesterId);
+            payload.put("affectedUserId", userId);
+            payload.put("bannedUntil", savedBan.getBannedUntil());
+            payload.put("updatedAt", Instant.now());
+            recordChatStateEvent(
+                    "CHAT_MEMBER_BANNED",
+                    chatId,
+                    listParticipantUserIds(chatId),
+                    List.of(userId),
+                    payload
+            );
+        }
 
         UserEntity user = userRepository.findById(userId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
@@ -1088,6 +1517,20 @@ public class ChatService {
     }
 
     @Transactional
+    public void publishChatUpdate(UUID actorUserId, UUID chatId, Collection<UUID> visibleUserIds, Map<String, Object> payload) {
+        if (chatId == null || visibleUserIds == null || visibleUserIds.isEmpty()) {
+            return;
+        }
+        Map<String, Object> eventPayload = new LinkedHashMap<>();
+        if (payload != null && !payload.isEmpty()) {
+            eventPayload.putAll(payload);
+        }
+        eventPayload.putIfAbsent("chatId", chatId);
+        eventPayload.putIfAbsent("actorUserId", actorUserId);
+        recordChatStateEvent("CHAT_UPDATED", chatId, visibleUserIds, eventPayload);
+    }
+
+    @Transactional
     public ChatReadEventResponse markRead(UUID requesterId, UUID chatId, UUID messageId) {
         ChatEntity chat = getOwnedChat(requesterId, chatId);
         ChatMemberEntity membership = getMembership(chatId, requesterId);
@@ -1098,6 +1541,13 @@ public class ChatService {
         }
 
         if (Objects.equals(membership.getLastReadMessageId(), effectiveMessage.getMessageId())) {
+            if (Boolean.TRUE.equals(membership.getManuallyMarkedUnread())) {
+                Instant readAt = membership.getLastReadAt() != null ? membership.getLastReadAt() : Instant.now();
+                membership.setManuallyMarkedUnread(false);
+                chatMemberRepository.save(membership);
+                recordChatReadSync(requesterId, chatId, effectiveMessage.getMessageId(), readAt, membership);
+                publishChatInboxEvent("CHAT_READ", chatId, List.of(requesterId));
+            }
             return new ChatReadEventResponse(
                     chatId,
                     requesterId,
@@ -1113,8 +1563,37 @@ public class ChatService {
         membership.setUnreadCount(unreadTailCounters.unreadCount());
         membership.setMentionCount(unreadTailCounters.mentionCount());
         membership.setReplyCount(unreadTailCounters.replyCount());
+        membership.setManuallyMarkedUnread(false);
         chatMemberRepository.save(membership);
+        recordChatReadSync(requesterId, chatId, effectiveMessage.getMessageId(), readAt, membership);
+        publishChatInboxEvent("CHAT_READ", chatId, List.of(requesterId));
         return new ChatReadEventResponse(chatId, requesterId, effectiveMessage.getMessageId(), readAt);
+    }
+
+    private void recordChatReadSync(
+            UUID requesterId,
+            UUID chatId,
+            UUID messageId,
+            Instant readAt,
+            ChatMemberEntity membership
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("messageId", messageId);
+        payload.put("userId", requesterId);
+        payload.put("readAt", readAt);
+        payload.put("unreadCount", membership != null && membership.getUnreadCount() != null ? membership.getUnreadCount() : 0);
+        payload.put("mentionCount", membership != null && membership.getMentionCount() != null ? membership.getMentionCount() : 0);
+        payload.put("replyCount", membership != null && membership.getReplyCount() != null ? membership.getReplyCount() : 0);
+        payload.put("manuallyMarkedUnread", membership != null && Boolean.TRUE.equals(membership.getManuallyMarkedUnread()));
+        userSyncService.recordForUsers(
+                List.of(requesterId),
+                "CHAT_READ",
+                "MESSAGE",
+                messageId,
+                chatId,
+                payload
+        );
     }
 
     @Transactional
@@ -1185,6 +1664,30 @@ public class ChatService {
         chatRepository.save(chat);
         recordPinEvent(chat.getId(), messageId, requesterId, pinnedAt);
         chatAdminLogService.log(chatId, requesterId, null, "MESSAGE_PINNED", "Pinned a message", messageId, null);
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chatId);
+        payload.put("messageId", messageId);
+        payload.put("userId", requesterId);
+        payload.put("pinnedAt", pinnedAt);
+        userSyncService.recordForUsers(
+                userSyncService.participantsIncludingActor(requesterId, getRecipientIds(chat, requesterId)),
+                "CHAT_PIN_UPDATED",
+                "MESSAGE",
+                messageId,
+                chatId,
+                payload
+        );
+        recordChatUpsertSync(
+                userSyncService.participantsIncludingActor(requesterId, getRecipientIds(chat, requesterId)),
+                chatId,
+                payload,
+                "CHAT_PIN_UPDATED"
+        );
+        publishChatInboxEvent(
+                "CHAT_PIN_UPDATED",
+                chatId,
+                userSyncService.participantsIncludingActor(requesterId, getRecipientIds(chat, requesterId))
+        );
 
         return new PinMessageEventResponse(chatId, messageId, requesterId, pinnedAt);
     }
@@ -1198,16 +1701,15 @@ public class ChatService {
 
     @Transactional
     public ChatEntity getOrCreateDirectChat(UUID requesterId, UUID peerId) {
-        if (requesterId.equals(peerId)) {
-            return chatRepository.findByChatTypeAndCreatedBy("SAVED", requesterId)
-                    .orElseGet(() -> createSavedMessages(requesterId));
+        ChatLookupResult lookupResult = getOrCreateDirectChatInternal(requesterId, peerId);
+        if (lookupResult.created()) {
+            publishChatCreatedEvent(
+                    requesterId,
+                    lookupResult.chat(),
+                    requesterId.equals(peerId) ? List.of(requesterId) : participantsIncludingSelf(requesterId, List.of(peerId))
+            );
         }
-        ensureUserExists(peerId);
-        UUID lowId = requesterId.compareTo(peerId) <= 0 ? requesterId : peerId;
-        UUID highId = requesterId.compareTo(peerId) <= 0 ? peerId : requesterId;
-
-        return chatRepository.findByParticipantLowIdAndParticipantHighId(lowId, highId)
-                .orElseGet(() -> createDirectChatEntity(lowId, highId));
+        return lookupResult.chat();
     }
 
     @Transactional(readOnly = true)
@@ -1261,6 +1763,35 @@ public class ChatService {
                 .filter(userId -> !userId.equals(senderId))
                 .sorted(Comparator.naturalOrder())
                 .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public boolean canManageMessages(UUID requesterId, UUID chatId) {
+        ChatEntity chat = getOwnedChat(requesterId, chatId);
+        if (!List.of("GROUP", "CHANNEL").contains(chat.getChatType())) {
+            return false;
+        }
+        return hasManageMessagesPermission(getMembership(chatId, requesterId));
+    }
+
+    @Transactional
+    public void reconcileUnreadState(UUID chatId) {
+        List<ChatMemberEntity> memberships = chatMemberRepository.findAllByIdChatId(chatId);
+        for (ChatMemberEntity membership : memberships) {
+            UUID lastReadMessageId = membership.getLastReadMessageId();
+            if (lastReadMessageId == null) {
+                lastReadMessageId = minimumMessageId();
+            }
+            UnreadTailCounters counters = recalculateUnreadTailCounters(
+                    membership.getId().getUserId(),
+                    chatId,
+                    lastReadMessageId
+            );
+            membership.setUnreadCount(counters.unreadCount());
+            membership.setMentionCount(counters.mentionCount());
+            membership.setReplyCount(counters.replyCount());
+        }
+        chatMemberRepository.saveAll(memberships);
     }
 
     @Transactional(readOnly = true)
@@ -1363,16 +1894,11 @@ public class ChatService {
                 return Integer.compare(leftPinOrder, rightPinOrder);
             }
         }
-        if (left.lastMessageAt() == null && right.lastMessageAt() == null) {
-            return 0;
+        int lastMessageComparison = compareLastMessageAt(left.lastMessageAt(), right.lastMessageAt());
+        if (lastMessageComparison != 0) {
+            return lastMessageComparison;
         }
-        if (left.lastMessageAt() == null) {
-            return 1;
-        }
-        if (right.lastMessageAt() == null) {
-            return -1;
-        }
-        return right.lastMessageAt().compareTo(left.lastMessageAt());
+        return left.chatId().compareTo(right.chatId());
     }
 
     private void normalizePinnedOrder(UUID requesterId, boolean archived) {
@@ -1480,7 +2006,8 @@ public class ChatService {
                     false,
                     true,
                     false,
-                    lastMessage
+                    lastMessage,
+                    Boolean.TRUE.equals(membership.getManuallyMarkedUnread())
             );
         }
 
@@ -1525,7 +2052,8 @@ public class ChatService {
                     "CHANNEL".equals(chat.getChatType()) && Boolean.TRUE.equals(chat.getCommentsEnabled()),
                     Boolean.TRUE.equals(chat.getReactionsEnabled()),
                     "CHANNEL".equals(chat.getChatType()) && Boolean.TRUE.equals(chat.getCrossPostingEnabled()),
-                    lastMessage
+                    lastMessage,
+                    Boolean.TRUE.equals(membership.getManuallyMarkedUnread())
             );
         }
 
@@ -1574,7 +2102,8 @@ public class ChatService {
                 false,
                 true,
                 false,
-                lastMessage
+                lastMessage,
+                Boolean.TRUE.equals(membership.getManuallyMarkedUnread())
         );
     }
 
@@ -1597,6 +2126,7 @@ public class ChatService {
                 return buildRequestedJoinResult(chat, existingRequest);
             }
 
+            abuseProtectionService.assertJoinRequestCreationAllowed(requesterId, chat.getId());
             ChatJoinRequestEntity joinRequest = existingRequest != null ? existingRequest : new ChatJoinRequestEntity();
             joinRequest.setId(new ChatJoinRequestId(chat.getId(), requesterId));
             joinRequest.setStatus("PENDING");
@@ -1606,6 +2136,7 @@ public class ChatService {
             joinRequest.setDecidedAt(null);
             joinRequest.setDecidedByUserId(null);
             ChatJoinRequestEntity savedJoinRequest = chatJoinRequestRepository.save(joinRequest);
+            abuseProtectionService.recordJoinRequestCreation(requesterId, chat.getId());
             if (inviteLink != null) {
                 incrementInviteLinkUsage(inviteLink);
             }
@@ -1616,6 +2147,13 @@ public class ChatService {
         if (inviteLink != null) {
             incrementInviteLinkUsage(inviteLink);
         }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chat.getId());
+        payload.put("actorUserId", requesterId);
+        payload.put("affectedUserId", requesterId);
+        payload.put("source", source);
+        payload.put("updatedAt", Instant.now());
+        recordChatStateEvent("CHAT_MEMBER_ADDED", chat.getId(), listParticipantUserIds(chat.getId()), payload);
         return buildJoinedChatResult(chat, requesterId);
     }
 
@@ -2177,6 +2715,156 @@ public class ChatService {
         return chatDraftRepository.findById(new ChatDraftId(requesterId, chatId)).orElse(null);
     }
 
+    private List<UUID> listParticipantUserIds(UUID chatId) {
+        List<ChatMemberEntity> memberships = chatMemberRepository.findAllByIdChatId(chatId);
+        if (memberships == null) {
+            return List.of();
+        }
+        return memberships.stream()
+                .map(member -> member.getId().getUserId())
+                .toList();
+    }
+
+    private List<UUID> participantsIncludingSelf(UUID requesterId, Collection<UUID> otherUserIds) {
+        Set<UUID> userIds = new LinkedHashSet<>();
+        userIds.add(requesterId);
+        if (otherUserIds != null) {
+            userIds.addAll(otherUserIds);
+        }
+        return List.copyOf(userIds);
+    }
+
+    private void publishChatCreatedEvent(UUID actorUserId, ChatEntity chat, Collection<UUID> visibleUserIds) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("chatId", chat.getId());
+        payload.put("actorUserId", actorUserId);
+        payload.put("chatType", chat.getChatType());
+        payload.put("createdAt", chat.getCreatedAt());
+        recordChatStateEvent("CHAT_CREATED", chat.getId(), visibleUserIds, payload);
+    }
+
+    private void recordChatStateEvent(
+            String eventType,
+            UUID chatId,
+            Collection<UUID> visibleUserIds,
+            Map<String, Object> payload
+    ) {
+        recordChatStateEvent(eventType, chatId, visibleUserIds, List.of(), payload);
+    }
+
+    private void recordChatStateEvent(
+            String eventType,
+            UUID chatId,
+            Collection<UUID> visibleUserIds,
+            Collection<UUID> removedUserIds,
+            Map<String, Object> payload
+    ) {
+        Set<UUID> visibleRecipients = uniqueUserIds(visibleUserIds);
+        Set<UUID> removedRecipients = uniqueUserIds(removedUserIds);
+        Set<UUID> syncRecipients = new LinkedHashSet<>(visibleRecipients);
+        syncRecipients.addAll(removedRecipients);
+        if (!syncRecipients.isEmpty()) {
+            userSyncService.recordForUsers(
+                    List.copyOf(syncRecipients),
+                    eventType,
+                    "CHAT",
+                    chatId,
+                    chatId,
+                    payload != null ? payload : Map.of()
+            );
+        }
+        recordChatUpsertSync(visibleRecipients, chatId, payload, eventType);
+        if (MEMBER_STATE_EVENT_TYPES.contains(eventType)) {
+            recordMemberStateChangedSync(visibleRecipients, chatId, payload, eventType);
+        }
+        recordChatRemovedSync(removedRecipients, chatId, payload, eventType);
+        publishChatInboxEvent(eventType, chatId, visibleUserIds, removedUserIds);
+    }
+
+    private void recordChatUpsertSync(Collection<UUID> userIds, UUID chatId, Map<String, Object> payload, String originEventType) {
+        recordCanonicalChatSyncEvent(userIds, "CHAT_UPSERT", chatId, payload, originEventType);
+    }
+
+    private void recordMemberStateChangedSync(
+            Collection<UUID> userIds,
+            UUID chatId,
+            Map<String, Object> payload,
+            String originEventType
+    ) {
+        recordCanonicalChatSyncEvent(userIds, "MEMBER_STATE_CHANGED", chatId, payload, originEventType);
+    }
+
+    private void recordChatRemovedSync(Collection<UUID> userIds, UUID chatId, Map<String, Object> payload, String originEventType) {
+        recordCanonicalChatSyncEvent(userIds, "CHAT_REMOVED", chatId, payload, originEventType);
+    }
+
+    private void recordCanonicalChatSyncEvent(
+            Collection<UUID> userIds,
+            String eventType,
+            UUID chatId,
+            Map<String, Object> payload,
+            String originEventType
+    ) {
+        Set<UUID> recipients = uniqueUserIds(userIds);
+        if (recipients.isEmpty()) {
+            return;
+        }
+        userSyncService.recordForUsers(
+                List.copyOf(recipients),
+                eventType,
+                "CHAT",
+                chatId,
+                chatId,
+                withOriginEventType(payload, originEventType)
+        );
+    }
+
+    private Set<UUID> uniqueUserIds(Collection<UUID> userIds) {
+        Set<UUID> recipients = new LinkedHashSet<>();
+        if (userIds != null) {
+            recipients.addAll(userIds.stream()
+                    .filter(Objects::nonNull)
+                    .toList());
+        }
+        return recipients;
+    }
+
+    private Map<String, Object> withOriginEventType(Map<String, Object> payload, String originEventType) {
+        Map<String, Object> syncPayload = new LinkedHashMap<>();
+        if (payload != null) {
+            syncPayload.putAll(payload);
+        }
+        if (originEventType != null && !originEventType.isBlank()) {
+            syncPayload.putIfAbsent("originEventType", originEventType);
+        }
+        return syncPayload;
+    }
+
+    private void publishChatInboxEvent(String eventType, UUID chatId, java.util.Collection<UUID> userIds) {
+        publishChatInboxEvent(eventType, chatId, userIds, List.of());
+    }
+
+    private void publishChatInboxEvent(
+            String eventType,
+            UUID chatId,
+            java.util.Collection<UUID> userIds,
+            java.util.Collection<UUID> removedUserIds
+    ) {
+        Set<UUID> uniqueUserIds = new LinkedHashSet<>(userIds != null ? userIds : List.of());
+        Set<UUID> uniqueRemovedUserIds = new LinkedHashSet<>(removedUserIds != null ? removedUserIds : List.of());
+        if (uniqueUserIds.isEmpty() && uniqueRemovedUserIds.isEmpty()) {
+            return;
+        }
+        applicationEventPublisher.publishEvent(
+                new ChatInboxFanoutEvent(
+                        eventType,
+                        chatId,
+                        List.copyOf(uniqueUserIds),
+                        List.copyOf(uniqueRemovedUserIds)
+                )
+        );
+    }
+
     private ChatInviteLinkResponse toInviteLinkResponse(ChatInviteLinkEntity inviteLink) {
         return new ChatInviteLinkResponse(
                 inviteLink.getId(),
@@ -2244,26 +2932,74 @@ public class ChatService {
         return normalized.isBlank() ? null : normalized;
     }
 
-    private int decodeChatCursor(String cursor) {
-        if (cursor == null || cursor.isBlank()) {
+    private int compareChatToCursor(ChatSummaryResponse chat, ChatListCursor cursor) {
+        int pinnedComparison = Boolean.compare(chat.pinned(), cursor.pinned());
+        if (pinnedComparison != 0) {
+            return -pinnedComparison;
+        }
+        if (chat.pinned()) {
+            int chatPinOrder = chat.pinOrder() != null ? chat.pinOrder() : Integer.MAX_VALUE;
+            int cursorPinOrder = cursor.pinOrder() != null ? cursor.pinOrder() : Integer.MAX_VALUE;
+            int pinOrderComparison = Integer.compare(chatPinOrder, cursorPinOrder);
+            if (pinOrderComparison != 0) {
+                return pinOrderComparison;
+            }
+        }
+        int lastMessageComparison = compareLastMessageAt(chat.lastMessageAt(), cursor.lastMessageAt());
+        if (lastMessageComparison != 0) {
+            return lastMessageComparison;
+        }
+        return chat.chatId().compareTo(cursor.chatId());
+    }
+
+    private int compareLastMessageAt(Instant left, Instant right) {
+        if (left == null && right == null) {
             return 0;
+        }
+        if (left == null) {
+            return 1;
+        }
+        if (right == null) {
+            return -1;
+        }
+        return right.compareTo(left);
+    }
+
+    private ChatListCursor decodeChatCursor(String cursor) {
+        if (cursor == null || cursor.isBlank()) {
+            return null;
         }
         try {
             String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
-            int offset = Integer.parseInt(decoded);
-            if (offset < 0) {
+            String[] parts = decoded.split("\\|", -1);
+            if (parts.length != 4) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is invalid");
             }
-            return offset;
+            boolean pinned = switch (parts[0]) {
+                case "1" -> true;
+                case "0" -> false;
+                default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is invalid");
+            };
+            Integer pinOrder = parts[1].isBlank() ? null : Integer.valueOf(parts[1]);
+            Instant lastMessageAt = parts[2].isBlank() ? null : Instant.ofEpochMilli(Long.parseLong(parts[2]));
+            UUID chatId = UUID.fromString(parts[3]);
+            return new ChatListCursor(pinned, pinOrder, lastMessageAt, chatId);
         } catch (IllegalArgumentException exception) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Chat cursor is invalid", exception);
         }
     }
 
-    private String encodeChatCursor(int offset) {
+    private String encodeChatCursor(ChatSummaryResponse chat) {
+        String encoded = (chat.pinned() ? "1" : "0")
+                + "|"
+                + (chat.pinOrder() != null ? chat.pinOrder() : "")
+                + "|"
+                + (chat.lastMessageAt() != null ? chat.lastMessageAt().toEpochMilli() : "")
+                + "|"
+                + chat.chatId();
         return Base64.getUrlEncoder()
                 .withoutPadding()
-                .encodeToString(String.valueOf(offset).getBytes(StandardCharsets.UTF_8));
+                .encodeToString(encoded.getBytes(StandardCharsets.UTF_8));
     }
 
     private int requireOptionalLimit(Integer limit, int defaultValue, int max) {
@@ -2362,7 +3098,25 @@ public class ChatService {
         return savedChat;
     }
 
-    private ChatEntity createDirectChatEntity(UUID lowId, UUID highId) {
+    private ChatLookupResult getOrCreateDirectChatInternal(UUID requesterId, UUID peerId) {
+        if (requesterId.equals(peerId)) {
+            return getOrCreateSavedMessagesInternal(requesterId);
+        }
+        ensureUserExists(peerId);
+        UUID lowId = requesterId.compareTo(peerId) <= 0 ? requesterId : peerId;
+        UUID highId = requesterId.compareTo(peerId) <= 0 ? peerId : requesterId;
+        return chatRepository.findByParticipantLowIdAndParticipantHighId(lowId, highId)
+                .map(chat -> new ChatLookupResult(chat, false))
+                .orElseGet(() -> createDirectChatEntity(lowId, highId));
+    }
+
+    private ChatLookupResult getOrCreateSavedMessagesInternal(UUID requesterId) {
+        return chatRepository.findByChatTypeAndCreatedBy("SAVED", requesterId)
+                .map(chat -> new ChatLookupResult(chat, false))
+                .orElseGet(() -> createSavedMessages(requesterId));
+    }
+
+    private ChatLookupResult createDirectChatEntity(UUID lowId, UUID highId) {
         try {
             ChatEntity chat = new ChatEntity();
             chat.setChatType("DIRECT");
@@ -2374,21 +3128,28 @@ public class ChatService {
                     newMember(saved, lowId, "OWNER"),
                     newMember(saved, highId, "MEMBER")
             ));
-            return saved;
+            return new ChatLookupResult(saved, true);
         } catch (DataIntegrityViolationException duplicateChatRace) {
-            return chatRepository.findByParticipantLowIdAndParticipantHighId(lowId, highId)
+            ChatEntity existingChat = chatRepository.findByParticipantLowIdAndParticipantHighId(lowId, highId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Unable to create chat"));
+            return new ChatLookupResult(existingChat, false);
         }
     }
 
-    private ChatEntity createSavedMessages(UUID requesterId) {
-        ChatEntity chat = new ChatEntity();
-        chat.setChatType("SAVED");
-        chat.setTitle("Saved Messages");
-        chat.setCreatedBy(requesterId);
-        ChatEntity saved = chatRepository.save(chat);
-        chatMemberRepository.save(newMember(saved, requesterId, "OWNER"));
-        return saved;
+    private ChatLookupResult createSavedMessages(UUID requesterId) {
+        try {
+            ChatEntity chat = new ChatEntity();
+            chat.setChatType("SAVED");
+            chat.setTitle("Saved Messages");
+            chat.setCreatedBy(requesterId);
+            ChatEntity saved = chatRepository.save(chat);
+            chatMemberRepository.save(newMember(saved, requesterId, "OWNER"));
+            return new ChatLookupResult(saved, true);
+        } catch (DataIntegrityViolationException duplicateChatRace) {
+            ChatEntity existingChat = chatRepository.findByChatTypeAndCreatedBy("SAVED", requesterId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Unable to create chat"));
+            return new ChatLookupResult(existingChat, false);
+        }
     }
 
     private ChatMemberEntity newMember(ChatEntity chat, UUID userId, String role) {
@@ -2686,5 +3447,36 @@ public class ChatService {
         while (matcher.find()) {
             usernames.add(matcher.group(1).toLowerCase());
         }
+    }
+
+    private void refreshChatLastMessageAt(ChatEntity chat) {
+        Instant lastMessageAt = messageRepository.findRecentByChatId(chat.getId(), 200).stream()
+                .filter(message -> message.getDeletedAt() == null)
+                .map(MessageEntity::getCreatedAt)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .orElse(null);
+        chat.setLastMessageAt(lastMessageAt);
+        chatRepository.save(chat);
+    }
+
+    private UUID minimumMessageId() {
+        return UUID.fromString("00000000-0000-1000-8000-000000000000");
+    }
+
+    private String normalizeChatReportCategory(String value) {
+        String normalized = value != null ? value.trim().toUpperCase() : "OTHER";
+        if (!CHAT_REPORT_CATEGORIES.contains(normalized)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported report category");
+        }
+        return normalized;
+    }
+
+    private String normalizeReportDetails(String value) {
+        if (value == null) {
+            return null;
+        }
+        String normalized = value.trim();
+        return normalized.isBlank() ? null : normalized;
     }
 }

@@ -57,6 +57,9 @@ public class ChatMemberEntity {
     @Column(name = "list_pin_order")
     private Integer listPinOrder;
 
+    @Column(name = "manually_marked_unread", nullable = false)
+    private Boolean manuallyMarkedUnread;
+
     @Column(name = "can_send_messages", nullable = false)
     private Boolean canSendMessages;
 
@@ -112,6 +115,9 @@ public class ChatMemberEntity {
         }
         if (listPinned == null) {
             listPinned = false;
+        }
+        if (manuallyMarkedUnread == null) {
+            manuallyMarkedUnread = false;
         }
         if (canSendMessages == null) {
             canSendMessages = true;

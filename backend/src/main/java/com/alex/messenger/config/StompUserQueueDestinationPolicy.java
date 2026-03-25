@@ -5,6 +5,7 @@ import java.util.Set;
 final class StompUserQueueDestinationPolicy {
 
     private static final Set<String> ALLOWED_DESTINATIONS = Set.of(
+            "/user/queue/chats",
             "/user/queue/messages",
             "/user/queue/story-events",
             "/user/queue/calls",

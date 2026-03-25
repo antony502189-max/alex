@@ -109,6 +109,18 @@ class StompAuthChannelInterceptorTest {
     }
 
     @Test
+    void subscribeAllowsAuthenticatedChatsQueue() {
+        UUID userId = UUID.randomUUID();
+
+        Message<?> result = interceptor.preSend(
+                subscribeMessage(userId, "/user/queue/chats"),
+                null
+        );
+
+        assertThat(result).isNotNull();
+    }
+
+    @Test
     void subscribeAllowsAuthenticatedStoryEventsQueue() {
         UUID userId = UUID.randomUUID();
 

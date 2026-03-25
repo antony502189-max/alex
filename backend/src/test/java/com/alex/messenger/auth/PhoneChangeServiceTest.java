@@ -40,6 +40,9 @@ class PhoneChangeServiceTest {
     @Mock
     private JwtService jwtService;
 
+    @Mock
+    private AuthSecurityEventService authSecurityEventService;
+
     private PhoneChangeService phoneChangeService;
 
     @BeforeEach
@@ -51,7 +54,8 @@ class PhoneChangeServiceTest {
                 phoneChangeChallengeRepository,
                 userSessionService,
                 jwtService,
-                authProperties
+                authProperties,
+                authSecurityEventService
         );
     }
 
@@ -108,6 +112,18 @@ class PhoneChangeServiceTest {
         assertThat(user.getPhoneNumber()).isEqualTo("+375299999999");
         assertThat(challenge.getConsumedAt()).isNotNull();
         verify(userSessionService).revokeOthers(userId, currentSessionId);
+        verify(authSecurityEventService).recordEvent(
+                eq(userId),
+                eq(currentSessionId),
+                eq("PHONE_CHANGED"),
+                eq("WARN"),
+                eq("127.0.0.1"),
+                eq("JUnit"),
+                eq(null),
+                eq(null),
+                eq(null),
+                eq("Phone number changed to ending 9999")
+        );
     }
 
     private String hash(String value) {

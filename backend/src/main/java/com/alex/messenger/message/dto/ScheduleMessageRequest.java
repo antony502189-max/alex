@@ -26,6 +26,7 @@ public record ScheduleMessageRequest(
         UUID stickerId,
         Boolean silent,
         UUID clientMessageId,
+        Boolean disableLinkPreview,
         @NotNull @Future Instant scheduledAt
 ) {
     public ScheduleMessageRequest(
@@ -61,6 +62,7 @@ public record ScheduleMessageRequest(
                 stickerId,
                 silent,
                 clientMessageId,
+                null,
                 scheduledAt
         );
     }

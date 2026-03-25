@@ -15,7 +15,6 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
-import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
@@ -95,25 +94,34 @@ public class AttachmentUploadSessionService {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "Unable to initialize upload session", exception);
         }
 
+        AttachmentMetadataSupport.UploadMetadata metadata = AttachmentMetadataSupport.prepareResumableUpload(
+                request.originalFileName(),
+                request.contentType(),
+                request.kind(),
+                request.durationMs(),
+                request.width(),
+                request.height(),
+                request.hdPhoto(),
+                request.waveform(),
+                request.albumId(),
+                request.albumItemIndex()
+        );
         AttachmentUploadSessionEntity session = new AttachmentUploadSessionEntity();
-        String normalizedContentType = normalizeContentType(request.contentType());
-        String normalizedKind = normalizeKind(request.kind(), normalizedContentType);
-        boolean normalizedHdPhoto = normalizeHdPhoto(request.hdPhoto(), normalizedKind);
         session.setId(sessionId);
         session.setChatId(request.chatId());
         session.setUploaderUserId(requesterId);
-        session.setOriginalFileName(safeFileName(request.originalFileName()));
-        session.setContentType(normalizedContentType);
-        session.setKind(normalizedKind);
+        session.setOriginalFileName(metadata.originalFileName());
+        session.setContentType(metadata.contentType());
+        session.setKind(metadata.kind());
         session.setTotalSizeBytes(request.totalSizeBytes());
         session.setUploadedBytes(0L);
-        session.setDurationMs(request.durationMs());
-        session.setWidth(request.width());
-        session.setHeight(request.height());
-        session.setHdPhoto(normalizedHdPhoto);
-        session.setWaveform(serializeWaveform(request.waveform()));
-        session.setAlbumId(request.albumId());
-        session.setAlbumItemIndex(request.albumItemIndex());
+        session.setDurationMs(metadata.durationMs());
+        session.setWidth(metadata.width());
+        session.setHeight(metadata.height());
+        session.setHdPhoto(metadata.hdPhoto());
+        session.setWaveform(AttachmentMetadataSupport.serializeWaveform(metadata.waveformSamples()));
+        session.setAlbumId(metadata.albumId());
+        session.setAlbumItemIndex(metadata.albumItemIndex());
         session.setStoragePath(storagePath.toString());
         session.setStatus("ACTIVE");
         session.setExpiresAt(Instant.now().plus(sessionTtl));
@@ -122,9 +130,11 @@ public class AttachmentUploadSessionService {
         return toResponse(attachmentUploadSessionRepository.save(session));
     }
 
-    @Transactional(readOnly = true)
+    @Transactional
     public AttachmentUploadSessionResponse getSession(UUID requesterId, UUID sessionId) {
-        return toResponse(getOwnedSession(requesterId, sessionId));
+        AttachmentUploadSessionEntity session = getOwnedSession(requesterId, sessionId);
+        expireSessionIfNecessary(session, Instant.now());
+        return toResponse(session);
     }
 
     @Transactional
@@ -134,6 +144,7 @@ public class AttachmentUploadSessionService {
             UploadAttachmentChunkRequest request
     ) {
         AttachmentUploadSessionEntity session = getOwnedActiveSession(requesterId, sessionId);
+        ensureStagedFileConsistency(session);
         if (request.offset() != session.getUploadedBytes()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Chunk offset does not match uploaded bytes");
         }
@@ -171,7 +182,9 @@ public class AttachmentUploadSessionService {
         }
 
         session.setUploadedBytes(nextUploadedBytes);
-        session.setLastChunkAt(Instant.now());
+        Instant now = Instant.now();
+        session.setLastChunkAt(now);
+        session.setExpiresAt(now.plus(sessionTtl));
         return toResponse(attachmentUploadSessionRepository.save(session));
     }
 
@@ -181,6 +194,7 @@ public class AttachmentUploadSessionService {
         if (session.getUploadedBytes() != session.getTotalSizeBytes()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Upload is not complete");
         }
+        ensureStagedFileConsistency(session);
 
         MessageAttachmentResponse attachmentResponse = attachmentService.uploadFromPath(
                 requesterId,
@@ -240,13 +254,54 @@ public class AttachmentUploadSessionService {
         if (!"ACTIVE".equals(session.getStatus())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Upload session is not active");
         }
-        if (session.getExpiresAt() != null && session.getExpiresAt().isBefore(Instant.now())) {
-            session.setStatus("EXPIRED");
-            attachmentUploadSessionRepository.save(session);
-            deleteSessionFile(session);
+        if (expireSessionIfNecessary(session, Instant.now())) {
             throw new ResponseStatusException(HttpStatus.GONE, "Upload session has expired");
         }
         return session;
+    }
+
+    private boolean expireSessionIfNecessary(AttachmentUploadSessionEntity session, Instant now) {
+        if (!"ACTIVE".equals(session.getStatus())) {
+            return false;
+        }
+        if (session.getExpiresAt() == null || !session.getExpiresAt().isBefore(now)) {
+            return false;
+        }
+        session.setStatus("EXPIRED");
+        attachmentUploadSessionRepository.save(session);
+        deleteSessionFile(session);
+        return true;
+    }
+
+    private void ensureStagedFileConsistency(AttachmentUploadSessionEntity session) {
+        Path storagePath = Path.of(session.getStoragePath());
+        long stagedFileSize;
+        try {
+            if (!Files.exists(storagePath)) {
+                abortInconsistentSession(session);
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Upload session data is missing; restart upload");
+            }
+            stagedFileSize = Files.size(storagePath);
+        } catch (ResponseStatusException exception) {
+            throw exception;
+        } catch (IOException exception) {
+            throw new ResponseStatusException(
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Unable to inspect upload session data",
+                    exception
+            );
+        }
+
+        if (stagedFileSize != session.getUploadedBytes()) {
+            abortInconsistentSession(session);
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Upload session data is inconsistent; restart upload");
+        }
+    }
+
+    private void abortInconsistentSession(AttachmentUploadSessionEntity session) {
+        session.setStatus("ABORTED");
+        attachmentUploadSessionRepository.save(session);
+        deleteSessionFile(session);
     }
 
     private AttachmentUploadSessionResponse toResponse(AttachmentUploadSessionEntity session) {
@@ -289,67 +344,4 @@ public class AttachmentUploadSessionService {
         }
     }
 
-    private String normalizeContentType(String contentType) {
-        if (contentType == null || contentType.isBlank()) {
-            return "application/octet-stream";
-        }
-        return contentType.trim().toLowerCase();
-    }
-
-    private String normalizeKind(String kind, String contentType) {
-        String normalizedKind = kind != null ? kind.trim().toUpperCase() : "";
-        String normalizedContentType = normalizeContentType(contentType);
-        if (normalizedKind.isBlank()) {
-            if ("image/gif".equalsIgnoreCase(normalizedContentType)) {
-                return "GIF";
-            }
-            if (normalizedContentType.startsWith("image/")) {
-                return "IMAGE";
-            }
-            if (normalizedContentType.startsWith("video/")) {
-                return "VIDEO";
-            }
-            if (normalizedContentType.startsWith("audio/")) {
-                return "AUDIO";
-            }
-            return "FILE";
-        }
-        if (!List.of("FILE", "VOICE", "IMAGE", "VIDEO", "AUDIO", "GIF", "VIDEO_NOTE").contains(normalizedKind)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unsupported attachment kind");
-        }
-        return normalizedKind;
-    }
-
-    private boolean normalizeHdPhoto(Boolean hdPhoto, String kind) {
-        boolean enabled = Boolean.TRUE.equals(hdPhoto);
-        if (enabled && !"IMAGE".equals(kind)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "HD photo is supported only for image attachments");
-        }
-        return enabled;
-    }
-
-    private String safeFileName(String originalFileName) {
-        if (originalFileName == null || originalFileName.isBlank()) {
-            return "file";
-        }
-        String normalized = originalFileName.replace("\\", "_").replace("/", "_").trim();
-        return normalized.length() > 255 ? normalized.substring(0, 255) : normalized;
-    }
-
-    private String serializeWaveform(List<Integer> waveform) {
-        if (waveform == null || waveform.isEmpty()) {
-            return null;
-        }
-        if (waveform.size() > 96) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Waveform is too large");
-        }
-        for (Integer sample : waveform) {
-            if (sample == null || sample < 0 || sample > 100) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Waveform sample is out of range");
-            }
-        }
-        return waveform.stream()
-                .map(String::valueOf)
-                .collect(Collectors.joining(","));
-    }
 }

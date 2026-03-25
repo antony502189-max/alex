@@ -13,6 +13,10 @@ public interface LoginCodeChallengeRepository extends JpaRepository<LoginCodeCha
 
     long countByPhoneNumberAndCreatedAtAfter(String phoneNumber, Instant createdAt);
 
+    long countByRequestedByIpAndCreatedAtAfter(String requestedByIp, Instant createdAt);
+
+    long countByRequestFingerprintHashAndCreatedAtAfter(String requestFingerprintHash, Instant createdAt);
+
     Optional<LoginCodeChallengeEntity> findByIdAndConsumedAtIsNull(UUID id);
 
     @Query("""

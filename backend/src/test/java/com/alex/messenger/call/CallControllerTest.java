@@ -8,6 +8,8 @@ import com.alex.messenger.call.dto.CallCommentResponse;
 import com.alex.messenger.call.dto.CallReactionResponse;
 import com.alex.messenger.call.dto.CallJoinLinkResponse;
 import com.alex.messenger.call.dto.CallSessionResponse;
+import com.alex.messenger.call.dto.CallSignalEventResponse;
+import com.alex.messenger.call.dto.CallSignalRequest;
 import com.alex.messenger.call.dto.CreateCallJoinLinkRequest;
 import com.alex.messenger.call.dto.CreateCallCommentRequest;
 import com.alex.messenger.call.dto.CreateCallReactionRequest;
@@ -87,6 +89,36 @@ class CallControllerTest {
     }
 
     @Test
+    void getCallRequiresFlagAndUsesAuthenticatedUser() {
+        UUID callId = UUID.randomUUID();
+        UUID chatId = UUID.randomUUID();
+        CallSessionResponse response = new CallSessionResponse(
+                callId,
+                chatId,
+                currentUserId,
+                "VOICE",
+                "DIRECT",
+                "ACTIVE",
+                Instant.parse("2026-03-19T17:05:00Z"),
+                Instant.parse("2026-03-19T17:05:03Z"),
+                null,
+                false,
+                null,
+                true,
+                false,
+                List.of()
+        );
+
+        when(callService.getCall(currentUserId, callId)).thenReturn(response);
+
+        ResponseEntity<CallSessionResponse> entity = callController.getCall(callId);
+
+        assertThat(entity.getBody()).isEqualTo(response);
+        verify(featureFlagService).requireCallsEnabled();
+        verify(callService).getCall(currentUserId, callId);
+    }
+
+    @Test
     void createJoinLinkRequiresFlagAndUsesAuthenticatedUser() {
         UUID chatId = UUID.randomUUID();
         CreateCallJoinLinkRequest request = new CreateCallJoinLinkRequest(
@@ -118,6 +150,7 @@ class CallControllerTest {
 
         assertThat(entity.getBody()).isEqualTo(response);
         verify(featureFlagService).requireCallsEnabled();
+        verify(featureFlagService).requireGroupCallsEnabled();
         verify(callService).createJoinLink(currentUserId, request);
     }
 
@@ -143,6 +176,7 @@ class CallControllerTest {
 
         assertThat(entity.getBody()).isEqualTo(response);
         verify(featureFlagService).requireCallsEnabled();
+        verify(featureFlagService).requireGroupCallsEnabled();
         verify(callService).createComment(currentUserId, callId, request);
     }
 
@@ -168,6 +202,7 @@ class CallControllerTest {
 
         assertThat(entity.getBody()).isEqualTo(response);
         verify(featureFlagService).requireCallsEnabled();
+        verify(featureFlagService).requireGroupCallsEnabled();
         verify(callService).createReaction(currentUserId, callId, request);
     }
 
@@ -200,6 +235,30 @@ class CallControllerTest {
 
         assertThat(entity.getBody()).isEqualTo(response);
         verify(featureFlagService).requireCallsEnabled();
+        verify(featureFlagService).requireGroupCallsEnabled();
         verify(callService).moderateParticipant(currentUserId, callId, targetUserId, request);
+    }
+
+    @Test
+    void sendSignalRequiresFlagAndUsesAuthenticatedUser() {
+        UUID callId = UUID.randomUUID();
+        UUID targetUserId = UUID.randomUUID();
+        CallSignalRequest request = new CallSignalRequest(targetUserId, "offer", "{\"sdp\":\"x\"}");
+        CallSignalEventResponse response = new CallSignalEventResponse(
+                callId,
+                currentUserId,
+                targetUserId,
+                "OFFER",
+                "{\"sdp\":\"x\"}",
+                Instant.parse("2026-03-19T17:30:00Z")
+        );
+
+        when(callService.sendSignal(currentUserId, callId, request)).thenReturn(response);
+
+        ResponseEntity<CallSignalEventResponse> entity = callController.sendSignal(callId, request);
+
+        assertThat(entity.getBody()).isEqualTo(response);
+        verify(featureFlagService).requireCallsEnabled();
+        verify(callService).sendSignal(currentUserId, callId, request);
     }
 }

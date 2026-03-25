@@ -3,8 +3,11 @@ package com.alex.messenger.message;
 import com.alex.messenger.message.dto.ChatMessageResponse;
 import com.alex.messenger.message.dto.CreateRepeatingMessageRequest;
 import com.alex.messenger.message.dto.CreatePollMessageRequest;
+import com.alex.messenger.message.dto.DeleteMessageRequest;
 import com.alex.messenger.message.dto.EditMessageRequest;
 import com.alex.messenger.message.dto.ForwardMessageRequest;
+import com.alex.messenger.message.dto.MessageReportResponse;
+import com.alex.messenger.message.dto.ReportMessageRequest;
 import com.alex.messenger.message.dto.RepeatingMessageResponse;
 import com.alex.messenger.message.dto.ScheduleMessageRequest;
 import com.alex.messenger.message.dto.ScheduledMessageResponse;
@@ -129,6 +132,22 @@ public class MessageController {
     @DeleteMapping("/{messageId}")
     public ResponseEntity<ChatMessageResponse> deleteMessage(@PathVariable UUID messageId) {
         return ResponseEntity.ok(messageService.deleteMessage(CurrentUser.id(), messageId));
+    }
+
+    @PostMapping("/{messageId}/delete")
+    public ResponseEntity<ChatMessageResponse> deleteMessageRich(
+            @PathVariable UUID messageId,
+            @Valid @RequestBody(required = false) DeleteMessageRequest request
+    ) {
+        return ResponseEntity.ok(messageService.deleteMessage(CurrentUser.id(), messageId, request));
+    }
+
+    @PostMapping("/{messageId}/report")
+    public ResponseEntity<MessageReportResponse> reportMessage(
+            @PathVariable UUID messageId,
+            @Valid @RequestBody ReportMessageRequest request
+    ) {
+        return ResponseEntity.ok(messageService.reportMessage(CurrentUser.id(), messageId, request));
     }
 
     @GetMapping("/chat/{chatId}")

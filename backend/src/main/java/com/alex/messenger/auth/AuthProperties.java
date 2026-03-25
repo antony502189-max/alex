@@ -18,6 +18,7 @@ public class AuthProperties {
     private Passkeys passkeys = new Passkeys();
     private PhoneChange phoneChange = new PhoneChange();
     private Identity identity = new Identity();
+    private LegacyLogin legacyLogin = new LegacyLogin();
 
     @Getter
     @Setter
@@ -27,6 +28,8 @@ public class AuthProperties {
         private Duration ttl = Duration.ofMinutes(10);
         private int maxAttempts = 5;
         private int maxRequestsPerWindow = 3;
+        private int maxRequestsPerIpWindow = 20;
+        private int maxRequestsPerFingerprintWindow = 10;
         private Duration requestWindow = Duration.ofMinutes(10);
         private boolean exposeDebugCode = true;
     }
@@ -84,5 +87,12 @@ public class AuthProperties {
     public static class Identity {
 
         private Duration ttl = Duration.ofMinutes(5);
+    }
+
+    @Getter
+    @Setter
+    public static class LegacyLogin {
+
+        private boolean enabled = false;
     }
 }

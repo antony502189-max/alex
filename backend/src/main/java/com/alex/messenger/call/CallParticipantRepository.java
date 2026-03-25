@@ -2,6 +2,7 @@ package com.alex.messenger.call;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.data.jpa.repository.JpaRepository;
 
@@ -16,4 +17,6 @@ public interface CallParticipantRepository extends JpaRepository<CallParticipant
     long countByIdCallIdAndStateIn(UUID callId, Collection<String> states);
 
     boolean existsByIdCallIdAndIdUserId(UUID callId, UUID userId);
+
+    Optional<CallParticipantEntity> findByIdCallIdAndIdUserId(UUID callId, UUID userId);
 }

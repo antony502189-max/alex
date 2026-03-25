@@ -64,6 +64,8 @@ alex:
       ttl: ${ALEX_AUTH_CODE_TTL:PT10M}
       max-attempts: ${ALEX_AUTH_CODE_MAX_ATTEMPTS:5}
       max-requests-per-window: ${ALEX_AUTH_CODE_MAX_REQUESTS_PER_WINDOW:3}
+      max-requests-per-ip-window: ${ALEX_AUTH_CODE_MAX_REQUESTS_PER_IP_WINDOW:20}
+      max-requests-per-fingerprint-window: ${ALEX_AUTH_CODE_MAX_REQUESTS_PER_FINGERPRINT_WINDOW:10}
       request-window: ${ALEX_AUTH_CODE_REQUEST_WINDOW:PT10M}
       expose-debug-code: ${ALEX_AUTH_CODE_EXPOSE_DEBUG_CODE:false}
     refresh:
@@ -86,6 +88,8 @@ alex:
       ttl: ${ALEX_AUTH_PHONE_CHANGE_TTL:PT10M}
     identity:
       ttl: ${ALEX_AUTH_IDENTITY_TTL:PT5M}
+    legacy-login:
+      enabled: ${ALEX_AUTH_LEGACY_LOGIN_ENABLED:false}
   account:
     export:
       default-format: ${ALEX_ACCOUNT_EXPORT_DEFAULT_FORMAT:JSON}
@@ -129,6 +133,58 @@ alex:
   lawful:
     direct-export:
       inline-message-limit: ${ALEX_LAWFUL_DIRECT_EXPORT_INLINE_MESSAGE_LIMIT:500}
+  compliance:
+    export:
+      artifact-ttl: ${ALEX_COMPLIANCE_EXPORT_ARTIFACT_TTL:PT24H}
+      cleanup-batch-size: ${ALEX_COMPLIANCE_EXPORT_CLEANUP_BATCH_SIZE:50}
+      cleanup-dispatch-interval-ms: ${ALEX_COMPLIANCE_EXPORT_CLEANUP_DISPATCH_INTERVAL_MS:60000}
+      max-inline-messages: ${ALEX_COMPLIANCE_EXPORT_MAX_INLINE_MESSAGES:100}
+      encryption-secret: ${ALEX_COMPLIANCE_EXPORT_ENCRYPTION_SECRET:dev-compliance-export-key}
+  sync:
+    reconciliation:
+      enabled: ${ALEX_SYNC_RECONCILIATION_ENABLED:true}
+      batch-size: ${ALEX_SYNC_RECONCILIATION_BATCH_SIZE:100}
+      lookback: ${ALEX_SYNC_RECONCILIATION_LOOKBACK:PT5M}
+      dispatch-interval-ms: ${ALEX_SYNC_RECONCILIATION_DISPATCH_INTERVAL_MS:60000}
+    retention:
+      enabled: ${ALEX_SYNC_RETENTION_ENABLED:true}
+      ttl: ${ALEX_SYNC_RETENTION_TTL:P30D}
+      cleanup-batch-size: ${ALEX_SYNC_RETENTION_CLEANUP_BATCH_SIZE:500}
+      cleanup-dispatch-interval-ms: ${ALEX_SYNC_RETENTION_CLEANUP_DISPATCH_INTERVAL_MS:60000}
+  message:
+    delivery:
+      reconciliation:
+        enabled: ${ALEX_MESSAGE_DELIVERY_RECONCILIATION_ENABLED:true}
+        chat-batch-size: ${ALEX_MESSAGE_DELIVERY_RECONCILIATION_CHAT_BATCH_SIZE:100}
+        message-batch-size: ${ALEX_MESSAGE_DELIVERY_RECONCILIATION_MESSAGE_BATCH_SIZE:200}
+        lookback: ${ALEX_MESSAGE_DELIVERY_RECONCILIATION_LOOKBACK:PT10M}
+        delivery-grace-period: ${ALEX_MESSAGE_DELIVERY_RECONCILIATION_DELIVERY_GRACE_PERIOD:PT5S}
+        dispatch-interval-ms: ${ALEX_MESSAGE_DELIVERY_RECONCILIATION_DISPATCH_INTERVAL_MS:60000}
+  abuse:
+    chat-creation:
+      max: ${ALEX_ABUSE_CHAT_CREATION_MAX:5}
+      window: ${ALEX_ABUSE_CHAT_CREATION_WINDOW:PT1H}
+    invite-link-creation:
+      global-max: ${ALEX_ABUSE_INVITE_LINK_GLOBAL_MAX:30}
+      global-window: ${ALEX_ABUSE_INVITE_LINK_GLOBAL_WINDOW:PT1H}
+      chat-max: ${ALEX_ABUSE_INVITE_LINK_CHAT_MAX:10}
+      chat-window: ${ALEX_ABUSE_INVITE_LINK_CHAT_WINDOW:PT30M}
+    join-request-creation:
+      global-max: ${ALEX_ABUSE_JOIN_REQUEST_GLOBAL_MAX:20}
+      global-window: ${ALEX_ABUSE_JOIN_REQUEST_GLOBAL_WINDOW:PT1H}
+      chat-max: ${ALEX_ABUSE_JOIN_REQUEST_CHAT_MAX:3}
+      chat-window: ${ALEX_ABUSE_JOIN_REQUEST_CHAT_WINDOW:PT30M}
+    message-send:
+      global-max: ${ALEX_ABUSE_MESSAGE_SEND_GLOBAL_MAX:180}
+      global-window: ${ALEX_ABUSE_MESSAGE_SEND_GLOBAL_WINDOW:PT1M}
+      chat-max: ${ALEX_ABUSE_MESSAGE_SEND_CHAT_MAX:60}
+      chat-window: ${ALEX_ABUSE_MESSAGE_SEND_CHAT_WINDOW:PT1M}
+    chat-report:
+      max: ${ALEX_ABUSE_CHAT_REPORT_MAX:20}
+      window: ${ALEX_ABUSE_CHAT_REPORT_WINDOW:PT1H}
+    message-report:
+      max: ${ALEX_ABUSE_MESSAGE_REPORT_MAX:30}
+      window: ${ALEX_ABUSE_MESSAGE_REPORT_WINDOW:PT1H}
   translations:
     provider-url: ${ALEX_TRANSLATIONS_PROVIDER_URL:}
     api-key: ${ALEX_TRANSLATIONS_API_KEY:}
@@ -231,6 +287,7 @@ alex:
     root: ${ALEX_STORAGE_ROOT:storage}
     attachments:
       max-file-size-bytes: ${ALEX_ATTACHMENTS_MAX_FILE_SIZE_BYTES:26214400}
+      access-token-ttl: ${ALEX_ATTACHMENTS_ACCESS_TOKEN_TTL:PT15M}
       resumable:
         chunk-size-bytes: ${ALEX_ATTACHMENTS_RESUMABLE_CHUNK_SIZE_BYTES:1048576}
         session-ttl: ${ALEX_ATTACHMENTS_RESUMABLE_SESSION_TTL:PT6H}
@@ -239,6 +296,7 @@ alex:
       max-file-size-bytes: ${ALEX_STORIES_MAX_FILE_SIZE_BYTES:26214400}
     profile-photos:
       max-file-size-bytes: ${ALEX_PROFILE_PHOTOS_MAX_FILE_SIZE_BYTES:5242880}
+      access-token-ttl: ${ALEX_PROFILE_PHOTOS_ACCESS_TOKEN_TTL:PT15M}
 
 logging:
   level:

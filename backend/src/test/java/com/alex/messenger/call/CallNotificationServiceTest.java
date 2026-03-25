@@ -136,6 +136,36 @@ class CallNotificationServiceTest {
     }
 
     @Test
+    void notifyStartedCallSkipsAlreadyActiveDirectSession() {
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(UUID.randomUUID());
+        session.setChatId(UUID.randomUUID());
+        session.setCreatedByUserId(UUID.randomUUID());
+        session.setMode("DIRECT");
+        session.setStatus("ACTIVE");
+
+        callNotificationService.notifyStartedCall(session);
+
+        verify(chatRepository, never()).findById(any());
+        verify(pushNotificationService, never()).send(any());
+    }
+
+    @Test
+    void notifyStartedCallSkipsAlreadyActiveLegacyGroupSession() {
+        CallSessionEntity session = new CallSessionEntity();
+        session.setId(UUID.randomUUID());
+        session.setChatId(UUID.randomUUID());
+        session.setCreatedByUserId(UUID.randomUUID());
+        session.setMode("GROUP");
+        session.setStatus("ACTIVE");
+
+        callNotificationService.notifyStartedCall(session);
+
+        verify(chatRepository, never()).findById(any());
+        verify(pushNotificationService, never()).send(any());
+    }
+
+    @Test
     void notifyStartedCallSkipsMalformedSessionsWithoutModeOrChat() {
         CallSessionEntity missingMode = new CallSessionEntity();
         missingMode.setId(UUID.randomUUID());

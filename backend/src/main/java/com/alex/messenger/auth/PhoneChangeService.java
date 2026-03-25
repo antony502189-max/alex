@@ -31,6 +31,7 @@ public class PhoneChangeService {
     private final UserSessionService userSessionService;
     private final JwtService jwtService;
     private final AuthProperties authProperties;
+    private final AuthSecurityEventService authSecurityEventService;
     private final SecureRandom secureRandom = new SecureRandom();
 
     @Transactional
@@ -109,6 +110,20 @@ public class PhoneChangeService {
         UserEntity savedUser = userRepository.save(user);
 
         userSessionService.revokeOthers(userId, currentSessionId);
+        authSecurityEventService.recordEvent(
+                userId,
+                currentSessionId,
+                "PHONE_CHANGED",
+                "WARN",
+                ipAddress,
+                userAgent,
+                null,
+                null,
+                null,
+                "Phone number changed to ending %s".formatted(
+                        challenge.getNewPhoneNumber().substring(Math.max(0, challenge.getNewPhoneNumber().length() - 4))
+                )
+        );
 
         String refreshToken = generateRefreshToken();
         Instant refreshExpiresAt = Instant.now().plus(authProperties.getRefresh().getTtl());
