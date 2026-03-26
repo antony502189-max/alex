@@ -28,13 +28,21 @@ type MembersScreenProps = {
   currentUserId: string;
   token: string;
   onClose: () => void;
+  onOpenSharedMedia?: (chat: ChatSummary) => void;
+  onChatUpdated?: (chat: ChatSummary) => void;
+  onChatLeft?: (chatId: string) => void;
+  onHistoryCleared?: (chatId: string) => void;
 };
 
 export function MembersScreen({
   chat,
   currentUserId,
   token,
-  onClose
+  onClose,
+  onOpenSharedMedia,
+  onChatUpdated,
+  onChatLeft,
+  onHistoryCleared
 }: MembersScreenProps) {
   const chats = useAppStore((state) => state.chats);
   const upsertChat = useAppStore((state) => state.upsertChat);
@@ -83,6 +91,8 @@ export function MembersScreen({
   const [banningUserId, setBanningUserId] = useState<string | null>(null);
   const [unbanningUserId, setUnbanningUserId] = useState<string | null>(null);
   const [updatingPermissionsUserId, setUpdatingPermissionsUserId] = useState<string | null>(null);
+  const [updatingChatAction, setUpdatingChatAction] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [analytics, setAnalytics] = useState<ChatAnalytics | null>(null);
 
@@ -231,6 +241,14 @@ export function MembersScreen({
   const canViewAnalytics =
     (chat.chatType === "GROUP" || chat.chatType === "CHANNEL") &&
     (canManageMembers || canManageInviteLinks || canModerateMessages);
+  const canLeaveChat = chat.chatType !== "SAVED";
+  const resolvedMuted =
+    Boolean(chat.mutedUntil) && new Date(chat.mutedUntil!).getTime() > Date.now();
+
+  function applyChatSummary(summary: ChatSummary) {
+    upsertChat(summary);
+    onChatUpdated?.(summary);
+  }
 
   useEffect(() => {
     void loadInviteLinks(canManageInviteLinks);
@@ -676,6 +694,122 @@ export function MembersScreen({
     }
   }
 
+  async function handleArchiveToggle() {
+    setUpdatingChatAction("archive");
+    setError(null);
+    setNotice(null);
+    try {
+      const summary = await api.setChatArchived(token, chat.chatId, !chat.archived);
+      applyChatSummary(summary);
+      setNotice(summary.archived ? "Chat archived." : "Chat restored from archive.");
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "Unable to update archive state");
+    } finally {
+      setUpdatingChatAction(null);
+    }
+  }
+
+  async function handleMuteToggle() {
+    setUpdatingChatAction("mute");
+    setError(null);
+    setNotice(null);
+    try {
+      const mutedUntil = resolvedMuted
+        ? null
+        : new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const summary = await api.muteChat(token, chat.chatId, mutedUntil);
+      applyChatSummary(summary);
+      setNotice(mutedUntil ? "Chat muted for 24 hours." : "Chat unmuted.");
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "Unable to update mute state");
+    } finally {
+      setUpdatingChatAction(null);
+    }
+  }
+
+  async function handleMarkUnread() {
+    setUpdatingChatAction("unread");
+    setError(null);
+    setNotice(null);
+    try {
+      const summary = await api.markChatUnread(token, chat.chatId, true);
+      applyChatSummary(summary);
+      setNotice("Chat marked as unread.");
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "Unable to mark chat as unread");
+    } finally {
+      setUpdatingChatAction(null);
+    }
+  }
+
+  async function handlePinToggle() {
+    setUpdatingChatAction("pin");
+    setError(null);
+    setNotice(null);
+    try {
+      const summary = chat.pinned
+        ? await api.unpinChatFromList(token, chat.chatId)
+        : await api.pinChatToList(token, chat.chatId);
+      applyChatSummary(summary);
+      setNotice(summary.pinned ? "Chat pinned to the top of the list." : "Chat unpinned.");
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "Unable to update chat pin");
+    } finally {
+      setUpdatingChatAction(null);
+    }
+  }
+
+  async function handleClearHistory() {
+    setUpdatingChatAction("clear");
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await api.clearHistory(token, chat.chatId);
+      onHistoryCleared?.(chat.chatId);
+      setNotice(`History cleared: ${result.clearedMessageCount} messages removed.`);
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "Unable to clear chat history");
+    } finally {
+      setUpdatingChatAction(null);
+    }
+  }
+
+  async function handleLeaveChat() {
+    if (!canLeaveChat) {
+      return;
+    }
+
+    setUpdatingChatAction("leave");
+    setError(null);
+    setNotice(null);
+    try {
+      await api.leaveChat(token, chat.chatId);
+      setNotice("You left the chat.");
+      onChatLeft?.(chat.chatId);
+      onClose();
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "Unable to leave chat");
+    } finally {
+      setUpdatingChatAction(null);
+    }
+  }
+
+  async function handleReportChat() {
+    setUpdatingChatAction("report");
+    setError(null);
+    setNotice(null);
+    try {
+      await api.reportChat(token, chat.chatId, {
+        category: "ABUSE"
+      });
+      setNotice("Chat reported.");
+    } catch (mutationError) {
+      setError(mutationError instanceof Error ? mutationError.message : "Unable to report chat");
+    } finally {
+      setUpdatingChatAction(null);
+    }
+  }
+
   const orderedMembers = useMemo(() => {
     const rank: Record<string, number> = {
       OWNER: 0,
@@ -756,6 +890,82 @@ export function MembersScreen({
             </Pressable>
           </View>
         ) : null}
+      </View>
+
+      <View style={styles.adminCard}>
+        <Text style={styles.sectionTitle}>Chat actions</Text>
+        <Text style={styles.selectorHint}>
+          Quick management tools for the current conversation.
+        </Text>
+        {notice ? <Text style={styles.noticeText}>{notice}</Text> : null}
+        <View style={styles.chatActionGrid}>
+          <Pressable
+            disabled={updatingChatAction !== null}
+            onPress={() => onOpenSharedMedia?.(chat)}
+            style={[styles.actionTile, updatingChatAction !== null && styles.buttonDisabled]}
+          >
+            <Text style={styles.actionTileTitle}>Shared media</Text>
+            <Text style={styles.actionTileBody}>Browse shared files, links, photos, and videos.</Text>
+          </Pressable>
+          <Pressable
+            disabled={updatingChatAction !== null}
+            onPress={() => void handleArchiveToggle()}
+            style={[styles.actionTile, updatingChatAction !== null && styles.buttonDisabled]}
+          >
+            <Text style={styles.actionTileTitle}>{chat.archived ? "Unarchive" : "Archive"}</Text>
+            <Text style={styles.actionTileBody}>Move chat in or out of archive.</Text>
+          </Pressable>
+          <Pressable
+            disabled={updatingChatAction !== null}
+            onPress={() => void handleMuteToggle()}
+            style={[styles.actionTile, updatingChatAction !== null && styles.buttonDisabled]}
+          >
+            <Text style={styles.actionTileTitle}>{resolvedMuted ? "Unmute" : "Mute 24h"}</Text>
+            <Text style={styles.actionTileBody}>Control notifications for this chat.</Text>
+          </Pressable>
+          <Pressable
+            disabled={updatingChatAction !== null}
+            onPress={() => void handleMarkUnread()}
+            style={[styles.actionTile, updatingChatAction !== null && styles.buttonDisabled]}
+          >
+            <Text style={styles.actionTileTitle}>Mark unread</Text>
+            <Text style={styles.actionTileBody}>Bring the chat back to the unread list.</Text>
+          </Pressable>
+          <Pressable
+            disabled={updatingChatAction !== null}
+            onPress={() => void handlePinToggle()}
+            style={[styles.actionTile, updatingChatAction !== null && styles.buttonDisabled]}
+          >
+            <Text style={styles.actionTileTitle}>{chat.pinned ? "Unpin" : "Pin to top"}</Text>
+            <Text style={styles.actionTileBody}>Keep the chat near the top of the list.</Text>
+          </Pressable>
+          <Pressable
+            disabled={updatingChatAction !== null}
+            onPress={() => void handleClearHistory()}
+            style={[styles.actionTile, updatingChatAction !== null && styles.buttonDisabled]}
+          >
+            <Text style={styles.actionTileTitle}>Clear history</Text>
+            <Text style={styles.actionTileBody}>Remove current chat history on this account.</Text>
+          </Pressable>
+          <Pressable
+            disabled={updatingChatAction !== null}
+            onPress={() => void handleReportChat()}
+            style={[styles.actionTile, updatingChatAction !== null && styles.buttonDisabled]}
+          >
+            <Text style={styles.actionTileTitle}>Report</Text>
+            <Text style={styles.actionTileBody}>Send an abuse report for this chat.</Text>
+          </Pressable>
+          {canLeaveChat ? (
+            <Pressable
+              disabled={updatingChatAction !== null}
+              onPress={() => void handleLeaveChat()}
+              style={[styles.dangerActionTile, updatingChatAction !== null && styles.buttonDisabled]}
+            >
+              <Text style={styles.dangerActionTileTitle}>Leave chat</Text>
+              <Text style={styles.dangerActionTileBody}>Exit this conversation on the current account.</Text>
+            </Pressable>
+          ) : null}
+        </View>
       </View>
 
       {canViewAnalytics ? (
@@ -1634,6 +1844,50 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     backgroundColor: "#ffffff",
     padding: 16
+  },
+  noticeText: {
+    color: "#166534",
+    marginBottom: 10
+  },
+  chatActionGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    marginTop: 12
+  },
+  actionTile: {
+    minWidth: 150,
+    flexGrow: 1,
+    borderRadius: 14,
+    backgroundColor: "#f8fafc",
+    padding: 12,
+    gap: 6
+  },
+  actionTileTitle: {
+    color: "#0f172a",
+    fontWeight: "700"
+  },
+  actionTileBody: {
+    color: "#64748b",
+    fontSize: 12,
+    lineHeight: 18
+  },
+  dangerActionTile: {
+    minWidth: 150,
+    flexGrow: 1,
+    borderRadius: 14,
+    backgroundColor: "#fee2e2",
+    padding: 12,
+    gap: 6
+  },
+  dangerActionTileTitle: {
+    color: "#b91c1c",
+    fontWeight: "700"
+  },
+  dangerActionTileBody: {
+    color: "#991b1b",
+    fontSize: 12,
+    lineHeight: 18
   },
   analyticsGrid: {
     flexDirection: "row",

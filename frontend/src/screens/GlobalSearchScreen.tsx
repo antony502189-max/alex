@@ -18,12 +18,14 @@ type GlobalSearchScreenProps = {
   token: string;
   onClose: () => void;
   onOpenChat: (chat: ChatSummary) => void;
+  onOpenMessageResult: (chat: ChatSummary, message: GlobalMessageSearchResult["message"]) => void;
 };
 
 export function GlobalSearchScreen({
   token,
   onClose,
-  onOpenChat
+  onOpenChat,
+  onOpenMessageResult
 }: GlobalSearchScreenProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<GlobalSearchResponse | null>(null);
@@ -270,7 +272,7 @@ export function GlobalSearchScreen({
               {results.messages.map((result) => (
                 <Pressable
                   key={`${result.chat.chatId}:${result.message.messageId}`}
-                  onPress={() => onOpenChat(result.chat)}
+                  onPress={() => onOpenMessageResult(result.chat, result.message)}
                   style={styles.card}
                 >
                   <Avatar uri={result.chat.photoUrl} size={52} title={result.chat.title} />
@@ -282,6 +284,9 @@ export function GlobalSearchScreen({
                     <Text style={styles.cardMeta}>
                       {new Date(result.message.createdAt).toLocaleString()}
                     </Text>
+                  </View>
+                  <View style={styles.messageActionBadge}>
+                    <Text style={styles.messageActionBadgeText}>Jump</Text>
                   </View>
                 </Pressable>
               ))}
@@ -382,6 +387,16 @@ const styles = StyleSheet.create({
   },
   messageSnippet: {
     color: "#334155"
+  },
+  messageActionBadge: {
+    borderRadius: 999,
+    backgroundColor: "#dbeafe",
+    paddingHorizontal: 10,
+    paddingVertical: 8
+  },
+  messageActionBadgeText: {
+    color: "#1d4ed8",
+    fontWeight: "700"
   },
   secondaryButton: {
     borderRadius: 12,

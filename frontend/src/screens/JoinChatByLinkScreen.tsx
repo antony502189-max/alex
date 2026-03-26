@@ -15,6 +15,7 @@ import type { ChatSummary, PublicChatDiscovery } from "../types";
 
 type JoinChatByLinkScreenProps = {
   token: string;
+  initialInviteToken?: string | null;
   onClose: () => void;
   onJoined: (chat: ChatSummary) => void;
 };
@@ -29,15 +30,20 @@ function normalizeInviteToken(value: string) {
 
 export function JoinChatByLinkScreen({
   token,
+  initialInviteToken,
   onClose,
   onJoined
 }: JoinChatByLinkScreenProps) {
-  const [inviteToken, setInviteToken] = useState("");
+  const [inviteToken, setInviteToken] = useState(initialInviteToken ?? "");
   const [joining, setJoining] = useState(false);
   const [discovering, setDiscovering] = useState(false);
   const [discoveries, setDiscoveries] = useState<PublicChatDiscovery[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    setInviteToken(initialInviteToken ?? "");
+  }, [initialInviteToken]);
 
   useEffect(() => {
     const normalized = normalizeInviteToken(inviteToken);

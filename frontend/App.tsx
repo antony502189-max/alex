@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import * as Notifications from "expo-notifications";
-import { AppState, StyleSheet, View } from "react-native";
+import { AppState, Linking, StyleSheet, View } from "react-native";
+import { RootTabBar } from "./src/components/RootTabBar";
+import { parseAlexDeepLink } from "./src/navigation/deepLinks";
 import { AuthScreen } from "./src/screens/AuthScreen";
 import { BotDeveloperScreen } from "./src/screens/BotDeveloperScreen";
 import { BotMiniAppScreen } from "./src/screens/BotMiniAppScreen";
@@ -9,6 +11,7 @@ import { CallsScreen } from "./src/screens/CallsScreen";
 import { ChatScreen } from "./src/screens/ChatScreen";
 import { ChatsListScreen } from "./src/screens/ChatsListScreen";
 import { CreateChatScreen } from "./src/screens/CreateChatScreen";
+import { MediaViewerScreen } from "./src/screens/MediaViewerScreen";
 import { MembersScreen } from "./src/screens/MembersScreen";
 import { ProfileScreen } from "./src/screens/ProfileScreen";
 import { ContactsScreen } from "./src/screens/ContactsScreen";
@@ -19,9 +22,13 @@ import { GlobalSearchScreen } from "./src/screens/GlobalSearchScreen";
 import { SessionsScreen } from "./src/screens/SessionsScreen";
 import { SecretChatScreen } from "./src/screens/SecretChatScreen";
 import { SecretChatsScreen } from "./src/screens/SecretChatsScreen";
+import { SharedMediaScreen } from "./src/screens/SharedMediaScreen";
 import { StoriesScreen } from "./src/screens/StoriesScreen";
 import { CreateStoryScreen } from "./src/screens/CreateStoryScreen";
 import { JoinChatByLinkScreen } from "./src/screens/JoinChatByLinkScreen";
+import { useFeatureFlagsStore } from "./src/store/useFeatureFlagsStore";
+import { useMediaStore } from "./src/store/useMediaStore";
+import { useNavigationStore } from "./src/store/useNavigationStore";
 import { api } from "./src/services/api";
 import { callMediaSession } from "./src/services/callMediaSession";
 import { toQueuedMessageId } from "./src/services/clientMessageIds";
@@ -39,6 +46,7 @@ import type {
   CallSession,
   CallSignalEvent,
   ChatMessage,
+  MessageAttachment,
   ChatSummary,
   ForumTopic,
   SecretChatSummary,
@@ -57,6 +65,18 @@ type BotMiniAppSelection = {
   chatId: string | null;
   startParameter: string | null;
   title: string;
+};
+
+type MessageFocusTarget = {
+  chatId: string;
+  messageId: string;
+  createdAt: string;
+};
+
+type MediaViewerSelection = {
+  attachments: MessageAttachment[];
+  initialAttachmentId: string;
+  chatTitle: string;
 };
 
 function isLiveCall(call: CallSession | null, currentUserId: string) {
@@ -102,37 +122,46 @@ export default function App() {
   const session = useAppStore((state) => state.session);
   const chats = useAppStore((state) => state.chats);
   const setChats = useAppStore((state) => state.setChats);
+  const setChatMessages = useAppStore((state) => state.setChatMessages);
   const upsertMessage = useAppStore((state) => state.upsertMessage);
   const upsertChat = useAppStore((state) => state.upsertChat);
   const replaceMessage = useAppStore((state) => state.replaceMessage);
   const removeMessage = useAppStore((state) => state.removeMessage);
+  const activeRootTab = useNavigationStore((state) => state.activeRootTab);
+  const setActiveRootTab = useNavigationStore((state) => state.setActiveRootTab);
+  const clearMediaBuckets = useMediaStore((state) => state.clearAll);
+  const storiesEnabled = useFeatureFlagsStore((state) => state.stories);
+  const callsEnabled = useFeatureFlagsStore((state) => state.calls);
+  const secretChatsEnabled = useFeatureFlagsStore((state) => state.secretChats);
+  const botsEnabled = useFeatureFlagsStore((state) => state.bots);
   const [selectedChat, setSelectedChat] = useState<ChatSummary | null>(null);
   const [membersChat, setMembersChat] = useState<ChatSummary | null>(null);
-  const [showProfile, setShowProfile] = useState(false);
   const [showBotDeveloper, setShowBotDeveloper] = useState(false);
   const [showSessions, setShowSessions] = useState(false);
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
-  const [showStories, setShowStories] = useState(false);
   const [showCreateStory, setShowCreateStory] = useState(false);
   const [showJoinByLink, setShowJoinByLink] = useState(false);
-  const [showContacts, setShowContacts] = useState(false);
-  const [showCalls, setShowCalls] = useState(false);
   const [showSecretChats, setShowSecretChats] = useState(false);
+  const [sharedMediaChat, setSharedMediaChat] = useState<ChatSummary | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [showFolders, setShowFolders] = useState(false);
+  const [joinByLinkSeedToken, setJoinByLinkSeedToken] = useState<string | null>(null);
   const [selectedForumTopic, setSelectedForumTopic] = useState<ForumTopic | null>(null);
   const [selectedDiscussionThread, setSelectedDiscussionThread] =
     useState<DiscussionThreadSelection | null>(null);
   const [selectedBotMiniApp, setSelectedBotMiniApp] = useState<BotMiniAppSelection | null>(null);
+  const [mediaViewer, setMediaViewer] = useState<MediaViewerSelection | null>(null);
   const [secretChatSeed, setSecretChatSeed] = useState<{ peerUserId: string; peerDisplayName: string } | null>(null);
   const [selectedSecretChat, setSelectedSecretChat] = useState<SecretChatSummary | null>(null);
   const [composeMode, setComposeMode] = useState<"direct" | "group" | "channel" | null>(null);
+  const [pendingChatFocus, setPendingChatFocus] = useState<MessageFocusTarget | null>(null);
   const [currentCall, setCurrentCall] = useState<CallSession | null>(null);
   const [currentCallLinks, setCurrentCallLinks] = useState<CallJoinLink[]>([]);
   const [recentCallSignals, setRecentCallSignals] = useState<CallSignalEvent[]>([]);
   const [callMediaState, setCallMediaState] = useState<CallMediaState>(callMediaSession.getState());
   const currentCallRef = useRef<CallSession | null>(null);
   const lastAuthenticatedUserIdRef = useRef<string | null>(null);
+  const handledInitialLinkRef = useRef(false);
 
   useEffect(() => {
     currentCallRef.current = currentCall;
@@ -153,12 +182,28 @@ export default function App() {
     setMembersChat((current) =>
       current ? nextChats.find((chat) => chat.chatId === current.chatId) ?? current : current
     );
+    setSharedMediaChat((current) =>
+      current ? nextChats.find((chat) => chat.chatId === current.chatId) ?? current : current
+    );
   }
 
-  function openChat(chat: ChatSummary) {
+  function openChat(
+    chat: ChatSummary,
+    focus?: { messageId: string; createdAt: string } | null
+  ) {
     setSelectedDiscussionThread(null);
     setSelectedForumTopic(null);
     setSelectedBotMiniApp(null);
+    setActiveRootTab("CHATS");
+    setPendingChatFocus(
+      focus
+        ? {
+            chatId: chat.chatId,
+            messageId: focus.messageId,
+            createdAt: focus.createdAt
+          }
+        : null
+    );
     setSelectedChat(chat);
   }
 
@@ -215,18 +260,15 @@ export default function App() {
     sessionToken: string,
     chatId: string,
     currentUserId: string,
-    topicId?: string | null
+    topicId?: string | null,
+    focus?: { messageId: string; createdAt: string } | null
   ) {
     setMembersChat(null);
-    setShowProfile(false);
     setShowBotDeveloper(false);
     setShowSessions(false);
     setShowGlobalSearch(false);
-    setShowStories(false);
     setShowCreateStory(false);
     setShowJoinByLink(false);
-    setShowContacts(false);
-    setShowCalls(false);
     setShowSecretChats(false);
     setSecretChatSeed(null);
     setSelectedSecretChat(null);
@@ -236,6 +278,19 @@ export default function App() {
     setSelectedDiscussionThread(null);
     setSelectedBotMiniApp(null);
     setComposeMode(null);
+    setJoinByLinkSeedToken(null);
+    setSharedMediaChat(null);
+    setMediaViewer(null);
+    setPendingChatFocus(
+      focus
+        ? {
+            chatId,
+            messageId: focus.messageId,
+            createdAt: focus.createdAt
+          }
+        : null
+    );
+    setActiveRootTab("CHATS");
 
     const existing = chats.find((chat) => chat.chatId === chatId);
     if (existing) {
@@ -495,27 +550,30 @@ export default function App() {
       wsService.disconnect();
       setSelectedChat(null);
       setMembersChat(null);
-      setShowProfile(false);
       setShowBotDeveloper(false);
       setShowSessions(false);
       setShowGlobalSearch(false);
-      setShowStories(false);
       setShowCreateStory(false);
       setShowJoinByLink(false);
-      setShowContacts(false);
-      setShowCalls(false);
       setShowSecretChats(false);
+      setSharedMediaChat(null);
       setShowArchived(false);
       setShowFolders(false);
       setSelectedForumTopic(null);
       setSelectedDiscussionThread(null);
       setSelectedBotMiniApp(null);
+      setMediaViewer(null);
       setSecretChatSeed(null);
       setSelectedSecretChat(null);
       setComposeMode(null);
       setCurrentCall(null);
       setCurrentCallLinks([]);
       setRecentCallSignals([]);
+      setJoinByLinkSeedToken(null);
+      setPendingChatFocus(null);
+      clearMediaBuckets();
+      handledInitialLinkRef.current = false;
+      setActiveRootTab("CHATS");
       return;
     }
 
@@ -613,7 +671,7 @@ export default function App() {
       clearInterval(flushIntervalId);
       wsService.disconnect();
     };
-  }, [removeMessage, replaceMessage, session, setChats, upsertMessage]);
+  }, [clearMediaBuckets, removeMessage, replaceMessage, session, setChats, upsertMessage]);
 
   useEffect(() => {
     if (!session || !currentCall || !isLiveCall(currentCall, session.userId)) {
@@ -715,6 +773,63 @@ export default function App() {
     };
   }, [session, chats]);
 
+  useEffect(() => {
+    if ((activeRootTab === "CALLS" && !callsEnabled) || (activeRootTab === "STORIES" && !storiesEnabled)) {
+      setActiveRootTab("CHATS");
+    }
+  }, [activeRootTab, callsEnabled, setActiveRootTab, storiesEnabled]);
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+
+    const handleIncomingUrl = (incomingUrl: string | null | undefined) => {
+      const parsed = parseAlexDeepLink(incomingUrl);
+      if (!parsed) {
+        return;
+      }
+
+      if (parsed.type === "JOIN") {
+        setActiveRootTab("CHATS");
+        setJoinByLinkSeedToken(parsed.token);
+        setShowJoinByLink(true);
+        return;
+      }
+
+      if (parsed.type === "CALL") {
+        if (!callsEnabled) {
+          return;
+        }
+        setActiveRootTab("CALLS");
+        void joinCallByLink(parsed.token).catch(() => undefined);
+        return;
+      }
+
+      setActiveRootTab("CHATS");
+      void openChatFromNotification(session.token, parsed.chatId, session.userId, parsed.topicId).catch(
+        () => undefined
+      );
+    };
+
+    if (!handledInitialLinkRef.current) {
+      handledInitialLinkRef.current = true;
+      void Linking.getInitialURL()
+        .then((incomingUrl) => {
+          handleIncomingUrl(incomingUrl);
+        })
+        .catch(() => undefined);
+    }
+
+    const subscription = Linking.addEventListener("url", ({ url }) => {
+      handleIncomingUrl(url);
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [callsEnabled, session]);
+
   if (!session) {
     return <AuthScreen />;
   }
@@ -778,23 +893,6 @@ export default function App() {
     );
   }
 
-  if (showProfile) {
-    return (
-      <ProfileScreen
-        onClose={() => setShowProfile(false)}
-        onOpenBotDeveloper={() => {
-          setShowProfile(false);
-          setShowBotDeveloper(true);
-        }}
-        onOpenSessions={() => {
-          setShowProfile(false);
-          setShowSessions(true);
-        }}
-        token={session.token}
-      />
-    );
-  }
-
   if (showBotDeveloper) {
     return (
       <BotDeveloperScreen
@@ -823,6 +921,27 @@ export default function App() {
           setShowGlobalSearch(false);
           openChat(chat);
         }}
+        onOpenMessageResult={(chat, message) => {
+          upsertChat(chat);
+          setShowGlobalSearch(false);
+          if (chat.forumEnabled && message.topicId) {
+            void openChatFromNotification(
+              session.token,
+              chat.chatId,
+              session.userId,
+              message.topicId,
+              {
+                messageId: message.messageId,
+                createdAt: message.createdAt
+              }
+            ).catch(() => undefined);
+            return;
+          }
+          openChat(chat, {
+            messageId: message.messageId,
+            createdAt: message.createdAt
+          });
+        }}
         token={session.token}
       />
     );
@@ -834,7 +953,9 @@ export default function App() {
         onClose={() => setShowCreateStory(false)}
         onCreated={(_story: Story) => {
           setShowCreateStory(false);
-          setShowStories(true);
+          if (storiesEnabled) {
+            setActiveRootTab("STORIES");
+          }
         }}
         token={session.token}
       />
@@ -844,10 +965,15 @@ export default function App() {
   if (showJoinByLink) {
     return (
       <JoinChatByLinkScreen
-        onClose={() => setShowJoinByLink(false)}
+        initialInviteToken={joinByLinkSeedToken}
+        onClose={() => {
+          setShowJoinByLink(false);
+          setJoinByLinkSeedToken(null);
+        }}
         onJoined={(chat) => {
           upsertChat(chat);
           setShowJoinByLink(false);
+          setJoinByLinkSeedToken(null);
           openChat(chat);
         }}
         token={session.token}
@@ -855,57 +981,25 @@ export default function App() {
     );
   }
 
-  if (showStories) {
+  if (mediaViewer) {
     return (
-      <StoriesScreen
-        onClose={() => setShowStories(false)}
-        onCreateStory={() => {
-          setShowStories(false);
-          setShowCreateStory(true);
-        }}
+      <MediaViewerScreen
+        attachments={mediaViewer.attachments}
+        chatTitle={mediaViewer.chatTitle}
+        initialAttachmentId={mediaViewer.initialAttachmentId}
+        onClose={() => setMediaViewer(null)}
         token={session.token}
       />
     );
   }
 
-  if (showContacts) {
+  if (sharedMediaChat) {
     return (
-      <ContactsScreen
-        onClose={() => setShowContacts(false)}
-        onOpenChat={(chat) => {
-          upsertChat(chat);
-          setShowContacts(false);
-          openChat(chat);
-        }}
-        onOpenBotMiniApp={(botUserId, title, chatId, startParameter) =>
-          setSelectedBotMiniApp({
-            botUserId,
-            chatId: chatId ?? null,
-            startParameter: startParameter ?? null,
-            title
-          })
-        }
-        token={session.token}
-      />
-    );
-  }
-
-  if (showCalls) {
-    return (
-      <CallsScreen
-        currentUserId={session.userId}
-        onCallBack={(chatId, kind) => {
-          setShowCalls(false);
-          void startChatCall(chatId, kind);
-        }}
-        onClose={() => setShowCalls(false)}
-        onJoinCallLink={(rawToken) => {
-          setShowCalls(false);
-          void joinCallByLink(rawToken).catch(() => undefined);
-        }}
-        onOpenChat={(chatId) => {
-          setShowCalls(false);
-          void openChatFromNotification(session.token, chatId, session.userId).catch(() => undefined);
+      <SharedMediaScreen
+        chat={sharedMediaChat}
+        onClose={() => setSharedMediaChat(null)}
+        onOpenMediaViewer={(payload) => {
+          setMediaViewer(payload);
         }}
         token={session.token}
       />
@@ -942,6 +1036,7 @@ export default function App() {
         onClose={() => {
           setShowSecretChats(false);
           setSecretChatSeed(null);
+          setActiveRootTab("CHATS");
         }}
         onOpenSecretChat={(secretChat) => setSelectedSecretChat(secretChat)}
         seedPeerDisplayName={secretChatSeed?.peerDisplayName ?? null}
@@ -978,7 +1073,28 @@ export default function App() {
       <MembersScreen
         chat={membersChat}
         currentUserId={session.userId}
+        onOpenSharedMedia={(chat) => {
+          setSharedMediaChat(chat);
+        }}
+        onChatUpdated={(updatedChat) => {
+          upsertChat(updatedChat);
+          setMembersChat(updatedChat);
+          setSharedMediaChat((current) =>
+            current?.chatId === updatedChat.chatId ? updatedChat : current
+          );
+          setSelectedChat((current) =>
+            current?.chatId === updatedChat.chatId ? updatedChat : current
+          );
+        }}
+        onChatLeft={(chatId) => {
+          setSharedMediaChat((current) => (current?.chatId === chatId ? null : current));
+          setMembersChat((current) => (current?.chatId === chatId ? null : current));
+          setSelectedChat((current) => (current?.chatId === chatId ? null : current));
+        }}
         onClose={() => setMembersChat(null)}
+        onHistoryCleared={(chatId) => {
+          setChatMessages(chatId, []);
+        }}
         token={session.token}
       />
     );
@@ -1019,6 +1135,14 @@ export default function App() {
       <ChatScreen
         chat={selectedChat}
         currentUserId={session.userId}
+        initialFocusMessage={
+          pendingChatFocus?.chatId === selectedChat.chatId
+            ? {
+                messageId: pendingChatFocus.messageId,
+                createdAt: pendingChatFocus.createdAt
+              }
+            : null
+        }
         onBack={() => {
           if (selectedDiscussionThread) {
             const originChat =
@@ -1034,9 +1158,17 @@ export default function App() {
           }
           setSelectedChat(null);
         }}
+        onConsumeInitialFocus={() => {
+          setPendingChatFocus((current) =>
+            current?.chatId === selectedChat.chatId ? null : current
+          );
+        }}
+        onOpenMediaViewer={(payload) => {
+          setMediaViewer(payload);
+        }}
         onOpenMembers={() => setMembersChat(selectedChat)}
         onOpenSecretChat={
-          selectedChat.chatType === "DIRECT" && selectedChat.peerUserId
+          secretChatsEnabled && selectedChat.chatType === "DIRECT" && selectedChat.peerUserId
             ? () => {
                 setSecretChatSeed({
                   peerUserId: selectedChat.peerUserId!,
@@ -1048,7 +1180,10 @@ export default function App() {
             : undefined
         }
         onOpenBotMiniApp={
-          selectedChat.chatType === "DIRECT" && selectedChat.peerIsBot && selectedChat.peerUserId
+          botsEnabled &&
+          selectedChat.chatType === "DIRECT" &&
+          selectedChat.peerIsBot &&
+          selectedChat.peerUserId
             ? (botUserId, title, chatId, startParameter) =>
                 setSelectedBotMiniApp({
                   botUserId,
@@ -1075,31 +1210,131 @@ export default function App() {
 
   return (
     <View style={styles.screen}>
-      <ChatsListScreen
-        onCreateChannel={() => setComposeMode("channel")}
-        onOpenJoinByLink={() => setShowJoinByLink(true)}
-        onOpenGlobalSearch={() => setShowGlobalSearch(true)}
-        onCreateDirect={() => setComposeMode("direct")}
-        onCreateGroup={() => setComposeMode("group")}
-        onOpenCalls={() => setShowCalls(true)}
-        onOpenSecretChats={() => {
-          setSecretChatSeed(null);
-          setSelectedSecretChat(null);
-          setShowSecretChats(true);
+      <View style={styles.rootContent}>
+        {activeRootTab === "CHATS" ? (
+          <ChatsListScreen
+            featureFlags={{
+              bots: botsEnabled,
+              calls: callsEnabled,
+              secretChats: secretChatsEnabled,
+              stories: storiesEnabled
+            }}
+            onCreateChannel={() => setComposeMode("channel")}
+            onOpenJoinByLink={() => {
+              setJoinByLinkSeedToken(null);
+              setShowJoinByLink(true);
+            }}
+            onOpenGlobalSearch={() => setShowGlobalSearch(true)}
+            onCreateDirect={() => setComposeMode("direct")}
+            onCreateGroup={() => setComposeMode("group")}
+            onOpenCalls={() => {
+              if (callsEnabled) {
+                setActiveRootTab("CALLS");
+              }
+            }}
+            onOpenSecretChats={() => {
+              if (!secretChatsEnabled) {
+                return;
+              }
+              setSecretChatSeed(null);
+              setSelectedSecretChat(null);
+              setShowSecretChats(true);
+            }}
+            onOpenArchived={() => setShowArchived(true)}
+            onOpenChat={openChat}
+            onOpenStories={() => {
+              if (storiesEnabled) {
+                setActiveRootTab("STORIES");
+              }
+            }}
+            onCreateStory={() => setShowCreateStory(true)}
+            onOpenContacts={() => setActiveRootTab("CONTACTS")}
+            onOpenFolders={() => setShowFolders(true)}
+            onOpenProfile={() => setActiveRootTab("SETTINGS")}
+            onOpenSavedMessages={() => {
+              void api.createSavedMessages(session.token).then((chat) => {
+                upsertChat(chat);
+                openChat(chat);
+              }).catch(() => undefined);
+            }}
+          />
+        ) : null}
+
+        {activeRootTab === "CALLS" && callsEnabled ? (
+          <CallsScreen
+            currentUserId={session.userId}
+            onCallBack={(chatId, kind) => {
+              void startChatCall(chatId, kind);
+            }}
+            onClose={() => setActiveRootTab("CHATS")}
+            onJoinCallLink={(rawToken) => {
+              void joinCallByLink(rawToken).catch(() => undefined);
+            }}
+            onOpenChat={(chatId) => {
+              void openChatFromNotification(session.token, chatId, session.userId).catch(
+                () => undefined
+              );
+            }}
+            token={session.token}
+          />
+        ) : null}
+
+        {activeRootTab === "CONTACTS" ? (
+          <ContactsScreen
+            onClose={() => setActiveRootTab("CHATS")}
+            onOpenChat={(chat) => {
+              upsertChat(chat);
+              openChat(chat);
+            }}
+            onOpenBotMiniApp={
+              botsEnabled
+                ? (botUserId, title, chatId, startParameter) =>
+                    setSelectedBotMiniApp({
+                      botUserId,
+                      chatId: chatId ?? null,
+                      startParameter: startParameter ?? null,
+                      title
+                    })
+                : undefined
+            }
+            token={session.token}
+          />
+        ) : null}
+
+        {activeRootTab === "STORIES" && storiesEnabled ? (
+          <StoriesScreen
+            onClose={() => setActiveRootTab("CHATS")}
+            onCreateStory={() => {
+              setShowCreateStory(true);
+            }}
+            token={session.token}
+          />
+        ) : null}
+
+        {activeRootTab === "SETTINGS" ? (
+          <ProfileScreen
+            onClose={() => setActiveRootTab("CHATS")}
+            onOpenBotDeveloper={
+              botsEnabled
+                ? () => {
+                    setShowBotDeveloper(true);
+                  }
+                : undefined
+            }
+            onOpenSessions={() => {
+              setShowSessions(true);
+            }}
+            token={session.token}
+          />
+        ) : null}
+      </View>
+      <RootTabBar
+        activeTab={activeRootTab}
+        hiddenTabs={{
+          CALLS: !callsEnabled,
+          STORIES: !storiesEnabled
         }}
-        onOpenArchived={() => setShowArchived(true)}
-        onOpenChat={openChat}
-        onOpenStories={() => setShowStories(true)}
-        onCreateStory={() => setShowCreateStory(true)}
-        onOpenContacts={() => setShowContacts(true)}
-        onOpenFolders={() => setShowFolders(true)}
-        onOpenProfile={() => setShowProfile(true)}
-        onOpenSavedMessages={() => {
-          void api.createSavedMessages(session.token).then((chat) => {
-            upsertChat(chat);
-            openChat(chat);
-          }).catch(() => undefined);
-        }}
+        onSelectTab={setActiveRootTab}
       />
     </View>
   );
@@ -1107,6 +1342,9 @@ export default function App() {
 
 const styles = StyleSheet.create({
   screen: {
+    flex: 1
+  },
+  rootContent: {
     flex: 1
   }
 });

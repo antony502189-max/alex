@@ -61,21 +61,35 @@ function sortFolders(folders: ChatFolder[]) {
   return [...folders].sort((left, right) => left.position - right.position);
 }
 
+function sortChats(chats: ChatSummary[]) {
+  return [...chats].sort((left, right) => {
+    if (left.pinned !== right.pinned) {
+      return left.pinned ? -1 : 1;
+    }
+
+    const leftPinOrder = left.pinOrder ?? Number.MAX_SAFE_INTEGER;
+    const rightPinOrder = right.pinOrder ?? Number.MAX_SAFE_INTEGER;
+    if (leftPinOrder !== rightPinOrder) {
+      return leftPinOrder - rightPinOrder;
+    }
+
+    return right.lastMessageAt.localeCompare(left.lastMessageAt);
+  });
+}
+
 export const useAppStore = create<State>((set) => ({
   session: null,
   chats: [],
   folders: [],
   messagesByChat: {},
   setSession: (session) => set({ session }),
-  setChats: (chats) => set({ chats }),
+  setChats: (chats) => set({ chats: sortChats(chats) }),
   setFolders: (folders) => set({ folders: sortFolders(folders) }),
   upsertChat: (chat) =>
     set((state) => {
       const nextChats = state.chats.filter((item) => item.chatId !== chat.chatId);
       return {
-        chats: [chat, ...nextChats].sort((left, right) =>
-          right.lastMessageAt.localeCompare(left.lastMessageAt)
-        )
+        chats: sortChats([chat, ...nextChats])
       };
     }),
   upsertFolder: (folder) =>
@@ -134,16 +148,19 @@ export const useAppStore = create<State>((set) => ({
       return {
         chats:
           currentUserId === event.userId
-            ? state.chats.map((chat) =>
-                chat.chatId === event.chatId
-                  ? {
-                      ...chat,
-                      lastReadAt: event.readAt,
-                      unreadCount: 0,
-                      mentionCount: 0,
-                      replyCount: 0
-                    }
-                  : chat
+            ? sortChats(
+                state.chats.map((chat) =>
+                  chat.chatId === event.chatId
+                    ? {
+                        ...chat,
+                        lastReadAt: event.readAt,
+                        unreadCount: 0,
+                        mentionCount: 0,
+                        replyCount: 0,
+                        markedUnread: false
+                      }
+                    : chat
+                )
               )
             : state.chats,
         messagesByChat: {

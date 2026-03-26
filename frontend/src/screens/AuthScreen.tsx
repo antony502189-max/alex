@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Platform,
   Pressable,
@@ -9,13 +9,15 @@ import {
   View
 } from "react-native";
 import { api } from "../services/api";
+import { devicePasskeys } from "../services/devicePasskeys";
 import { useAppStore } from "../store/useAppStore";
-import type { AuthFlowResult, AuthSession, LoginCodeChallenge } from "../types";
+import type { AuthFlowResult, AuthSession, DevicePasskey, LoginCodeChallenge } from "../types";
 
 export function AuthScreen() {
   const setSession = useAppStore((state) => state.setSession);
+  const qrPollingRef = useRef(false);
 
-  const [authMode, setAuthMode] = useState<"otp" | "qr">("otp");
+  const [authMode, setAuthMode] = useState<"otp" | "passkey" | "qr">("otp");
   const [phoneNumber, setPhoneNumber] = useState("+375291234567");
   const [displayName, setDisplayName] = useState("Alex");
   const [challenge, setChallenge] = useState<LoginCodeChallenge | null>(null);
@@ -26,6 +28,13 @@ export function AuthScreen() {
   const [trustSession, setTrustSession] = useState(true);
   const [qrToken, setQrToken] = useState("");
   const [qrStatus, setQrStatus] = useState<string | null>(null);
+  const [qrExpiresAt, setQrExpiresAt] = useState<string | null>(null);
+  const [qrDeviceSummary, setQrDeviceSummary] = useState<string | null>(null);
+  const [autoPollingQr, setAutoPollingQr] = useState(false);
+  const [availablePasskeys, setAvailablePasskeys] = useState<DevicePasskey[]>([]);
+  const [selectedPasskeyId, setSelectedPasskeyId] = useState<string | null>(null);
+  const [passkeysReloadNonce, setPasskeysReloadNonce] = useState(0);
+  const [loadingPasskeys, setLoadingPasskeys] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -80,8 +89,106 @@ export function AuthScreen() {
 
   function resetQrFlow() {
     setQrStatus(null);
+    setQrExpiresAt(null);
+    setQrDeviceSummary(null);
+    setAutoPollingQr(false);
     setQrToken("");
   }
+
+  function normalizeQrToken(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return "";
+    }
+
+    const paramMatch = trimmed.match(/[?&](?:qrToken|token)=([^&\s]+)/i);
+    if (paramMatch?.[1]) {
+      return decodeURIComponent(paramMatch[1]);
+    }
+
+    const deepLinkMatch = trimmed.match(/^alex:\/\/(?:qr|login)\/([^/?#\s]+)/i);
+    if (deepLinkMatch?.[1]) {
+      return decodeURIComponent(deepLinkMatch[1]);
+    }
+
+    return trimmed;
+  }
+
+  function syncQrStatus(payload: {
+    status: string;
+    expiresAt: string;
+    deviceName: string | null;
+    platform: string | null;
+    appVersion: string | null;
+  }) {
+    setQrStatus(payload.status);
+    setQrExpiresAt(payload.expiresAt);
+    const summary = [payload.deviceName, payload.platform, payload.appVersion]
+      .filter(Boolean)
+      .join(" | ");
+    setQrDeviceSummary(summary || null);
+    setAutoPollingQr(payload.status === "PENDING_APPROVAL" || payload.status === "APPROVED");
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    const normalizedPhoneNumber = phoneNumber.trim();
+    if (!normalizedPhoneNumber) {
+      setAvailablePasskeys([]);
+      setLoadingPasskeys(false);
+      return;
+    }
+
+    setLoadingPasskeys(true);
+    devicePasskeys
+      .listForPhoneNumber(normalizedPhoneNumber)
+      .then((passkeys) => {
+        if (!cancelled) {
+          setAvailablePasskeys(passkeys);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAvailablePasskeys([]);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingPasskeys(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [passkeysReloadNonce, phoneNumber]);
+
+  useEffect(() => {
+    if (availablePasskeys.length === 0) {
+      setSelectedPasskeyId(null);
+      return;
+    }
+
+    setSelectedPasskeyId((current) =>
+      current && availablePasskeys.some((passkey) => passkey.credentialId === current)
+        ? current
+        : availablePasskeys[0].credentialId
+    );
+  }, [availablePasskeys]);
+
+  useEffect(() => {
+    if (authMode !== "qr" || !autoPollingQr || !normalizeQrToken(qrToken)) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      void handlePollQrLogin(true);
+    }, 2500);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [authMode, autoPollingQr, qrToken]);
 
   async function handleRequestCode() {
     setSubmitting(true);
@@ -153,49 +260,105 @@ export function AuthScreen() {
   }
 
   async function handleBindQrLogin() {
-    if (!qrToken.trim()) {
+    const normalizedQrToken = normalizeQrToken(qrToken);
+    if (!normalizedQrToken) {
       return;
     }
 
     setSubmitting(true);
     setError(null);
     try {
+      setQrToken(normalizedQrToken);
       const result = await api.bindQrLogin({
-        qrToken: qrToken.trim(),
+        qrToken: normalizedQrToken,
         deviceName: `${Platform.OS} device`,
         platform: Platform.OS,
         appVersion: "0.1.0"
       });
       if (result.auth) {
+        setAutoPollingQr(false);
         handleAuthFlowResult(result.auth);
         return;
       }
-      setQrStatus(result.status);
+      syncQrStatus(result);
     } catch (bindError) {
+      setAutoPollingQr(false);
       setError(bindError instanceof Error ? bindError.message : "Unable to bind QR login");
     } finally {
       setSubmitting(false);
     }
   }
 
-  async function handlePollQrLogin() {
-    if (!qrToken.trim()) {
+  async function handlePollQrLogin(silent = false) {
+    const normalizedQrToken = normalizeQrToken(qrToken);
+    if (!normalizedQrToken || qrPollingRef.current) {
+      return;
+    }
+
+    qrPollingRef.current = true;
+    if (!silent) {
+      setSubmitting(true);
+      setError(null);
+    }
+    try {
+      setQrToken(normalizedQrToken);
+      const result = await api.pollQrLogin({
+        qrToken: normalizedQrToken
+      });
+      if (result.auth) {
+        setAutoPollingQr(false);
+        handleAuthFlowResult(result.auth);
+        return;
+      }
+      syncQrStatus(result);
+    } catch (pollError) {
+      setAutoPollingQr(false);
+      setError(pollError instanceof Error ? pollError.message : "Unable to poll QR login status");
+    } finally {
+      qrPollingRef.current = false;
+      if (!silent) {
+        setSubmitting(false);
+      }
+    }
+  }
+
+  async function handlePasskeyLogin() {
+    const normalizedPhoneNumber = phoneNumber.trim();
+    if (!normalizedPhoneNumber) {
       return;
     }
 
     setSubmitting(true);
     setError(null);
     try {
-      const result = await api.pollQrLogin({
-        qrToken: qrToken.trim()
-      });
-      if (result.auth) {
-        handleAuthFlowResult(result.auth);
-        return;
+      const selectedPasskey =
+        availablePasskeys.find((passkey) => passkey.credentialId === selectedPasskeyId) ??
+        availablePasskeys[0] ??
+        null;
+      if (!selectedPasskey) {
+        throw new Error("No device passkey is enrolled for this phone number on this device");
       }
-      setQrStatus(result.status);
-    } catch (pollError) {
-      setError(pollError instanceof Error ? pollError.message : "Unable to poll QR login status");
+
+      const options = await api.requestPasskeyLoginOptions({
+        phoneNumber: normalizedPhoneNumber,
+        deviceName: `${Platform.OS} device`,
+        platform: Platform.OS,
+        appVersion: "0.1.0"
+      });
+
+      const result = await api.verifyPasskeyLogin({
+        challengeId: options.challengeId,
+        challenge: options.challenge,
+        credentialId: selectedPasskey.credentialId,
+        signCount: 0,
+        deviceName: `${Platform.OS} device`,
+        platform: Platform.OS,
+        appVersion: "0.1.0"
+      });
+      await devicePasskeys.touch(selectedPasskey.credentialId);
+      handleAuthFlowResult(result);
+    } catch (passkeyError) {
+      setError(passkeyError instanceof Error ? passkeyError.message : "Unable to sign in with passkey");
     } finally {
       setSubmitting(false);
     }
@@ -245,6 +408,19 @@ export function AuthScreen() {
           </Pressable>
           <Pressable
             onPress={() => {
+              setAuthMode("passkey");
+              resetOtpFlow();
+              resetQrFlow();
+              setError(null);
+            }}
+            style={[styles.modeButton, authMode === "passkey" && styles.modeButtonActive]}
+          >
+            <Text style={[styles.modeButtonText, authMode === "passkey" && styles.modeButtonTextActive]}>
+              Passkey
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => {
               setAuthMode("qr");
               resetOtpFlow();
               setError(null);
@@ -252,7 +428,7 @@ export function AuthScreen() {
             style={[styles.modeButton, authMode === "qr" && styles.modeButtonActive]}
           >
             <Text style={[styles.modeButtonText, authMode === "qr" && styles.modeButtonTextActive]}>
-              QR token
+              QR
             </Text>
           </Pressable>
         </View>
@@ -272,6 +448,70 @@ export function AuthScreen() {
               style={styles.input}
               value={displayName}
             />
+          </>
+        ) : null}
+        {authMode === "passkey" ? (
+          <>
+            <Text style={styles.infoText}>
+              Sign in with a device passkey already registered on this phone from the profile security screen.
+            </Text>
+            <TextInput
+              autoCapitalize="none"
+              keyboardType="phone-pad"
+              onChangeText={setPhoneNumber}
+              placeholder="+375291234567"
+              style={styles.input}
+              value={phoneNumber}
+            />
+            {loadingPasskeys ? (
+              <Text style={styles.infoText}>Checking device passkeys...</Text>
+            ) : availablePasskeys.length > 0 ? (
+              <View style={styles.passkeyList}>
+                {availablePasskeys.map((passkey) => (
+                  <Pressable
+                    key={passkey.credentialId}
+                    onPress={() => {
+                      setSelectedPasskeyId(passkey.credentialId);
+                      setError(null);
+                    }}
+                    style={[
+                      styles.passkeyCard,
+                      selectedPasskeyId === passkey.credentialId && styles.passkeyCardActive
+                    ]}
+                  >
+                    <Text style={styles.passkeyTitle}>
+                      {passkey.label ?? "Unnamed device passkey"}
+                    </Text>
+                    {selectedPasskeyId === passkey.credentialId ? (
+                      <Text style={styles.passkeySelectedLabel}>Selected for sign-in</Text>
+                    ) : null}
+                    <Text style={styles.passkeyMeta}>
+                      Added {new Date(passkey.createdAt).toLocaleString()}
+                    </Text>
+                    <Text style={styles.passkeyMeta}>
+                      {passkey.lastUsedAt
+                        ? `Last used ${new Date(passkey.lastUsedAt).toLocaleString()}`
+                        : "Not used yet"}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : (
+              <Text style={styles.debugText}>
+                No local device passkeys found for this phone number.
+              </Text>
+            )}
+            <View style={styles.actionsRow}>
+              <Pressable
+                disabled={loadingPasskeys}
+                onPress={() => setPasskeysReloadNonce((current) => current + 1)}
+                style={[styles.secondaryButton, loadingPasskeys && styles.buttonDisabled]}
+              >
+                <Text style={styles.secondaryButtonText}>
+                  {loadingPasskeys ? "Refreshing..." : "Refresh passkeys"}
+                </Text>
+              </Pressable>
+            </View>
           </>
         ) : null}
         {authMode === "otp" && twoFactorChallengeId ? (
@@ -325,14 +565,37 @@ export function AuthScreen() {
               autoCorrect={false}
               onChangeText={(value) => {
                 setQrToken(value);
-                if (qrStatus) {
-                  setQrStatus(null);
-                }
+                setQrStatus(null);
+                setQrExpiresAt(null);
+                setQrDeviceSummary(null);
+                setAutoPollingQr(false);
+                setError(null);
               }}
               placeholder="QR login token"
               style={styles.input}
               value={qrToken}
             />
+            {qrStatus || qrExpiresAt || qrDeviceSummary ? (
+              <View style={styles.statusCard}>
+                <Text style={styles.statusCardTitle}>QR request state</Text>
+                {describeQrStatus(qrStatus) ? (
+                  <Text style={styles.statusCardText}>{describeQrStatus(qrStatus)}</Text>
+                ) : null}
+                {qrDeviceSummary ? (
+                  <Text style={styles.statusCardMeta}>Device: {qrDeviceSummary}</Text>
+                ) : null}
+                {qrExpiresAt ? (
+                  <Text style={styles.statusCardMeta}>
+                    Expires: {new Date(qrExpiresAt).toLocaleString()}
+                  </Text>
+                ) : null}
+                {autoPollingQr ? (
+                  <Text style={styles.statusCardMeta}>
+                    This screen is checking approval automatically.
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
             {describeQrStatus(qrStatus) ? (
               <Text style={styles.infoText}>{describeQrStatus(qrStatus)}</Text>
             ) : null}
@@ -415,6 +678,21 @@ export function AuthScreen() {
           >
             <Text style={styles.primaryButtonText}>
               {submitting ? "Requesting..." : "Request code"}
+            </Text>
+          </Pressable>
+        ) : null}
+        {authMode === "passkey" ? (
+          <Pressable
+            disabled={submitting || !phoneNumber.trim() || loadingPasskeys || availablePasskeys.length === 0}
+            onPress={() => void handlePasskeyLogin()}
+            style={[
+              styles.primaryButton,
+              (submitting || !phoneNumber.trim() || loadingPasskeys || availablePasskeys.length === 0) &&
+                styles.buttonDisabled
+            ]}
+          >
+            <Text style={styles.primaryButtonText}>
+              {submitting ? "Signing in..." : "Use device passkey"}
             </Text>
           </Pressable>
         ) : null}
@@ -520,5 +798,49 @@ const styles = StyleSheet.create({
   errorText: {
     color: "#b91c1c",
     fontSize: 14
+  },
+  passkeyList: {
+    gap: 8
+  },
+  passkeyCard: {
+    borderRadius: 14,
+    backgroundColor: "#eff6ff",
+    padding: 12,
+    gap: 4
+  },
+  passkeyCardActive: {
+    borderWidth: 2,
+    borderColor: "#2563eb"
+  },
+  passkeyTitle: {
+    color: "#0f172a",
+    fontWeight: "700"
+  },
+  passkeySelectedLabel: {
+    color: "#1d4ed8",
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  passkeyMeta: {
+    color: "#475569",
+    fontSize: 12
+  },
+  statusCard: {
+    borderRadius: 14,
+    backgroundColor: "#ecfeff",
+    padding: 12,
+    gap: 4
+  },
+  statusCardTitle: {
+    color: "#155e75",
+    fontWeight: "700"
+  },
+  statusCardText: {
+    color: "#0f766e",
+    fontSize: 13
+  },
+  statusCardMeta: {
+    color: "#0c4a6e",
+    fontSize: 12
   }
 });

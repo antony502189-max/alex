@@ -28,11 +28,14 @@ export function SessionsScreen({
   const [revokingSessionId, setRevokingSessionId] = useState<string | null>(null);
   const [creatingQr, setCreatingQr] = useState(false);
   const [processingQrChallengeId, setProcessingQrChallengeId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function loadSessions() {
-    setLoading(true);
-    setError(null);
+  async function loadSessions(options?: { silent?: boolean }) {
+    if (!options?.silent) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const [nextSessions, nextQrChallenges] = await Promise.all([
         api.getSessions(token),
@@ -43,7 +46,9 @@ export function SessionsScreen({
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Unable to load sessions");
     } finally {
-      setLoading(false);
+      if (!options?.silent) {
+        setLoading(false);
+      }
     }
   }
 
@@ -51,9 +56,24 @@ export function SessionsScreen({
     void loadSessions();
   }, [token]);
 
+  useEffect(() => {
+    if (!qrChallenge && !qrChallenges.some((challenge) => challenge.status === "PENDING_APPROVAL")) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      void loadSessions({ silent: true });
+    }, 4000);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [qrChallenge, qrChallenges, token]);
+
   async function handleRevoke(sessionId: string) {
     setRevokingSessionId(sessionId);
     setError(null);
+    setNotice(null);
     try {
       await api.revokeSession(token, sessionId);
       await loadSessions();
@@ -67,6 +87,7 @@ export function SessionsScreen({
   async function handleRevokeOthers() {
     setRevokingSessionId("others");
     setError(null);
+    setNotice(null);
     try {
       await api.revokeOtherSessions(token);
       await loadSessions();
@@ -80,9 +101,11 @@ export function SessionsScreen({
   async function handleCreateQr() {
     setCreatingQr(true);
     setError(null);
+    setNotice(null);
     try {
       const nextChallenge = await api.generateQrLogin(token);
       setQrChallenge(nextChallenge);
+      setNotice("QR login token generated. Open the QR tab on the new device and paste this token there.");
       await loadSessions();
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Unable to generate QR login token");
@@ -94,8 +117,10 @@ export function SessionsScreen({
   async function handleApproveQr(challengeId: string) {
     setProcessingQrChallengeId(challengeId);
     setError(null);
+    setNotice(null);
     try {
       await api.approveQrLogin(token, challengeId);
+      setNotice("QR login approved. The new device can finish sign-in now.");
       await loadSessions();
     } catch (approveError) {
       setError(approveError instanceof Error ? approveError.message : "Unable to approve QR login");
@@ -107,8 +132,10 @@ export function SessionsScreen({
   async function handleDeclineQr(challengeId: string) {
     setProcessingQrChallengeId(challengeId);
     setError(null);
+    setNotice(null);
     try {
       await api.declineQrLogin(token, challengeId);
+      setNotice("QR login request declined.");
       await loadSessions();
     } catch (declineError) {
       setError(declineError instanceof Error ? declineError.message : "Unable to decline QR login");
@@ -146,6 +173,7 @@ export function SessionsScreen({
       </View>
 
       {error ? <Text style={styles.errorText}>{error}</Text> : null}
+      {notice ? <Text style={styles.noticeText}>{notice}</Text> : null}
 
       <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.card}>
@@ -153,29 +181,49 @@ export function SessionsScreen({
           <Text style={styles.metaText}>
             Generate a one-time token, paste it into another client, then approve the pending request here.
           </Text>
+          <View style={styles.helpList}>
+            <Text style={styles.helpItem}>1. Generate a QR token on this trusted device.</Text>
+            <Text style={styles.helpItem}>2. Open the QR tab on the new device and paste the token.</Text>
+            <Text style={styles.helpItem}>3. Approve the pending device request here.</Text>
+          </View>
           {qrChallenge ? (
             <View style={styles.qrTokenCard}>
               <Text style={styles.qrTokenLabel}>Active token</Text>
-              <Text style={styles.qrTokenValue}>{qrChallenge.qrToken}</Text>
+              <Text selectable style={styles.qrTokenValue}>
+                {qrChallenge.qrToken}
+              </Text>
               <Text style={styles.metaText}>
                 Expires: {new Date(qrChallenge.expiresAt).toLocaleString()}
               </Text>
+              <Text style={styles.metaText}>Long press the token to select and copy it.</Text>
             </View>
           ) : null}
-          <Pressable
-            disabled={creatingQr}
-            onPress={() => void handleCreateQr()}
-            style={[styles.secondaryButton, creatingQr && styles.disabled]}
-          >
-            <Text style={styles.secondaryButtonText}>
-              {creatingQr ? "Generating..." : "Generate QR token"}
-            </Text>
-          </Pressable>
+          <View style={styles.actionsRow}>
+            <Pressable
+              disabled={creatingQr}
+              onPress={() => void handleCreateQr()}
+              style={[styles.secondaryButton, creatingQr && styles.disabled]}
+            >
+              <Text style={styles.secondaryButtonText}>
+                {creatingQr ? "Generating..." : "Generate QR token"}
+              </Text>
+            </Pressable>
+            <Pressable
+              disabled={loading}
+              onPress={() => void loadSessions()}
+              style={[styles.secondaryButton, loading && styles.disabled]}
+            >
+              <Text style={styles.secondaryButtonText}>Refresh requests</Text>
+            </Pressable>
+          </View>
         </View>
 
         {qrChallenges.length > 0 ? (
           <View style={styles.card}>
             <Text style={styles.deviceName}>QR login requests</Text>
+            <Text style={styles.metaText}>
+              Pending approvals: {qrChallenges.filter((challenge) => challenge.status === "PENDING_APPROVAL").length}
+            </Text>
             <View style={styles.qrChallengesList}>
               {qrChallenges.map((challenge) => (
                 <View key={challenge.challengeId} style={styles.qrChallengeCard}>
@@ -184,8 +232,21 @@ export function SessionsScreen({
                     Device: {challenge.deviceName ?? "Unknown device"}
                   </Text>
                   <Text style={styles.metaText}>
-                    {[challenge.platform, challenge.appVersion].filter(Boolean).join(" · ") || "Unknown platform"}
+                    {[challenge.platform, challenge.appVersion].filter(Boolean).join(" | ") || "Unknown platform"}
                   </Text>
+                  <Text style={styles.metaText}>
+                    Created: {new Date(challenge.createdAt).toLocaleString()}
+                  </Text>
+                  {challenge.boundAt ? (
+                    <Text style={styles.metaText}>
+                      Bound: {new Date(challenge.boundAt).toLocaleString()}
+                    </Text>
+                  ) : null}
+                  {challenge.approvedAt ? (
+                    <Text style={styles.metaText}>
+                      Approved: {new Date(challenge.approvedAt).toLocaleString()}
+                    </Text>
+                  ) : null}
                   {challenge.ipAddress ? (
                     <Text style={styles.metaText}>IP {challenge.ipAddress}</Text>
                   ) : null}
@@ -231,7 +292,7 @@ export function SessionsScreen({
               <View style={styles.cardText}>
                 <Text style={styles.deviceName}>{session.deviceName}</Text>
                 <Text style={styles.metaText}>
-                  {[session.platform, session.appVersion].filter(Boolean).join(" · ") || "Unknown platform"}
+                  {[session.platform, session.appVersion].filter(Boolean).join(" | ") || "Unknown platform"}
                 </Text>
                 <Text style={styles.metaText}>
                   Active: {new Date(session.lastActiveAt).toLocaleString()}
@@ -320,6 +381,7 @@ const styles = StyleSheet.create({
   },
   qrTokenValue: {
     color: "#0f172a",
+    fontFamily: "monospace",
     fontWeight: "700"
   },
   qrChallengesList: {
@@ -348,6 +410,19 @@ const styles = StyleSheet.create({
   },
   metaText: {
     color: "#64748b"
+  },
+  noticeText: {
+    color: "#166534",
+    marginBottom: 8
+  },
+  helpList: {
+    gap: 6,
+    marginTop: 10,
+    marginBottom: 10
+  },
+  helpItem: {
+    color: "#475569",
+    fontSize: 13
   },
   secondaryButton: {
     borderRadius: 12,

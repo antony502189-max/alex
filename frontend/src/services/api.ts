@@ -2,8 +2,11 @@ import { API_BASE_URL } from "../config/env";
 import * as FileSystem from "expo-file-system/legacy";
 import { useAppStore } from "../store/useAppStore";
 import type {
+  AccountDeletionJob,
+  AccountExportJob,
   AttachmentAccess,
   AttachmentUploadSession,
+  AuthSecurityEvent,
   AuthFlowResult,
   AuthSession,
   CallJoinLink,
@@ -36,13 +39,20 @@ import type {
   ChatAnalytics,
   ChatMember,
   ChatMessage,
+  ChatReportReceipt,
+  ClearHistoryResult,
   Contact,
+  LeaveChatResult,
   MessageAttachment,
   MessageContactCard,
   MessageLocation,
   MessageTextEntity,
   PinMessageEvent,
   PinnedMessageHistoryEntry,
+  PhoneChangeChallenge,
+  PasskeyCredential,
+  PasskeyLoginOptions,
+  PasskeyRegistrationOptions,
   ChatReadEvent,
   BlockedUser,
   ScheduledMessage,
@@ -635,6 +645,87 @@ export const api = {
     });
   },
 
+  requestPasskeyRegistrationOptions(token: string) {
+    return request<PasskeyRegistrationOptions>(
+      "/auth/passkeys/register/options",
+      {
+        method: "POST"
+      },
+      token
+    );
+  },
+
+  verifyPasskeyRegistration(
+    token: string,
+    payload: {
+      challengeId: string;
+      challenge: string;
+      credentialId: string;
+      publicKey: string;
+      transports?: string;
+      label?: string;
+      signCount?: number | null;
+    }
+  ) {
+    return request<PasskeyCredential>(
+      "/auth/passkeys/register/verify",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
+  requestPasskeyLoginOptions(payload: {
+    phoneNumber: string;
+    deviceName?: string;
+    platform?: string;
+    appVersion?: string;
+  }) {
+    return request<PasskeyLoginOptions>("/auth/passkeys/login/options", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+
+  verifyPasskeyLogin(payload: {
+    challengeId: string;
+    challenge: string;
+    credentialId: string;
+    signCount?: number | null;
+    deviceName?: string;
+    platform?: string;
+    appVersion?: string;
+  }) {
+    return request<AuthFlowResult>("/auth/passkeys/login/verify", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+
+  requestPhoneChange(token: string, payload: { newPhoneNumber: string }) {
+    return request<PhoneChangeChallenge>(
+      "/auth/change-phone/request-code",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
+  verifyPhoneChange(token: string, payload: { challengeId: string; code: string }) {
+    return request<AuthFlowResult>(
+      "/auth/change-phone/verify",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
   getTwoFactorStatus(token: string) {
     return request<TwoFactorStatus>("/auth/2fa/status", { method: "GET" }, token);
   },
@@ -694,6 +785,46 @@ export const api = {
     return request<UserSession>(
       "/auth/sessions/current/push-token",
       { method: "DELETE" },
+      token
+    );
+  },
+
+  getSecurityEvents(token: string) {
+    return request<AuthSecurityEvent[]>("/auth/security/events", { method: "GET" }, token);
+  },
+
+  exportAccount(
+    token: string,
+    payload?: {
+      format?: "JSON";
+      includeAttachmentsMetadata?: boolean;
+      fromInclusive?: string;
+      toExclusive?: string;
+    }
+  ) {
+    return request<AccountExportJob>(
+      "/account/export",
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {})
+      },
+      token
+    );
+  },
+
+  scheduleAccountDeletion(
+    token: string,
+    payload?: {
+      reason?: string;
+      delayDays?: number;
+    }
+  ) {
+    return request<AccountDeletionJob>(
+      "/account/delete",
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {})
+      },
       token
     );
   },
@@ -1382,6 +1513,77 @@ export const api = {
     );
   },
 
+  leaveChat(token: string, chatId: string) {
+    return request<LeaveChatResult>(
+      `/chats/${chatId}/leave`,
+      {
+        method: "POST"
+      },
+      token
+    );
+  },
+
+  clearHistory(
+    token: string,
+    chatId: string,
+    payload?: { topicId?: string | null; upToMessageId?: string | null }
+  ) {
+    return request<ClearHistoryResult>(
+      `/chats/${chatId}/clear-history`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {})
+      },
+      token
+    );
+  },
+
+  markChatUnread(token: string, chatId: string, unread = true) {
+    return request<ChatSummary>(
+      `/chats/${chatId}/mark-unread`,
+      {
+        method: "POST",
+        body: JSON.stringify({ unread })
+      },
+      token
+    );
+  },
+
+  reportChat(
+    token: string,
+    chatId: string,
+    payload: { category?: string; details?: string }
+  ) {
+    return request<ChatReportReceipt>(
+      `/chats/${chatId}/report`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
+  pinChatToList(token: string, chatId: string) {
+    return request<ChatSummary>(
+      `/chats/${chatId}/list-pin`,
+      {
+        method: "PUT"
+      },
+      token
+    );
+  },
+
+  unpinChatFromList(token: string, chatId: string) {
+    return request<ChatSummary>(
+      `/chats/${chatId}/list-pin`,
+      {
+        method: "DELETE"
+      },
+      token
+    );
+  },
+
   saveDraft(token: string, chatId: string, text: string) {
     return request<ChatSummary>(
       `/chats/${chatId}/draft`,
@@ -1997,6 +2199,33 @@ export const api = {
     return request<AttachmentAccess>(
       `/attachments/${attachmentId}/access`,
       { method: "GET" },
+      token
+    );
+  },
+
+  getAttachmentAlbum(token: string, albumId: string) {
+    return request<MessageAttachment[]>(
+      `/attachments/albums/${albumId}`,
+      { method: "GET" },
+      token
+    );
+  },
+
+  getRecentGifs(token: string) {
+    return request<MessageAttachment[]>("/attachments/recent-gifs", { method: "GET" }, token);
+  },
+
+  trimAttachment(
+    token: string,
+    attachmentId: string,
+    payload: { startMs: number; endMs: number }
+  ) {
+    return request<MessageAttachment>(
+      `/attachments/${attachmentId}/trim`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
       token
     );
   },

@@ -69,13 +69,20 @@ type ChatScreenProps = {
   topic?: ForumTopic | null;
   threadRootMessageId?: string | null;
   threadTitle?: string | null;
+  initialFocusMessage?: { messageId: string; createdAt: string } | null;
   currentUserId: string;
   token: string;
   onBack: () => void;
+  onConsumeInitialFocus?: () => void;
   onOpenMembers?: () => void;
   onOpenDiscussionThread?: (message: ChatMessage) => void;
   onRefreshChats?: () => Promise<void> | void;
   onStartCall?: (kind: "VOICE" | "VIDEO") => void;
+  onOpenMediaViewer?: (payload: {
+    attachments: MessageAttachment[];
+    initialAttachmentId: string;
+    chatTitle: string;
+  }) => void;
   onOpenSecretChat?: () => void;
   onOpenBotMiniApp?: (
     botUserId: string,
@@ -141,6 +148,11 @@ class PendingAttachmentUploadError extends Error {
 type ActiveInlineBotQuery = {
   botUsername: string;
   query: string;
+};
+
+type MessageJumpTarget = {
+  messageId: string;
+  createdAt: string;
 };
 
 function parseInlineBotQuery(value: string): ActiveInlineBotQuery | null {
@@ -213,13 +225,16 @@ export function ChatScreen({
   topic,
   threadRootMessageId,
   threadTitle,
+  initialFocusMessage,
   currentUserId,
   token,
   onBack,
+  onConsumeInitialFocus,
   onOpenMembers,
   onOpenDiscussionThread,
   onRefreshChats,
   onStartCall,
+  onOpenMediaViewer,
   onOpenSecretChat,
   onOpenBotMiniApp
 }: ChatScreenProps) {
@@ -232,6 +247,7 @@ export function ChatScreen({
   const isTypingRef = useRef(false);
   const typingTimeoutsRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const pendingAttachmentsRef = useRef<MessageAttachment[]>([]);
+  const highlightTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const chatMessages = useAppStore((state) => state.messagesByChat[chat.chatId] ?? []);
   const setChatMessages = useAppStore((state) => state.setChatMessages);
@@ -259,8 +275,10 @@ export function ChatScreen({
   const [showPollComposer, setShowPollComposer] = useState(false);
   const [showLocationComposer, setShowLocationComposer] = useState(false);
   const [showContactComposer, setShowContactComposer] = useState(false);
+  const [showGifPicker, setShowGifPicker] = useState(false);
   const [showStickerPicker, setShowStickerPicker] = useState(false);
   const [showScheduledPanel, setShowScheduledPanel] = useState(false);
+  const [recentGifs, setRecentGifs] = useState<MessageAttachment[]>([]);
   const [stickerPacks, setStickerPacks] = useState<StickerPack[]>([]);
   const [pollQuestion, setPollQuestion] = useState("");
   const [pollOptions, setPollOptions] = useState<string[]>(["", ""]);
@@ -286,6 +304,7 @@ export function ChatScreen({
   const [hasMoreHistory, setHasMoreHistory] = useState(true);
   const [searching, setSearching] = useState(false);
   const [loadingInlineBotResults, setLoadingInlineBotResults] = useState(false);
+  const [loadingRecentGifs, setLoadingRecentGifs] = useState(false);
   const [uploadingAttachments, setUploadingAttachments] = useState(false);
   const [loadingStickerPacks, setLoadingStickerPacks] = useState(false);
   const [openingAttachmentId, setOpeningAttachmentId] = useState<string | null>(null);
@@ -299,6 +318,9 @@ export function ChatScreen({
   const [closingPollMessageId, setClosingPollMessageId] = useState<string | null>(null);
   const [reactingMessageId, setReactingMessageId] = useState<string | null>(null);
   const [currentTimeMs, setCurrentTimeMs] = useState(() => Date.now());
+  const [pendingJumpTarget, setPendingJumpTarget] = useState<MessageJumpTarget | null>(null);
+  const [jumpingToMessage, setJumpingToMessage] = useState(false);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const topicId = topic?.topicId ?? null;
@@ -341,6 +363,84 @@ export function ChatScreen({
   );
 
   const latestMessageId = messages[messages.length - 1]?.messageId ?? null;
+
+  function highlightMessage(messageId: string) {
+    setHighlightedMessageId(messageId);
+    if (highlightTimeoutRef.current) {
+      clearTimeout(highlightTimeoutRef.current);
+    }
+    highlightTimeoutRef.current = setTimeout(() => {
+      setHighlightedMessageId((current) => (current === messageId ? null : current));
+      highlightTimeoutRef.current = null;
+    }, 3200);
+  }
+
+  function scrollToTimelineMessage(messageId: string) {
+    const index = messages.findIndex((message) => message.messageId === messageId);
+    if (index < 0) {
+      return false;
+    }
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToIndex({
+        index,
+        animated: true,
+        viewPosition: 0.45
+      });
+    });
+    highlightMessage(messageId);
+    return true;
+  }
+
+  async function ensureMessageVisible(target: MessageJumpTarget) {
+    setSearchQuery("");
+    setPendingJumpTarget(target);
+
+    if (messages.some((message) => message.messageId === target.messageId)) {
+      setJumpingToMessage(false);
+      return;
+    }
+
+    const oldestLoadedMessage = messages[0];
+    if (!oldestLoadedMessage) {
+      setJumpingToMessage(false);
+      return;
+    }
+
+    setJumpingToMessage(true);
+    try {
+      let cursor = oldestLoadedMessage.createdAt;
+      let found = false;
+
+      while (!found) {
+        const older = await api.getMessagesBefore(
+          token,
+          chat.chatId,
+          cursor,
+          PAGE_SIZE,
+          topicId,
+          activeThreadRootMessageId
+        );
+
+        if (older.length === 0) {
+          break;
+        }
+
+        setChatMessages(chat.chatId, older);
+        void localDatabase.upsertMessages(currentUserId, older).catch(() => undefined);
+
+        found = older.some((message) => message.messageId === target.messageId);
+        cursor = older[0]?.createdAt ?? cursor;
+
+        if (!found && cursor.localeCompare(target.createdAt) <= 0) {
+          break;
+        }
+      }
+    } catch (jumpError) {
+      setError(jumpError instanceof Error ? jumpError.message : "Unable to jump to message");
+      setPendingJumpTarget(null);
+      setJumpingToMessage(false);
+    }
+  }
 
   async function syncScheduledMessages() {
     const nextScheduledMessages = await api.getScheduledMessages(
@@ -507,6 +607,14 @@ export function ChatScreen({
   }, [pendingAttachments]);
 
   useEffect(() => {
+    return () => {
+      if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
     let cachedHistory: ChatMessage[] = [];
     let cachedScheduledMessages: ScheduledMessage[] = [];
@@ -598,6 +706,7 @@ export function ChatScreen({
     setShowPollComposer(false);
     setShowLocationComposer(false);
     setShowContactComposer(false);
+    setShowGifPicker(false);
     setShowStickerPicker(false);
     setShowScheduledPanel(false);
     setPollQuestion("");
@@ -650,6 +759,41 @@ export function ChatScreen({
     token,
     topicId
   ]);
+
+  useEffect(() => {
+    if (!initialFocusMessage) {
+      return;
+    }
+    onConsumeInitialFocus?.();
+    void ensureMessageVisible(initialFocusMessage);
+  }, [
+    onConsumeInitialFocus,
+    initialFocusMessage?.createdAt,
+    initialFocusMessage?.messageId
+  ]);
+
+  useEffect(() => {
+    if (!pendingJumpTarget || loadingHistory) {
+      return;
+    }
+
+    if (messages.some((message) => message.messageId === pendingJumpTarget.messageId)) {
+      scrollToTimelineMessage(pendingJumpTarget.messageId);
+      setPendingJumpTarget(null);
+      setJumpingToMessage(false);
+      return;
+    }
+
+    const oldestLoadedMessage = messages[0];
+    if (
+      oldestLoadedMessage &&
+      oldestLoadedMessage.createdAt.localeCompare(pendingJumpTarget.createdAt) <= 0
+    ) {
+      setError("Target message is outside the loaded history window.");
+      setPendingJumpTarget(null);
+      setJumpingToMessage(false);
+    }
+  }, [loadingHistory, messages, pendingJumpTarget]);
 
   useEffect(() => {
     if (chat.chatType !== "DIRECT" || !chat.peerIsBot || !chat.peerUserId) {
@@ -846,6 +990,21 @@ export function ChatScreen({
     () => (searchQuery.trim().length >= 2 ? searchResults : messages),
     [messages, searchQuery, searchResults]
   );
+
+  const firstUnreadMessage = useMemo(() => {
+    if (!chat.lastReadAt || chat.unreadCount <= 0) {
+      return null;
+    }
+
+    return (
+      messages.find(
+        (message) =>
+          !message.deletedAt &&
+          message.senderId !== currentUserId &&
+          message.createdAt.localeCompare(chat.lastReadAt!) > 0
+      ) ?? null
+    );
+  }, [chat.lastReadAt, chat.unreadCount, currentUserId, messages]);
 
   const normalizedComposerSelection = useMemo(() => {
     const start = Math.max(0, Math.min(composerSelection.start, composerSelection.end));
@@ -1173,6 +1332,7 @@ export function ChatScreen({
     setDraft(command);
     setDraftEntities([]);
     setComposerSelection({ start: command.length, end: command.length });
+    setShowGifPicker(false);
     setShowStickerPicker(false);
     setShowPollComposer(false);
     setShowLocationComposer(false);
@@ -1216,6 +1376,7 @@ export function ChatScreen({
     resetPollComposer();
     resetLocationComposer();
     resetContactComposer();
+    setShowGifPicker(false);
     setShowStickerPicker(false);
     setEditingMessageId(null);
     setReplyToMessageId(null);
@@ -1360,6 +1521,7 @@ export function ChatScreen({
       resetPollComposer();
       resetLocationComposer();
       resetContactComposer();
+      setShowGifPicker(false);
     }
     setShowStickerPicker(nextVisible);
     if (!nextVisible || stickerPacks.length > 0 || loadingStickerPacks) {
@@ -1378,11 +1540,37 @@ export function ChatScreen({
     }
   }
 
+  async function handleToggleGifPicker() {
+    const nextVisible = !showGifPicker;
+    if (nextVisible) {
+      resetPollComposer();
+      resetLocationComposer();
+      resetContactComposer();
+      setShowStickerPicker(false);
+    }
+    setShowGifPicker(nextVisible);
+    if (!nextVisible || recentGifs.length > 0 || loadingRecentGifs) {
+      return;
+    }
+
+    setLoadingRecentGifs(true);
+    setError(null);
+    try {
+      const gifs = await api.getRecentGifs(token);
+      setRecentGifs(gifs);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Unable to load recent GIFs");
+    } finally {
+      setLoadingRecentGifs(false);
+    }
+  }
+
   function handleToggleLocationComposer() {
     const nextVisible = !showLocationComposer;
     if (nextVisible) {
       resetPollComposer();
       resetContactComposer();
+      setShowGifPicker(false);
       setShowStickerPicker(false);
     }
     setShowLocationComposer(nextVisible);
@@ -1393,6 +1581,7 @@ export function ChatScreen({
     if (nextVisible) {
       resetPollComposer();
       resetLocationComposer();
+      setShowGifPicker(false);
       setShowStickerPicker(false);
     }
     setShowContactComposer(nextVisible);
@@ -1522,6 +1711,7 @@ export function ChatScreen({
       touchMyLastSentAt(message.createdAt);
       setReplyToMessageId(null);
       setSelectedMessageId(null);
+      setShowGifPicker(false);
       setShowStickerPicker(false);
     } catch (sendError) {
       if (messageOutbox.isRetryable(sendError)) {
@@ -1548,6 +1738,7 @@ export function ChatScreen({
           syncSearchResult(queuedMessage);
           setReplyToMessageId(null);
           setSelectedMessageId(null);
+          setShowGifPicker(false);
           setShowStickerPicker(false);
           setError("No connection. Sticker queued.");
         } catch (queueError) {
@@ -2315,7 +2506,25 @@ export function ChatScreen({
     await handlePickDocuments("GIF", "image/gif");
   }
 
-  async function handleOpenAttachment(attachment: MessageAttachment) {
+  async function handleUploadGifFromDevice() {
+    setShowGifPicker(false);
+    await handlePickGifs();
+  }
+
+  function handleInsertRecentGif(attachment: MessageAttachment) {
+    setPendingAttachments((current) =>
+      current.some((item) => item.attachmentId === attachment.attachmentId)
+        ? current
+        : [...current, attachment]
+    );
+    setShowGifPicker(false);
+    setError(null);
+  }
+
+  async function handleOpenAttachment(
+    attachment: MessageAttachment,
+    messageAttachments: MessageAttachment[] = [attachment]
+  ) {
     const transfer = attachmentTransferStates[attachment.attachmentId];
     if (transfer?.direction === "DOWNLOAD" && transfer.status === "RUNNING") {
       setError(null);
@@ -2326,6 +2535,21 @@ export function ChatScreen({
           downloadError instanceof Error ? downloadError.message : "Unable to pause download"
         );
       }
+      return;
+    }
+
+    const mediaAttachments = messageAttachments.filter(
+      (item) => isImageAttachment(item) || isVideoAttachment(item)
+    );
+    if (
+      onOpenMediaViewer &&
+      mediaAttachments.some((item) => item.attachmentId === attachment.attachmentId)
+    ) {
+      onOpenMediaViewer({
+        attachments: mediaAttachments,
+        initialAttachmentId: attachment.attachmentId,
+        chatTitle: chat.title
+      });
       return;
     }
 
@@ -2802,6 +3026,21 @@ export function ChatScreen({
                 {new Date(activePinnedHistoryEntry.pinnedAt).toLocaleString()}
               </Text>
             ) : null}
+            {pinnedPreviewMessage ? (
+              <View style={styles.rowWrap}>
+                <Pressable
+                  onPress={() =>
+                    void ensureMessageVisible({
+                      messageId: pinnedPreviewMessage.messageId,
+                      createdAt: pinnedPreviewMessage.createdAt
+                    })
+                  }
+                  style={styles.inlineButton}
+                >
+                  <Text style={styles.inlineButtonText}>Open pinned message</Text>
+                </Pressable>
+              </View>
+            ) : null}
           </View>
         ) : null}
 
@@ -2818,8 +3057,17 @@ export function ChatScreen({
             ) : (
               <View style={styles.scheduledList}>
                 {pinnedHistory.map((entry) => (
-                  <View
+                  <Pressable
                     key={entry.pinEventId}
+                    onPress={() => {
+                      if (!entry.message) {
+                        return;
+                      }
+                      void ensureMessageVisible({
+                        messageId: entry.message.messageId,
+                        createdAt: entry.message.createdAt
+                      });
+                    }}
                     style={[
                       styles.scheduledCard,
                       entry.active && styles.activePinnedHistoryCard
@@ -2846,7 +3094,7 @@ export function ChatScreen({
                         ? ` - replaced ${new Date(entry.unpinnedAt).toLocaleString()}`
                         : ""}
                     </Text>
-                  </View>
+                  </Pressable>
                 ))}
               </View>
             )}
@@ -3081,6 +3329,34 @@ export function ChatScreen({
             ) : null}
           </View>
         ) : null}
+        {jumpingToMessage ? (
+          <View style={styles.searchInfoBar}>
+            <Text style={styles.searchInfoText}>Locating message in the chat history...</Text>
+          </View>
+        ) : null}
+        {firstUnreadMessage && searchQuery.trim().length < 2 ? (
+          <View style={styles.infoBar}>
+            <Text style={styles.infoTitle}>Unread messages</Text>
+            <Text style={styles.infoText}>
+              Jump back to the first unread message in this conversation.
+            </Text>
+            <View style={styles.rowWrap}>
+              <Pressable
+                onPress={() =>
+                  void ensureMessageVisible({
+                    messageId: firstUnreadMessage.messageId,
+                    createdAt: firstUnreadMessage.createdAt
+                  })
+                }
+                style={styles.inlineButton}
+              >
+                <Text style={styles.inlineButtonText}>
+                  Jump to unread ({chat.unreadCount})
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
 
         <FlatList
           ref={listRef}
@@ -3088,11 +3364,30 @@ export function ChatScreen({
           data={displayedMessages}
           keyboardShouldPersistTaps="handled"
           keyExtractor={(item) => item.messageId}
+          onScrollToIndexFailed={({ averageItemLength, index }) => {
+            if (!averageItemLength) {
+              return;
+            }
+            listRef.current?.scrollToOffset({
+              offset: Math.max(0, averageItemLength * index),
+              animated: true
+            });
+            setTimeout(() => {
+              listRef.current?.scrollToIndex({
+                index,
+                animated: true,
+                viewPosition: 0.45
+              });
+            }, 160);
+          }}
           renderItem={({ item }) => {
             const isMine = item.senderId === currentUserId;
             const replyPreview = item.replyToMessageId
               ? chatMessages.find((message) => message.messageId === item.replyToMessageId) ?? null
               : null;
+            const mediaAlbum = item.attachments.filter(
+              (attachment) => isImageAttachment(attachment) || isVideoAttachment(attachment)
+            );
             const displaySenderName = resolveDisplaySenderName(item);
             const replyPreviewSenderName = resolveDisplaySenderName(replyPreview);
             const shouldShowSenderLabel =
@@ -3101,7 +3396,22 @@ export function ChatScreen({
               (chat.chatType === "GROUP" || activeThreadRootMessageId != null);
 
             return (
-              <Pressable onLongPress={() => setSelectedMessageId(item.messageId)} style={[styles.messageBubble, isMine ? styles.ownBubble : styles.peerBubble, selectedMessageId === item.messageId && styles.selectedBubble, pinnedMessageId === item.messageId && styles.pinnedBubble]}>
+              <Pressable
+                onLongPress={() => setSelectedMessageId(item.messageId)}
+                style={[
+                  styles.messageBubble,
+                  isMine ? styles.ownBubble : styles.peerBubble,
+                  selectedMessageId === item.messageId && styles.selectedBubble,
+                  pinnedMessageId === item.messageId && styles.pinnedBubble,
+                  highlightedMessageId === item.messageId && styles.highlightedBubble
+                ]}
+              >
+                {firstUnreadMessage?.messageId === item.messageId &&
+                searchQuery.trim().length < 2 ? (
+                  <View style={styles.unreadDivider}>
+                    <Text style={styles.unreadDividerText}>Unread from here</Text>
+                  </View>
+                ) : null}
                 {shouldShowSenderLabel ? (
                   <Text style={styles.authorLabel}>
                     {displaySenderName}
@@ -3111,7 +3421,15 @@ export function ChatScreen({
                 {item.forwardedFromMessageId ? <Text style={[styles.badgeText, isMine && styles.ownMessageText]}>Forwarded</Text> : null}
                 {item.viaBotUserId ? <Text style={[styles.badgeText, isMine && styles.ownMessageText]}>Via bot</Text> : null}
                 {replyPreview ? (
-                  <View style={styles.replyPreview}>
+                  <Pressable
+                    onPress={() =>
+                      void ensureMessageVisible({
+                        messageId: replyPreview.messageId,
+                        createdAt: replyPreview.createdAt
+                      })
+                    }
+                    style={styles.replyPreview}
+                  >
                     {replyPreviewSenderName ? (
                       <Text style={styles.replyPreviewAuthor}>
                         {replyPreviewSenderName}
@@ -3131,7 +3449,7 @@ export function ChatScreen({
                     ) : (
                       <Text style={styles.replyPreviewText}>{describeMessage(replyPreview)}</Text>
                     )}
-                  </View>
+                  </Pressable>
                 ) : null}
                 {item.deletedAt ? (
                   <Text style={[styles.messageText, isMine && styles.ownMessageText]}>Message deleted</Text>
@@ -3265,7 +3583,7 @@ export function ChatScreen({
                           </Text>
                         </Pressable>
                       ) : isImageAttachment(attachment) && attachment.previewUrl ? (
-                        <Pressable key={attachment.attachmentId} onPress={() => void handleOpenAttachment(attachment)} style={styles.imageCard}>
+                        <Pressable key={attachment.attachmentId} onPress={() => void handleOpenAttachment(attachment, mediaAlbum)} style={styles.imageCard}>
                           <Image
                             source={{ uri: attachment.previewUrl }}
                             style={[styles.imageAttachment, { height: getImagePreviewHeight(attachment) }]}
@@ -3287,7 +3605,7 @@ export function ChatScreen({
                           ) : null}
                         </Pressable>
                       ) : (
-                        <Pressable key={attachment.attachmentId} onPress={() => void handleOpenAttachment(attachment)} style={styles.attachmentCard}>
+                        <Pressable key={attachment.attachmentId} onPress={() => void handleOpenAttachment(attachment, mediaAlbum)} style={styles.attachmentCard}>
                           <Text style={styles.attachmentName}>{attachmentTitle(attachment)}</Text>
                           <Text style={styles.attachmentMeta}>{attachment.contentType} - {formatFileSize(attachment.fileSizeBytes)}</Text>
                           <Text style={styles.attachmentMeta}>
@@ -3329,6 +3647,21 @@ export function ChatScreen({
                           ? `${item.commentCount} comment${item.commentCount === 1 ? "" : "s"}`
                           : "Discuss"}
                       </Text>
+                    </Pressable>
+                  </View>
+                ) : null}
+                {searchQuery.trim().length >= 2 ? (
+                  <View style={styles.rowWrap}>
+                    <Pressable
+                      onPress={() =>
+                        void ensureMessageVisible({
+                          messageId: item.messageId,
+                          createdAt: item.createdAt
+                        })
+                      }
+                      style={styles.inlineButton}
+                    >
+                      <Text style={styles.inlineButtonText}>Open in timeline</Text>
                     </Pressable>
                   </View>
                 ) : null}
@@ -3560,6 +3893,52 @@ export function ChatScreen({
           </View>
         ) : null}
 
+        {showGifPicker ? (
+          <View style={styles.selectionBar}>
+            <Text style={styles.selectionTitle}>Recent GIFs</Text>
+            <Text style={styles.selectionBody}>
+              Pick a recent GIF from your account history or upload a new one from this device.
+            </Text>
+            <View style={styles.rowWrap}>
+              <Pressable onPress={() => void handleUploadGifFromDevice()} style={styles.inlineButton}>
+                <Text style={styles.inlineButtonText}>Upload GIF</Text>
+              </Pressable>
+              <Pressable onPress={() => setShowGifPicker(false)} style={styles.inlineButton}>
+                <Text style={styles.inlineButtonText}>Close</Text>
+              </Pressable>
+            </View>
+            {loadingRecentGifs ? (
+              <Text style={styles.selectionBody}>Loading recent GIFs...</Text>
+            ) : recentGifs.length === 0 ? (
+              <Text style={styles.selectionBody}>No recent GIFs yet.</Text>
+            ) : (
+              <View style={styles.gifPickerGrid}>
+                {recentGifs.map((attachment) => (
+                  <Pressable
+                    key={attachment.attachmentId}
+                    onPress={() => handleInsertRecentGif(attachment)}
+                    style={styles.gifPickerCard}
+                  >
+                    {attachment.previewUrl || attachment.thumbnailUrl ? (
+                      <Image
+                        source={{ uri: attachment.previewUrl ?? attachment.thumbnailUrl ?? "" }}
+                        style={styles.gifPickerImage}
+                      />
+                    ) : (
+                      <View style={styles.gifPickerFallback}>
+                        <Text style={styles.gifPickerFallbackText}>GIF</Text>
+                      </View>
+                    )}
+                    <Text style={styles.gifPickerMeta}>
+                      {formatFileSize(attachment.fileSizeBytes)}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
+          </View>
+        ) : null}
+
         <View style={styles.composerSection}>
           <View style={styles.formatBar}>
             {FORMAT_ACTIONS.map((action) => (
@@ -3617,8 +3996,8 @@ export function ChatScreen({
           <Pressable disabled={!canPost || uploadingAttachments || !!editingMessageId || showPollComposer || recordingVoice || !!activeStructuredMessageType} onPress={() => void handlePickAudioFiles()} style={[styles.secondaryButton, (!canPost || uploadingAttachments || !!editingMessageId || showPollComposer || recordingVoice || !!activeStructuredMessageType) && styles.disabled]}>
             <Text style={styles.secondaryButtonText}>Audio</Text>
           </Pressable>
-          <Pressable disabled={!canPost || uploadingAttachments || !!editingMessageId || showPollComposer || recordingVoice || !!activeStructuredMessageType} onPress={() => void handlePickGifs()} style={[styles.secondaryButton, (!canPost || uploadingAttachments || !!editingMessageId || showPollComposer || recordingVoice || !!activeStructuredMessageType) && styles.disabled]}>
-            <Text style={styles.secondaryButtonText}>GIF</Text>
+          <Pressable disabled={!canPost || uploadingAttachments || !!editingMessageId || showPollComposer || recordingVoice || !!activeStructuredMessageType} onPress={() => void handleToggleGifPicker()} style={[styles.secondaryButton, (!canPost || uploadingAttachments || !!editingMessageId || showPollComposer || recordingVoice || !!activeStructuredMessageType) && styles.disabled]}>
+            <Text style={styles.secondaryButtonText}>GIFs</Text>
           </Pressable>
           <Pressable disabled={!canPost || !!editingMessageId || pendingAttachments.length > 0 || recordingVoice || showPollComposer || showContactComposer} onPress={handleToggleLocationComposer} style={[styles.secondaryButton, (!canPost || !!editingMessageId || pendingAttachments.length > 0 || recordingVoice || showPollComposer || showContactComposer) && styles.disabled]}>
             <Text style={styles.secondaryButtonText}>Location</Text>
@@ -3627,6 +4006,7 @@ export function ChatScreen({
             <Text style={styles.secondaryButtonText}>Contact</Text>
           </Pressable>
           <Pressable disabled={!canPost || !!editingMessageId || !!activeStructuredMessageType} onPress={() => {
+            setShowGifPicker(false);
             setShowStickerPicker(false);
             resetLocationComposer();
             resetContactComposer();
@@ -3752,6 +4132,21 @@ const styles = StyleSheet.create({
   peerBubble: { alignSelf: "flex-start", backgroundColor: "#ffffff" },
   selectedBubble: { borderWidth: 2, borderColor: "#f59e0b" },
   pinnedBubble: { borderWidth: 2, borderColor: "#0284c7" },
+  highlightedBubble: { borderWidth: 2, borderColor: "#22c55e" },
+  unreadDivider: {
+    alignSelf: "stretch",
+    borderRadius: 999,
+    backgroundColor: "#dbeafe",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    marginBottom: 8
+  },
+  unreadDividerText: {
+    color: "#1d4ed8",
+    fontSize: 12,
+    fontWeight: "700",
+    textAlign: "center"
+  },
   authorLabel: { color: "#0369a1", fontSize: 12, fontWeight: "700", marginBottom: 6 },
   replyPreview: { borderLeftWidth: 3, borderLeftColor: "#38bdf8", paddingLeft: 8, marginBottom: 8 },
   replyPreviewAuthor: { color: "#0f766e", fontSize: 12, fontWeight: "700", marginBottom: 4 },
@@ -3857,6 +4252,40 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "700",
     textAlign: "center"
+  },
+  gifPickerGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 10
+  },
+  gifPickerCard: {
+    width: 104,
+    borderRadius: 18,
+    overflow: "hidden",
+    backgroundColor: "#ffffff"
+  },
+  gifPickerImage: {
+    width: "100%",
+    height: 104,
+    backgroundColor: "#dbeafe"
+  },
+  gifPickerFallback: {
+    width: "100%",
+    height: 104,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#dbeafe"
+  },
+  gifPickerFallbackText: {
+    color: "#1d4ed8",
+    fontWeight: "700"
+  },
+  gifPickerMeta: {
+    color: "#475569",
+    fontSize: 11,
+    paddingHorizontal: 10,
+    paddingVertical: 8
   },
   composerSection: {
     borderTopWidth: 1,
