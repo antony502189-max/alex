@@ -962,6 +962,76 @@ class LocalDatabaseService {
     );
   }
 
+  async getSyncCursor(currentUserId: string): Promise<number | null> {
+    const database = await this.getDatabase();
+    const row = await database.getFirstAsync<{ cursor: number }>(
+      `
+        SELECT cursor
+        FROM cached_sync_cursor_v1
+        WHERE current_user_id = ?
+      `,
+      [currentUserId]
+    );
+
+    if (!row || typeof row.cursor !== "number" || !Number.isFinite(row.cursor)) {
+      return null;
+    }
+
+    return row.cursor;
+  }
+
+  async setSyncCursor(currentUserId: string, cursor: number | null) {
+    const database = await this.getDatabase();
+    if (cursor == null || !Number.isFinite(cursor)) {
+      await database.runAsync(
+        "DELETE FROM cached_sync_cursor_v1 WHERE current_user_id = ?",
+        [currentUserId]
+      );
+      return;
+    }
+
+    await database.runAsync(
+      `
+        INSERT INTO cached_sync_cursor_v1 (current_user_id, cursor, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(current_user_id) DO UPDATE SET
+          cursor = excluded.cursor,
+          updated_at = excluded.updated_at
+      `,
+      [currentUserId, cursor, new Date().toISOString()]
+    );
+  }
+
+  async clearSyncCursor(currentUserId: string) {
+    await this.setSyncCursor(currentUserId, null);
+  }
+
+  async purgeAccountData(currentUserId: string) {
+    const database = await this.getDatabase();
+    await database.withTransactionAsync(async () => {
+      const tables = [
+        "cached_chats_v2",
+        "cached_messages_v2",
+        "cached_folders_v1",
+        "cached_forum_topics_v1",
+        "cached_recent_calls_v1",
+        "cached_secret_chats_v1",
+        "cached_secret_messages_v1",
+        "cached_sync_cursor_v1",
+        "cached_scheduled_messages_v1",
+        "outbox_messages_v2",
+        "outbox_scheduled_messages_v1"
+      ];
+
+      for (const table of tables) {
+        await database.runAsync(
+          `DELETE FROM ${table} WHERE current_user_id = ?`,
+          [currentUserId]
+        );
+      }
+    });
+  }
+
   private async getDatabase() {
     if (!this.databasePromise) {
       this.databasePromise = this.openDatabase();
@@ -1037,6 +1107,12 @@ class LocalDatabaseService {
       );
       CREATE INDEX IF NOT EXISTS idx_cached_secret_messages_v1_chat_created
         ON cached_secret_messages_v1 (current_user_id, secret_chat_id, created_at DESC);
+      CREATE TABLE IF NOT EXISTS cached_sync_cursor_v1 (
+        current_user_id TEXT NOT NULL,
+        cursor INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (current_user_id)
+      );
       CREATE TABLE IF NOT EXISTS cached_scheduled_messages_v1 (
         current_user_id TEXT NOT NULL,
         scheduled_message_id TEXT NOT NULL,

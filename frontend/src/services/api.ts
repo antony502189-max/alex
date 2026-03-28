@@ -2,65 +2,83 @@ import { API_BASE_URL } from "../config/env";
 import * as FileSystem from "expo-file-system/legacy";
 import { useAppStore } from "../store/useAppStore";
 import type {
+  AccountDeletionJob,
+  AccountExportJob,
   AttachmentAccess,
   AttachmentUploadSession,
+  AuthSecurityEvent,
   AuthFlowResult,
   AuthSession,
-  CallJoinLink,
+  BlockedUser,
+  BotCommand,
+  BotSummary,
+  BotWebAppLaunch,
   CallHistoryEntry,
   CallInboxEvent,
+  CallJoinLink,
   CallRtcConfig,
   CallSession,
-  BotCommand,
+  ChatAnalytics,
+  ChatBan,
+  ChatFolder,
+  ChatInviteLink,
+  ChatJoinRequest,
+  ChatMember,
+  ChatMessage,
+  ChatReadEvent,
+  ChatReportReceipt,
+  ChatSummary,
+  ClearHistoryResult,
+  Contact,
   DeveloperBot,
-  InlineBotResult,
+  FeatureProfile,
+  ForumTopic,
   GeneratedQrLogin,
+  GlobalSearchResponse,
+  ImportContactsResult,
+  ImportedPhoneContact,
+  InlineBotResult,
+  IssuedBotToken,
+  JoinChatResult,
+  LanguagePreferences,
+  LeaveChatResult,
   LoginCodeChallenge,
+  MessageAttachment,
+  MessageContactCard,
+  MessageLiveLocation,
+  MessageLocation,
+  MessageReportReceipt,
+  MessageTextEntity,
+  PasskeyCredential,
+  PasskeyLoginOptions,
+  PasskeyRegistrationOptions,
+  PhoneChangeChallenge,
+  PinMessageEvent,
+  PinnedMessageHistoryEntry,
+  PrivacyExceptions,
+  PublicChatDiscovery,
   QrLoginChallenge,
   QrLoginStatus,
-  BotSummary,
-  IssuedBotToken,
-  BotWebAppLaunch,
+  ScheduledMessage,
+  SearchMessagesResponse,
   SecretAttachmentUpload,
   SecretChatAttachment,
   SecretChatMessage,
   SecretChatReadEvent,
   SecretChatScreenshotEvent,
   SecretChatSummary,
-  ForumTopic,
-  ChatFolder,
-  GlobalSearchResponse,
-  ChatInviteLink,
-  ChatJoinRequest,
-  ChatBan,
-  ChatAnalytics,
-  ChatMember,
-  ChatMessage,
-  Contact,
-  MessageAttachment,
-  MessageContactCard,
-  MessageLocation,
-  MessageTextEntity,
-  PinMessageEvent,
-  PinnedMessageHistoryEntry,
-  ChatReadEvent,
-  BlockedUser,
-  ScheduledMessage,
-  ChatSummary,
-  JoinChatResult,
-  PublicChatDiscovery,
-  SearchMessagesResponse,
   StickerPack,
   Story,
   StoryFeedItem,
   StoryViewer,
+  SyncEvent,
   TwoFactorStatus,
   TypingEvent,
-  UserReportReceipt,
-  UserSession,
   UserPresenceStatus,
   UserProfile,
-  UserSearchResult
+  UserReportReceipt,
+  UserSearchResult,
+  UserSession
 } from "../types";
 
 type LoginPayload = {
@@ -78,10 +96,11 @@ export type SendMessagePayload = {
   replyToMessageId?: string;
   text?: string;
   caption?: string;
-  messageType?: "TEXT" | "LOCATION" | "CONTACT_CARD";
+  messageType?: "TEXT" | "LOCATION" | "LIVE_LOCATION" | "CONTACT_CARD";
   silent?: boolean;
   entities?: MessageTextEntity[];
   location?: MessageLocation;
+  liveLocation?: MessageLiveLocation;
   contactCard?: MessageContactCard;
   attachmentIds?: string[];
   stickerId?: string;
@@ -232,6 +251,13 @@ async function parseResponse<T>(response: Response): Promise<T> {
   return JSON.parse(raw) as T;
 }
 
+async function parseResponseWithMetadata<T>(
+  response: Response
+): Promise<{ data: T; response: Response }> {
+  const data = await parseResponse<T>(response);
+  return { data, response };
+}
+
 async function refreshAccessToken(expiredToken: string): Promise<AuthSession | null> {
   const store = useAppStore.getState();
   const currentSession = store.session;
@@ -344,6 +370,55 @@ async function request<T>(
     token,
     options
   );
+}
+
+async function requestWithMetadata<T>(
+  path: string,
+  init: RequestInit = {},
+  token?: string,
+  options: RequestOptions = {}
+): Promise<{ data: T; response: Response }> {
+  const allowTokenRefresh = options.allowTokenRefresh ?? true;
+  const createInit = (activeToken?: string) => {
+    const headers = new Headers(init.headers);
+    if (options.contentType !== null && !headers.has("Content-Type")) {
+      headers.set("Content-Type", options.contentType ?? "application/json");
+    }
+
+    if (activeToken) {
+      headers.set("Authorization", `Bearer ${activeToken}`);
+    } else {
+      headers.delete("Authorization");
+    }
+
+    return {
+      ...init,
+      headers
+    };
+  };
+
+  let response = await fetch(`${API_BASE_URL}${path}`, createInit(token));
+  if (response.status === UNAUTHORIZED_STATUS && token && allowTokenRefresh) {
+    const retryToken = await resolveRetryToken(token);
+    if (retryToken) {
+      response = await fetch(`${API_BASE_URL}${path}`, createInit(retryToken));
+    }
+  }
+
+  return parseResponseWithMetadata<T>(response);
+}
+
+function parseOptionalNumberHeader(headers: Headers, name: string) {
+  const raw = headers.get(name);
+  if (raw == null) {
+    return null;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseBooleanHeader(headers: Headers, name: string) {
+  return headers.get(name)?.trim().toLowerCase() === "true";
 }
 
 async function uploadMultipart<T>(
@@ -570,6 +645,42 @@ async function uploadAttachmentResumable(
 }
 
 export const api = {
+  getFeatureProfile(token: string) {
+    return request<FeatureProfile>("/features/profile", { method: "GET" }, token);
+  },
+
+  async getSyncEvents(
+    token: string,
+    cursor?: number | null,
+    limit = 100,
+    includeLegacy = false
+  ) {
+    const params = new URLSearchParams();
+    if (typeof cursor === "number" && Number.isFinite(cursor)) {
+      params.set("cursor", String(cursor));
+    }
+    params.set("limit", String(limit));
+    params.set("includeLegacy", String(includeLegacy));
+
+    const { data, response } = await requestWithMetadata<SyncEvent[]>(
+      `/sync/events?${params.toString()}`,
+      { method: "GET" },
+      token
+    );
+
+    return {
+      events: data,
+      eventContract: response.headers.get("X-Sync-Event-Contract"),
+      hasMore: parseBooleanHeader(response.headers, "X-Sync-Has-More"),
+      includeLegacy: parseBooleanHeader(response.headers, "X-Sync-Include-Legacy"),
+      limit: parseOptionalNumberHeader(response.headers, "X-Sync-Limit") ?? limit,
+      nextCursor: parseOptionalNumberHeader(response.headers, "X-Sync-Next-Cursor"),
+      resetCursor: parseOptionalNumberHeader(response.headers, "X-Sync-Reset-Cursor"),
+      retentionSeconds: parseOptionalNumberHeader(response.headers, "X-Sync-Retention-Seconds"),
+      staleCursor: parseBooleanHeader(response.headers, "X-Sync-Cursor-Stale")
+    };
+  },
+
   requestLoginCode(payload: LoginPayload) {
     return request<LoginCodeChallenge>("/auth/request-code", {
       method: "POST",
@@ -635,6 +746,87 @@ export const api = {
     });
   },
 
+  requestPasskeyRegistrationOptions(token: string) {
+    return request<PasskeyRegistrationOptions>(
+      "/auth/passkeys/register/options",
+      {
+        method: "POST"
+      },
+      token
+    );
+  },
+
+  verifyPasskeyRegistration(
+    token: string,
+    payload: {
+      challengeId: string;
+      challenge: string;
+      credentialId: string;
+      publicKey: string;
+      transports?: string;
+      label?: string;
+      signCount?: number | null;
+    }
+  ) {
+    return request<PasskeyCredential>(
+      "/auth/passkeys/register/verify",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
+  requestPasskeyLoginOptions(payload: {
+    phoneNumber: string;
+    deviceName?: string;
+    platform?: string;
+    appVersion?: string;
+  }) {
+    return request<PasskeyLoginOptions>("/auth/passkeys/login/options", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+
+  verifyPasskeyLogin(payload: {
+    challengeId: string;
+    challenge: string;
+    credentialId: string;
+    signCount?: number | null;
+    deviceName?: string;
+    platform?: string;
+    appVersion?: string;
+  }) {
+    return request<AuthFlowResult>("/auth/passkeys/login/verify", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+
+  requestPhoneChange(token: string, payload: { newPhoneNumber: string }) {
+    return request<PhoneChangeChallenge>(
+      "/auth/change-phone/request-code",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
+  verifyPhoneChange(token: string, payload: { challengeId: string; code: string }) {
+    return request<AuthFlowResult>(
+      "/auth/change-phone/verify",
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
   getTwoFactorStatus(token: string) {
     return request<TwoFactorStatus>("/auth/2fa/status", { method: "GET" }, token);
   },
@@ -694,6 +886,46 @@ export const api = {
     return request<UserSession>(
       "/auth/sessions/current/push-token",
       { method: "DELETE" },
+      token
+    );
+  },
+
+  getSecurityEvents(token: string) {
+    return request<AuthSecurityEvent[]>("/auth/security/events", { method: "GET" }, token);
+  },
+
+  exportAccount(
+    token: string,
+    payload?: {
+      format?: "JSON";
+      includeAttachmentsMetadata?: boolean;
+      fromInclusive?: string;
+      toExclusive?: string;
+    }
+  ) {
+    return request<AccountExportJob>(
+      "/account/export",
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {})
+      },
+      token
+    );
+  },
+
+  scheduleAccountDeletion(
+    token: string,
+    payload?: {
+      reason?: string;
+      delayDays?: number;
+    }
+  ) {
+    return request<AccountDeletionJob>(
+      "/account/delete",
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {})
+      },
       token
     );
   },
@@ -1382,6 +1614,77 @@ export const api = {
     );
   },
 
+  leaveChat(token: string, chatId: string) {
+    return request<LeaveChatResult>(
+      `/chats/${chatId}/leave`,
+      {
+        method: "POST"
+      },
+      token
+    );
+  },
+
+  clearHistory(
+    token: string,
+    chatId: string,
+    payload?: { topicId?: string | null; upToMessageId?: string | null }
+  ) {
+    return request<ClearHistoryResult>(
+      `/chats/${chatId}/clear-history`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload ?? {})
+      },
+      token
+    );
+  },
+
+  markChatUnread(token: string, chatId: string, unread = true) {
+    return request<ChatSummary>(
+      `/chats/${chatId}/mark-unread`,
+      {
+        method: "POST",
+        body: JSON.stringify({ unread })
+      },
+      token
+    );
+  },
+
+  reportChat(
+    token: string,
+    chatId: string,
+    payload: { category?: string; details?: string }
+  ) {
+    return request<ChatReportReceipt>(
+      `/chats/${chatId}/report`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
+  pinChatToList(token: string, chatId: string) {
+    return request<ChatSummary>(
+      `/chats/${chatId}/list-pin`,
+      {
+        method: "PUT"
+      },
+      token
+    );
+  },
+
+  unpinChatFromList(token: string, chatId: string) {
+    return request<ChatSummary>(
+      `/chats/${chatId}/list-pin`,
+      {
+        method: "DELETE"
+      },
+      token
+    );
+  },
+
   saveDraft(token: string, chatId: string, text: string) {
     return request<ChatSummary>(
       `/chats/${chatId}/draft`,
@@ -1741,8 +2044,63 @@ export const api = {
     );
   },
 
+  getPrivacyExceptions(token: string) {
+    return request<PrivacyExceptions>(
+      "/users/me/privacy/exceptions",
+      { method: "GET" },
+      token
+    );
+  },
+
+  updatePrivacyExceptions(token: string, payload: PrivacyExceptions) {
+    return request<PrivacyExceptions>(
+      "/users/me/privacy/exceptions",
+      {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
+  getLanguagePreferences(token: string) {
+    return request<LanguagePreferences>(
+      "/users/me/language-preferences",
+      { method: "GET" },
+      token
+    );
+  },
+
+  updateLanguagePreferences(token: string, payload: LanguagePreferences) {
+    return request<LanguagePreferences>(
+      "/users/me/language-preferences",
+      {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
   getContacts(token: string) {
     return request<Contact[]>("/users/contacts", { method: "GET" }, token);
+  },
+
+  importContacts(
+    token: string,
+    payload: { contacts: ImportedPhoneContact[]; persistMatches?: boolean }
+  ) {
+    return request<ImportContactsResult>(
+      "/users/contacts/import",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          contacts: payload.contacts,
+          persistMatches: payload.persistMatches ?? true
+        })
+      },
+      token
+    );
   },
 
   addContact(
@@ -2001,6 +2359,33 @@ export const api = {
     );
   },
 
+  getAttachmentAlbum(token: string, albumId: string) {
+    return request<MessageAttachment[]>(
+      `/attachments/albums/${albumId}`,
+      { method: "GET" },
+      token
+    );
+  },
+
+  getRecentGifs(token: string) {
+    return request<MessageAttachment[]>("/attachments/recent-gifs", { method: "GET" }, token);
+  },
+
+  trimAttachment(
+    token: string,
+    attachmentId: string,
+    payload: { startMs: number; endMs: number }
+  ) {
+    return request<MessageAttachment>(
+      `/attachments/${attachmentId}/trim`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
   async openAttachment(token: string, attachment: MessageAttachment) {
     const access = await api.getAttachmentAccess(token, attachment.attachmentId);
     const downloadUrl = access.downloadUrl.startsWith("http")
@@ -2045,12 +2430,55 @@ export const api = {
     return request<ChatMessage>(`/messages/${messageId}`, { method: "DELETE" }, token);
   },
 
+  updateLiveLocation(
+    token: string,
+    messageId: string,
+    payload: {
+      latitude: number;
+      longitude: number;
+      title?: string | null;
+      address?: string | null;
+    }
+  ) {
+    return request<ChatMessage>(
+      `/messages/${messageId}/live-location`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      },
+      token
+    );
+  },
+
+  stopLiveLocation(token: string, messageId: string) {
+    return request<ChatMessage>(
+      `/messages/${messageId}/live-location/stop`,
+      { method: "POST" },
+      token
+    );
+  },
+
   toggleReaction(token: string, messageId: string, emoji: string) {
     return request<ChatMessage>(
       `/messages/${messageId}/reactions`,
       {
         method: "POST",
         body: JSON.stringify({ emoji })
+      },
+      token
+    );
+  },
+
+  reportMessage(
+    token: string,
+    messageId: string,
+    payload: { category?: string; details?: string }
+  ) {
+    return request<MessageReportReceipt>(
+      `/messages/${messageId}/report`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
       },
       token
     );

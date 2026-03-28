@@ -1,2 +1,9 @@
 target
-.mvn/wrapper/maven-wrapper.jar
+.git
+.idea
+.vscode
+*.log
+*.tmp
+*.temp
+storage
+node_modules

@@ -164,6 +164,7 @@ class ScheduledMessageOutboxService {
       messageType: params.payload.messageType ?? "TEXT",
       caption: params.payload.caption ?? null,
       silent: params.payload.silent ?? false,
+      liveLocation: params.payload.liveLocation ?? null,
       location: params.payload.location ?? null,
       contactCard: params.payload.contactCard ?? null,
       serviceMessage: null,

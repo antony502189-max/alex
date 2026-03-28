@@ -1,0 +1,80 @@
+groups:
+  - name: alex-backend-health
+    rules:
+      - alert: AlexBackendDown
+        expr: up{job="alex-backend"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: backend
+        annotations:
+          summary: Alex backend is down
+          description: Prometheus has not been able to scrape the backend for at least 2 minutes.
+
+      - alert: AlexBackendHighErrorRate
+        expr: |
+          (
+            sum(rate(http_server_requests_seconds_count{job="alex-backend",status=~"5..",uri!~"/actuator.*"}[5m]))
+            /
+            clamp_min(sum(rate(http_server_requests_seconds_count{job="alex-backend",uri!~"/actuator.*"}[5m])), 1)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: Alex backend 5xx error rate is elevated
+          description: Backend 5xx responses exceeded 5% of traffic for at least 10 minutes.
+
+      - alert: AlexBackendHighLatencyP95
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(http_server_requests_seconds_bucket{job="alex-backend",uri!~"/actuator.*"}[5m])
+            )
+          ) > 1.5
+        for: 10m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: Alex backend request latency is high
+          description: Backend p95 request latency has been above 1.5 seconds for at least 10 minutes.
+
+      - alert: AlexBackendHeapPressureHigh
+        expr: |
+          (
+            sum(jvm_memory_used_bytes{job="alex-backend",area="heap"})
+            /
+            clamp_min(sum(jvm_memory_max_bytes{job="alex-backend",area="heap"}), 1)
+          ) > 0.85
+        for: 15m
+        labels:
+          severity: warning
+          service: backend
+        annotations:
+          summary: Alex backend JVM heap pressure is high
+          description: JVM heap usage has been above 85% for at least 15 minutes.
+
+  - name: alex-monitoring-health
+    rules:
+      - alert: PrometheusConfigReloadFailed
+        expr: prometheus_config_last_reload_successful != 1
+        for: 5m
+        labels:
+          severity: critical
+          service: monitoring
+        annotations:
+          summary: Prometheus configuration reload failed
+          description: Prometheus failed to apply the current configuration.
+
+      - alert: AlertmanagerDown
+        expr: up{job="alertmanager"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: monitoring
+        annotations:
+          summary: Alertmanager is down
+          description: Prometheus has not been able to scrape Alertmanager for at least 5 minutes.

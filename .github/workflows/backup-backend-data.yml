@@ -1,0 +1,62 @@
+name: Backup Backend Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      remote_dir:
+        description: "Target directory on the deployment host"
+        required: true
+        default: "/opt/alex"
+      backup_root:
+        description: "Directory on the remote host where backups should be stored"
+        required: true
+        default: "./backups"
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      REMOTE_DIR: ${{ inputs.remote_dir }}
+      BACKUP_ROOT: ${{ inputs.backup_root }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate backup secrets
+        run: |
+          test -n "${DEPLOY_HOST}" || { echo "DEPLOY_HOST is required"; exit 1; }
+          test -n "${DEPLOY_USER}" || { echo "DEPLOY_USER is required"; exit 1; }
+          test -n "${DEPLOY_SSH_KEY}" || { echo "DEPLOY_SSH_KEY is required"; exit 1; }
+          test -n "${DEPLOY_KNOWN_HOSTS}" || { echo "DEPLOY_KNOWN_HOSTS is required"; exit 1; }
+
+      - name: Prepare SSH
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Upload backup scripts
+        run: |
+          REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
+          PORT="${DEPLOY_PORT:-22}"
+          ssh -p "${PORT}" "${REMOTE}" "mkdir -p '${REMOTE_DIR}/infra/scripts'"
+          scp -P "${PORT}" infra/scripts/backup.sh "${REMOTE}:${REMOTE_DIR}/infra/scripts/backup.sh"
+          scp -P "${PORT}" infra/scripts/wait-for-http.sh "${REMOTE}:${REMOTE_DIR}/infra/scripts/wait-for-http.sh"
+
+      - name: Run remote backup
+        run: |
+          REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
+          PORT="${DEPLOY_PORT:-22}"
+          ssh -p "${PORT}" "${REMOTE}" "
+            set -euo pipefail
+            cd '${REMOTE_DIR}'
+            chmod +x infra/scripts/backup.sh infra/scripts/wait-for-http.sh
+            ./infra/scripts/backup.sh .env.deploy '${BACKUP_ROOT}'
+          "

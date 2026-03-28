@@ -1,0 +1,87 @@
+name: Deploy Backend
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Backend image tag to deploy from ghcr.io/<owner>/alex-backend"
+        required: true
+        default: "latest"
+      remote_dir:
+        description: "Target directory on the deployment host"
+        required: true
+        default: "/opt/alex"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+      DEPLOY_REGISTRY_USERNAME: ${{ secrets.DEPLOY_REGISTRY_USERNAME }}
+      DEPLOY_REGISTRY_TOKEN: ${{ secrets.DEPLOY_REGISTRY_TOKEN }}
+      REMOTE_DIR: ${{ inputs.remote_dir }}
+      BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/alex-backend:${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate deployment secrets
+        run: |
+          test -n "${DEPLOY_HOST}" || { echo "DEPLOY_HOST is required"; exit 1; }
+          test -n "${DEPLOY_USER}" || { echo "DEPLOY_USER is required"; exit 1; }
+          test -n "${DEPLOY_SSH_KEY}" || { echo "DEPLOY_SSH_KEY is required"; exit 1; }
+          test -n "${DEPLOY_KNOWN_HOSTS}" || { echo "DEPLOY_KNOWN_HOSTS is required"; exit 1; }
+
+      - name: Prepare SSH
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "${DEPLOY_KNOWN_HOSTS}" > ~/.ssh/known_hosts
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Upload deployment bundle
+        run: |
+          REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
+          PORT="${DEPLOY_PORT:-22}"
+          ssh -p "${PORT}" "${REMOTE}" "mkdir -p '${REMOTE_DIR}/infra/scripts' '${REMOTE_DIR}/infra/postgres' '${REMOTE_DIR}/infra/cassandra' '${REMOTE_DIR}/infra/caddy' '${REMOTE_DIR}/infra/alertmanager' '${REMOTE_DIR}/infra/prometheus/alerts'"
+          scp -P "${PORT}" docker-compose.deploy.yml "${REMOTE}:${REMOTE_DIR}/docker-compose.deploy.yml"
+          scp -P "${PORT}" DEPLOYMENT.md "${REMOTE}:${REMOTE_DIR}/DEPLOYMENT.md"
+          scp -P "${PORT}" infra/scripts/backup.sh "${REMOTE}:${REMOTE_DIR}/infra/scripts/backup.sh"
+          scp -P "${PORT}" infra/scripts/backup.ps1 "${REMOTE}:${REMOTE_DIR}/infra/scripts/backup.ps1"
+          scp -P "${PORT}" infra/scripts/deploy.sh "${REMOTE}:${REMOTE_DIR}/infra/scripts/deploy.sh"
+          scp -P "${PORT}" infra/scripts/wait-for-http.sh "${REMOTE}:${REMOTE_DIR}/infra/scripts/wait-for-http.sh"
+          scp -P "${PORT}" infra/scripts/restore.sh "${REMOTE}:${REMOTE_DIR}/infra/scripts/restore.sh"
+          scp -P "${PORT}" infra/scripts/restore.ps1 "${REMOTE}:${REMOTE_DIR}/infra/scripts/restore.ps1"
+          scp -P "${PORT}" infra/scripts/validate-backend-image.sh "${REMOTE}:${REMOTE_DIR}/infra/scripts/validate-backend-image.sh"
+          scp -P "${PORT}" infra/scripts/validate-backend-image.ps1 "${REMOTE}:${REMOTE_DIR}/infra/scripts/validate-backend-image.ps1"
+          scp -P "${PORT}" infra/postgres/init.sql "${REMOTE}:${REMOTE_DIR}/infra/postgres/init.sql"
+          scp -P "${PORT}" infra/cassandra/init.cql "${REMOTE}:${REMOTE_DIR}/infra/cassandra/init.cql"
+          scp -P "${PORT}" infra/caddy/Caddyfile "${REMOTE}:${REMOTE_DIR}/infra/caddy/Caddyfile"
+          scp -P "${PORT}" infra/alertmanager/alertmanager.yml "${REMOTE}:${REMOTE_DIR}/infra/alertmanager/alertmanager.yml"
+          ssh -p "${PORT}" "${REMOTE}" "mkdir -p '${REMOTE_DIR}/infra/prometheus' '${REMOTE_DIR}/infra/grafana/provisioning/datasources' '${REMOTE_DIR}/infra/grafana/provisioning/dashboards' '${REMOTE_DIR}/infra/grafana/dashboards'"
+          scp -P "${PORT}" infra/prometheus/prometheus.yml "${REMOTE}:${REMOTE_DIR}/infra/prometheus/prometheus.yml"
+          scp -P "${PORT}" infra/prometheus/alerts/backend.yml "${REMOTE}:${REMOTE_DIR}/infra/prometheus/alerts/backend.yml"
+          scp -P "${PORT}" infra/grafana/provisioning/datasources/prometheus.yml "${REMOTE}:${REMOTE_DIR}/infra/grafana/provisioning/datasources/prometheus.yml"
+          scp -P "${PORT}" infra/grafana/provisioning/dashboards/default.yml "${REMOTE}:${REMOTE_DIR}/infra/grafana/provisioning/dashboards/default.yml"
+          scp -P "${PORT}" infra/grafana/dashboards/alex-backend-overview.json "${REMOTE}:${REMOTE_DIR}/infra/grafana/dashboards/alex-backend-overview.json"
+
+      - name: Run remote deploy
+        run: |
+          REMOTE="${DEPLOY_USER}@${DEPLOY_HOST}"
+          PORT="${DEPLOY_PORT:-22}"
+          ssh -p "${PORT}" "${REMOTE}" "
+            set -euo pipefail
+            cd '${REMOTE_DIR}'
+            chmod +x infra/scripts/deploy.sh infra/scripts/wait-for-http.sh
+            if [ -n '${DEPLOY_REGISTRY_USERNAME}' ] && [ -n '${DEPLOY_REGISTRY_TOKEN}' ]; then
+              printf '%s' '${DEPLOY_REGISTRY_TOKEN}' | docker login ghcr.io -u '${DEPLOY_REGISTRY_USERNAME}' --password-stdin
+            fi
+            export ALEX_BACKEND_IMAGE='${BACKEND_IMAGE}'
+            ./infra/scripts/deploy.sh .env.deploy
+          "

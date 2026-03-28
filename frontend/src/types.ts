@@ -12,6 +12,57 @@ export type AuthSession = {
   trustedSession: boolean;
 };
 
+export type FeatureProfile = {
+  productProfile: string;
+  stories: boolean;
+  bots: boolean;
+  calls: boolean;
+  directCalls: boolean;
+  groupCalls: boolean;
+  callJoinLinks: boolean;
+  callComments: boolean;
+  callReactions: boolean;
+  callModeration: boolean;
+  callScreenSharing: boolean;
+  callHandRaise: boolean;
+  callRecording: boolean;
+  secretChats: boolean;
+  adminCompliance: boolean;
+  lawfulDirectExport: boolean;
+  botApiFull: boolean;
+  business: boolean;
+  payments: boolean;
+  premium: boolean;
+  monetization: boolean;
+  translations: boolean;
+};
+
+export type SyncEvent = {
+  cursor: number;
+  eventType: string;
+  canonicalEventType: string;
+  legacyEventType: string | null;
+  transitionLegacyEvent: boolean;
+  entityType: string;
+  entityId: string | null;
+  chatId: string | null;
+  payloadJson: string;
+  createdAt: string;
+};
+
+export type ImportedPhoneContact = {
+  phoneNumber: string;
+  contactName?: string | null;
+};
+
+export type ImportContactsResult = {
+  importedCount: number;
+  matchedCount: number;
+  persistedMatches: boolean;
+  unmatchedPhoneNumbers: string[];
+  matchedUsers: Contact[];
+};
+
 export type AuthFlowResult = {
   authenticated: boolean;
   requiresTwoFactor: boolean;
@@ -84,10 +135,89 @@ export type UserSession = {
   trustedAt: string | null;
 };
 
+export type AuthSecurityEvent = {
+  eventId: string;
+  userId: string;
+  sessionId: string;
+  eventType: string;
+  severity: string;
+  ipAddress: string | null;
+  userAgent: string | null;
+  deviceName: string | null;
+  platform: string | null;
+  appVersion: string | null;
+  details: string | null;
+  createdAt: string;
+};
+
 export type TwoFactorStatus = {
   enabled: boolean;
   hint: string | null;
   enabledAt: string | null;
+};
+
+export type PasskeyCredential = {
+  credentialId: string;
+  externalCredentialId: string;
+  label: string | null;
+  transports: string | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+};
+
+export type DevicePasskey = {
+  credentialId: string;
+  publicKey: string;
+  phoneNumber: string;
+  label: string | null;
+  createdAt: string;
+  lastUsedAt: string | null;
+};
+
+export type PasskeyRegistrationOptions = {
+  challengeId: string;
+  challenge: string;
+  userId: string;
+  userName: string;
+  displayName: string;
+  expiresAt: string;
+};
+
+export type PasskeyLoginOptions = {
+  challengeId: string;
+  challenge: string;
+  userId: string;
+  phoneNumber: string;
+  expiresAt: string;
+};
+
+export type PhoneChangeChallenge = {
+  challengeId: string;
+  newPhoneNumber: string;
+  expiresAt: string;
+  debugCode: string | null;
+};
+
+export type AccountExportJob = {
+  jobId: string;
+  status: string;
+  format: string;
+  includeAttachmentsMetadata: boolean;
+  messageCount: number;
+  artifactChecksum: string | null;
+  artifactLocation: string | null;
+  createdAt: string;
+  completedAt: string | null;
+};
+
+export type AccountDeletionJob = {
+  jobId: string;
+  triggerType: string;
+  status: string;
+  reason: string | null;
+  scheduledFor: string | null;
+  createdAt: string;
+  executedAt: string | null;
 };
 
 export type ChatSummary = {
@@ -122,11 +252,14 @@ export type ChatSummary = {
   draftText: string | null;
   draftUpdatedAt: string | null;
   mutedUntil: string | null;
+  pinned: boolean;
+  pinOrder: number | null;
   pinnedMessageId: string | null;
   joinRequiresApproval: boolean;
   commentsEnabled: boolean;
   reactionsEnabled: boolean;
   crossPostingEnabled: boolean;
+  markedUnread: boolean;
 };
 
 export type ChatAnalytics = {
@@ -142,6 +275,36 @@ export type ChatAnalytics = {
   reactionsLast24h: number;
   commentsLast24h: number;
   lastMessageAt: string | null;
+};
+
+export type LeaveChatResult = {
+  chatId: string;
+  userId: string;
+  status: string;
+  leftAt: string;
+};
+
+export type ClearHistoryResult = {
+  chatId: string;
+  topicId: string | null;
+  upToMessageId: string | null;
+  clearedMessageCount: number;
+  clearedAt: string;
+};
+
+export type ChatReportReceipt = {
+  reportId: string;
+  chatId: string;
+  category: string;
+  createdAt: string;
+};
+
+export type MessageReportReceipt = {
+  reportId: string;
+  messageId: string;
+  chatId: string;
+  category: string;
+  createdAt: string;
 };
 
 export type ChatMessage = {
@@ -166,6 +329,7 @@ export type ChatMessage = {
   caption: string | null;
   silent: boolean;
   location: MessageLocation | null;
+  liveLocation?: MessageLiveLocation | null;
   contactCard: MessageContactCard | null;
   serviceMessage: MessageServiceInfo | null;
   createdAt: string;
@@ -199,6 +363,7 @@ export type ScheduledMessage = {
   caption: string | null;
   silent: boolean;
   location: MessageLocation | null;
+  liveLocation?: MessageLiveLocation | null;
   contactCard: MessageContactCard | null;
   serviceMessage: MessageServiceInfo | null;
   replyToMessageId: string | null;
@@ -227,6 +392,32 @@ export type MessageAttachment = {
   streamingSupported: boolean;
   localUri?: string | null;
   uploadState?: "UPLOADED" | "PENDING_UPLOAD";
+};
+
+export type SharedMediaEntry = {
+  chatId: string;
+  messageId: string;
+  createdAt: string;
+  senderDisplayName: string | null;
+  caption: string | null;
+  attachment: MessageAttachment;
+};
+
+export type SharedMediaLink = {
+  linkId: string;
+  chatId: string;
+  messageId: string;
+  createdAt: string;
+  url: string;
+  label: string | null;
+};
+
+export type SharedMediaBuckets = {
+  chatId: string;
+  media: SharedMediaEntry[];
+  files: SharedMediaEntry[];
+  links: SharedMediaLink[];
+  loadedAt: string;
 };
 
 export type AttachmentAccess = {
@@ -262,6 +453,18 @@ export type MessageLocation = {
   longitude: number;
   title: string | null;
   address: string | null;
+};
+
+export type MessageLiveLocation = {
+  latitude: number;
+  longitude: number;
+  title: string | null;
+  address: string | null;
+  livePeriodSeconds: number | null;
+  expiresAt: string | null;
+  lastUpdatedAt: string | null;
+  stoppedAt: string | null;
+  active: boolean | null;
 };
 
 export type MessageContactCard = {
@@ -419,6 +622,20 @@ export type UserProfile = {
   storyPrivacy: "EVERYBODY" | "CONTACTS" | "NOBODY";
   lastSeenAt: string | null;
   online: boolean;
+};
+
+export type PrivacyExceptions = {
+  phoneAllowedUserIds: string[];
+  phoneDisallowedUserIds: string[];
+  lastSeenAllowedUserIds: string[];
+  lastSeenDisallowedUserIds: string[];
+  storyAllowedUserIds: string[];
+  storyDisallowedUserIds: string[];
+};
+
+export type LanguagePreferences = {
+  preferredLanguage: string | null;
+  translationTargetLanguage: string | null;
 };
 
 export type UserPresenceStatus = {
@@ -879,4 +1096,122 @@ export type CallMediaState = {
   peers: CallMediaPeerState[];
   error: string | null;
   requiresNativeBuild: boolean;
+};
+
+export type ChatListFilter =
+  | "ALL"
+  | "UNREAD"
+  | "PEOPLE"
+  | "GROUPS"
+  | "CHANNELS"
+  | "BOTS";
+
+export type NotificationSettings = {
+  privateChatsEnabled: boolean;
+  groupChatsEnabled: boolean;
+  channelChatsEnabled: boolean;
+  storyNotificationsEnabled: boolean;
+  includeMessagePreview: boolean;
+  reactionNotificationsEnabled: boolean;
+  inAppSoundsEnabled: boolean;
+  vibrateEnabled: boolean;
+};
+
+export type DataStorageSettings = {
+  autoDownloadOnCellular: boolean;
+  autoDownloadOnWifi: boolean;
+  autoplayGifs: boolean;
+  autoplayVideos: boolean;
+  saveIncomingPhotosToGallery: boolean;
+  useLessDataForCalls: boolean;
+  keepDownloadedMediaDays: number;
+};
+
+export type AppearanceSettings = {
+  compactChatList: boolean;
+  showChatAvatars: boolean;
+  showLinkPreviews: boolean;
+  enterSendsMessage: boolean;
+  largeEmojiEnabled: boolean;
+  animatedStickerLoops: boolean;
+};
+
+export type ChatListState = {
+  searchQuery: string;
+  selectedFilter: ChatListFilter;
+  selectedFolderId: string | null;
+};
+
+export type MessageSelectionState = {
+  active: boolean;
+  selectedMessageIds: string[];
+};
+
+export type ChatRowViewModel = {
+  chatId: string;
+  title: string;
+  subtitle: string;
+  trailingLabel: string;
+  badges: Array<{
+    label: string;
+    tone: "brand" | "default" | "muted" | "success" | "warning";
+  }>;
+  draftLabel: string | null;
+  aboutLabel: string | null;
+  autoDeleteLabel: string | null;
+};
+
+export type DisclosureState = {
+  privacyAcknowledgedAt: string | null;
+};
+
+export type AccountState = {
+  session: AuthSession;
+  featureProfile: FeatureProfile | null;
+  chats: ChatSummary[];
+  folders: ChatFolder[];
+  messagesByChat: Record<string, ChatMessage[]>;
+  notificationSettings?: NotificationSettings;
+  dataStorageSettings?: DataStorageSettings;
+  appearanceSettings?: AppearanceSettings;
+  chatListState?: ChatListState;
+  disclosureState?: DisclosureState;
+  lastActivatedAt: string;
+};
+
+export type LocalAccount = {
+  accountId: string;
+  session: AuthSession;
+  featureProfile: FeatureProfile | null;
+  notificationSettings?: NotificationSettings;
+  dataStorageSettings?: DataStorageSettings;
+  appearanceSettings?: AppearanceSettings;
+  chatListState?: ChatListState;
+  disclosureState?: DisclosureState;
+  lastActivatedAt: string;
+};
+
+export type AccountRegistry = {
+  activeAccountId: string | null;
+  accounts: LocalAccount[];
+};
+
+export type MediaComposerItem = {
+  localId: string;
+  uri: string;
+  name: string;
+  type: string;
+  width?: number | null;
+  height?: number | null;
+  durationMs?: number | null;
+  source: "CAMERA" | "LIBRARY";
+};
+
+export type DeviceContactRecord = {
+  contactId: string;
+  displayName: string;
+  phoneNumbers: string[];
+  firstName: string | null;
+  lastName: string | null;
+  thumbnailUri: string | null;
 };

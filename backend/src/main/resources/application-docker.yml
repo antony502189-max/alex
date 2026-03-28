@@ -1,0 +1,14 @@
+spring:
+  config:
+    activate:
+      on-profile: docker
+
+management:
+  endpoint:
+    health:
+      show-details: never
+
+alex:
+  auth:
+    code:
+      expose-debug-code: false

@@ -7,21 +7,31 @@
     "ios": {
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Voice messages and calls require microphone access.",
-        "NSCameraUsageDescription": "Video calls require camera access."
+        "NSCameraUsageDescription": "Camera access is used for photo capture, stories, and video calls.",
+        "NSPhotoLibraryUsageDescription": "Media library access is used to send photos and videos from your device.",
+        "NSContactsUsageDescription": "Contact access is used to show your local phonebook in the contacts screen.",
+        "NSLocationWhenInUseUsageDescription": "Location access is used to share your current and live location in chats."
       }
     },
     "android": {
       "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
         "CAMERA",
+        "READ_CONTACTS",
         "RECORD_AUDIO",
         "READ_MEDIA_IMAGES",
+        "READ_MEDIA_VIDEO",
         "POST_NOTIFICATIONS"
       ]
     },
     "plugins": [
+      "expo-image-picker",
       "expo-notifications",
       "expo-sqlite",
-      "expo-secure-store"
+      "expo-secure-store",
+      "expo-contacts",
+      "expo-location"
     ],
     "platforms": [
       "ios",

@@ -5,6 +5,15 @@ on:
   pull_request:
 
 jobs:
+  infra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate local compose
+        run: docker compose --env-file .env.local.example -f docker-compose.yml config > /tmp/alex-local-compose.yml
+      - name: Validate deploy compose
+        run: docker compose --env-file .env.deploy.example -f docker-compose.deploy.yml config > /tmp/alex-deploy-compose.yml
+
   backend:
     runs-on: ubuntu-latest
     defaults:
@@ -22,6 +31,25 @@ jobs:
       - name: Run backend integration tests
         run: mvn -B -P integration-tests verify
 
+  backend-image-smoke:
+    runs-on: ubuntu-latest
+    needs:
+      - backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build backend image smoke target
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          load: true
+          tags: alex-backend:ci
+          cache-from: type=gha,scope=backend-image
+          cache-to: type=gha,mode=max,scope=backend-image
+      - name: Verify packaged jar inside image
+        run: docker run --rm --entrypoint sh alex-backend:ci -c "test -s /app/app.jar"
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -38,3 +66,5 @@ jobs:
         run: npm ci
       - name: Typecheck frontend
         run: npm run typecheck
+      - name: Test frontend
+        run: npm test

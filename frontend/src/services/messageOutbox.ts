@@ -7,6 +7,7 @@ import type {
   ChatMessage,
   MessageAttachment,
   MessageContactCard,
+  MessageLiveLocation,
   MessageLocation,
   MessageServiceInfo,
   MessageTextEntity,
@@ -20,6 +21,7 @@ type OptimisticMessageDraft = {
   messageType?: string;
   caption?: string | null;
   silent?: boolean;
+  liveLocation?: MessageLiveLocation | null;
   location?: MessageLocation | null;
   contactCard?: MessageContactCard | null;
   serviceMessage?: MessageServiceInfo | null;
@@ -174,6 +176,7 @@ class MessageOutboxService {
       messageType: params.optimistic.messageType ?? "TEXT",
       caption: params.optimistic.caption ?? null,
       silent: params.optimistic.silent ?? false,
+      liveLocation: params.optimistic.liveLocation ?? null,
       location: params.optimistic.location ?? null,
       contactCard: params.optimistic.contactCard ?? null,
       serviceMessage: params.optimistic.serviceMessage ?? null,

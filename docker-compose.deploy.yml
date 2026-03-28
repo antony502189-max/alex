@@ -1,0 +1,253 @@
+name: ${COMPOSE_PROJECT_NAME:-alex-prod}
+
+services:
+  gateway:
+    image: ${ALEX_CADDY_IMAGE:-caddy:2.10}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+    environment:
+      ALEX_ACME_EMAIL: ${ALEX_ACME_EMAIL}
+      ALEX_PUBLIC_HOST: ${ALEX_PUBLIC_HOST}
+    ports:
+      - "${ALEX_PUBLIC_HTTP_PORT:-80}:80"
+      - "${ALEX_PUBLIC_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - alex
+
+  prometheus:
+    image: ${ALEX_PROMETHEUS_IMAGE:-prom/prometheus:latest}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
+      alertmanager:
+        condition: service_started
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${ALEX_PROMETHEUS_RETENTION:-15d}
+    ports:
+      - "127.0.0.1:${ALEX_PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts:/etc/prometheus/alerts:ro
+      - prometheus-data:/prometheus
+    networks:
+      - alex
+
+  alertmanager:
+    image: ${ALEX_ALERTMANAGER_IMAGE:-prom/alertmanager:latest}
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+      - --web.external-url=${ALEX_ALERTMANAGER_EXTERNAL_URL:-http://localhost:9093}
+      - --cluster.listen-address=
+    ports:
+      - "127.0.0.1:${ALEX_ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ./infra/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    networks:
+      - alex
+
+  grafana:
+    image: ${ALEX_GRAFANA_IMAGE:-grafana/grafana-oss:latest}
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_started
+    environment:
+      GF_SECURITY_ADMIN_USER: ${ALEX_GRAFANA_ADMIN_USER:-alex}
+      GF_SECURITY_ADMIN_PASSWORD: ${ALEX_GRAFANA_ADMIN_PASSWORD:-change-me}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL: ${ALEX_GRAFANA_ROOT_URL:-http://localhost:3000}
+    ports:
+      - "127.0.0.1:${ALEX_GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - alex
+
+  postgres:
+    image: ${ALEX_POSTGRES_IMAGE:-postgres:16}
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${ALEX_POSTGRES_DB:-alex}
+      POSTGRES_USER: ${ALEX_POSTGRES_USER:-alex}
+      POSTGRES_PASSWORD: ${ALEX_POSTGRES_PASSWORD:-alex}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    networks:
+      - alex
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ALEX_POSTGRES_USER:-alex} -d ${ALEX_POSTGRES_DB:-alex}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  cassandra:
+    image: ${ALEX_CASSANDRA_IMAGE:-cassandra:5.0}
+    restart: unless-stopped
+    environment:
+      CASSANDRA_CLUSTER_NAME: ${ALEX_CASSANDRA_CLUSTER_NAME:-alex-cluster}
+      CASSANDRA_DC: ${ALEX_CASSANDRA_DATACENTER:-dc1}
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      HEAP_NEWSIZE: ${ALEX_CASSANDRA_HEAP_NEWSIZE:-256M}
+      MAX_HEAP_SIZE: ${ALEX_CASSANDRA_MAX_HEAP_SIZE:-1024M}
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    networks:
+      - alex
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+      interval: 20s
+      timeout: 10s
+      retries: 20
+
+  cassandra-init:
+    image: ${ALEX_CASSANDRA_IMAGE:-cassandra:5.0}
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./infra/cassandra/init.cql:/init/init.cql:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - cqlsh cassandra 9042 -f /init/init.cql
+    networks:
+      - alex
+    restart: "no"
+
+  minio:
+    image: ${ALEX_MINIO_IMAGE:-minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1}
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${ALEX_MINIO_ROOT_USER:-alexminio}
+      MINIO_ROOT_PASSWORD: ${ALEX_MINIO_ROOT_PASSWORD:-alexminio-secret}
+    command: server /data --console-address ":9001"
+    ports:
+      - "${ALEX_MINIO_API_PORT:-9000}:9000"
+      - "${ALEX_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - alex
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9000/minio/health/live >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: ${ALEX_MINIO_CLIENT_IMAGE:-minio/mc:RELEASE.2025-08-13T08-35-41Z}
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${ALEX_MINIO_ROOT_USER:-alexminio}
+      MINIO_ROOT_PASSWORD: ${ALEX_MINIO_ROOT_PASSWORD:-alexminio-secret}
+      ALEX_S3_BUCKET: ${ALEX_S3_BUCKET:-alex-media}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing local/"$${ALEX_S3_BUCKET}"
+    networks:
+      - alex
+    restart: "no"
+
+  zookeeper:
+    image: ${ALEX_ZOOKEEPER_IMAGE:-confluentinc/cp-zookeeper:7.7.1}
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - alex
+
+  kafka:
+    image: ${ALEX_KAFKA_IMAGE:-confluentinc/cp-kafka:7.7.1}
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - alex
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:29092 --list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  backend:
+    image: ${ALEX_BACKEND_IMAGE}
+    pull_policy: always
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cassandra-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      SPRING_PROFILES_ACTIVE: ${ALEX_BACKEND_PROFILE:-docker}
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/${ALEX_POSTGRES_DB:-alex}
+      POSTGRES_USER: ${ALEX_POSTGRES_USER:-alex}
+      POSTGRES_PASSWORD: ${ALEX_POSTGRES_PASSWORD:-alex}
+      CASSANDRA_CONTACT_POINTS: cassandra
+      CASSANDRA_PORT: 9042
+      CASSANDRA_KEYSPACE: ${ALEX_CASSANDRA_KEYSPACE:-alex_messenger}
+      CASSANDRA_DATACENTER: ${ALEX_CASSANDRA_DATACENTER:-dc1}
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      ALEX_S3_ENDPOINT: http://minio:9000
+      ALEX_S3_PUBLIC_ENDPOINT: ${ALEX_S3_PUBLIC_ENDPOINT}
+      ALEX_S3_ACCESS_KEY: ${ALEX_MINIO_ROOT_USER:-alexminio}
+      ALEX_S3_SECRET_KEY: ${ALEX_MINIO_ROOT_PASSWORD:-alexminio-secret}
+      ALEX_S3_BUCKET: ${ALEX_S3_BUCKET:-alex-media}
+      ALEX_JWT_SECRET: ${ALEX_JWT_SECRET}
+      ALEX_INTERNAL_SYSTEM_TOKEN: ${ALEX_INTERNAL_SYSTEM_TOKEN}
+      ALEX_LAWFUL_SYSTEM_TOKEN: ${ALEX_LAWFUL_SYSTEM_TOKEN}
+      ALEX_BOT_WEB_APP_INIT_SECRET: ${ALEX_BOT_WEB_APP_INIT_SECRET}
+      ALEX_COMPLIANCE_EXPORT_ENCRYPTION_SECRET: ${ALEX_COMPLIANCE_EXPORT_ENCRYPTION_SECRET}
+    ports:
+      - "127.0.0.1:${ALEX_BACKEND_PORT:-8080}:8080"
+    networks:
+      - alex
+
+volumes:
+  alertmanager-data:
+  caddy-data:
+  caddy-config:
+  grafana-data:
+  postgres-data:
+  prometheus-data:
+  cassandra-data:
+  minio-data:
+
+networks:
+  alex:
