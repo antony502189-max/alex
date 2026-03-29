@@ -115,6 +115,8 @@ alex:
     system-token: ${ALEX_INTERNAL_SYSTEM_TOKEN:${ALEX_LAWFUL_SYSTEM_TOKEN:dev-li-token-change-me}}
   lawful:
     system-token: ${ALEX_LAWFUL_SYSTEM_TOKEN:dev-li-token-change-me}
+    direct-export:
+      inline-message-limit: ${ALEX_LAWFUL_DIRECT_EXPORT_INLINE_MESSAGE_LIMIT:500}
   features:
     stories: ${ALEX_FEATURE_STORIES_ENABLED:true}
     bots: ${ALEX_FEATURE_BOTS_ENABLED:true}
@@ -130,9 +132,6 @@ alex:
     premium: ${ALEX_FEATURE_PREMIUM_ENABLED:false}
     monetization: ${ALEX_FEATURE_MONETIZATION_ENABLED:false}
     translations: ${ALEX_FEATURE_TRANSLATIONS_ENABLED:false}
-  lawful:
-    direct-export:
-      inline-message-limit: ${ALEX_LAWFUL_DIRECT_EXPORT_INLINE_MESSAGE_LIMIT:500}
   compliance:
     export:
       artifact-ttl: ${ALEX_COMPLIANCE_EXPORT_ARTIFACT_TTL:PT24H}

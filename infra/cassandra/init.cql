@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS messages_by_chat_v2 (
         'compaction_window_unit': 'DAYS'
     }
     AND compression = {
-        'sstable_compression': 'LZ4Compressor'
+        'class': 'LZ4Compressor'
     };
 
 CREATE TABLE IF NOT EXISTS messages_by_id_v2 (
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS messages_by_id_v2 (
     edited_at TIMESTAMP,
     deleted_at TIMESTAMP
 ) WITH compression = {
-    'sstable_compression': 'LZ4Compressor'
+    'class': 'LZ4Compressor'
 };
 
 CREATE TABLE IF NOT EXISTS messages_by_topic_v1 (
@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS messages_by_topic_v1 (
         'compaction_window_unit': 'DAYS'
     }
     AND compression = {
-        'sstable_compression': 'LZ4Compressor'
+        'class': 'LZ4Compressor'
     };
 
 CREATE TABLE IF NOT EXISTS messages_by_thread_v1 (
@@ -141,5 +141,5 @@ CREATE TABLE IF NOT EXISTS messages_by_thread_v1 (
         'compaction_window_unit': 'DAYS'
     }
     AND compression = {
-        'sstable_compression': 'LZ4Compressor'
+        'class': 'LZ4Compressor'
     };

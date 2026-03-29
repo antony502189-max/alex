@@ -2,6 +2,8 @@ spring:
   config:
     activate:
       on-profile: local
+  flyway:
+    baseline-on-migrate: true
 
 management:
   endpoint:

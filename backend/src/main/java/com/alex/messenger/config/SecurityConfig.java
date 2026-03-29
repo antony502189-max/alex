@@ -52,8 +52,8 @@ public class SecurityConfig {
                         .requestMatchers("/api/bot-api/**").hasRole("BOT_API")
                         .anyRequest().authenticated()
                 )
-                .addFilterBefore(internalApiTokenFilter, JwtAuthenticationFilter.class)
-                .addFilterBefore(botApiTokenFilter, JwtAuthenticationFilter.class)
+                .addFilterBefore(internalApiTokenFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(botApiTokenFilter, UsernamePasswordAuthenticationFilter.class)
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();

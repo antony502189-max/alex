@@ -74,7 +74,7 @@ public class CassandraSchemaInitializer {
                         'compaction_window_unit': 'DAYS'
                     }
                     AND compression = {
-                        'sstable_compression': 'LZ4Compressor'
+                        'class': 'LZ4Compressor'
                     }
                 """.formatted(keyspaceName);
     }
@@ -108,7 +108,7 @@ public class CassandraSchemaInitializer {
                     edited_at TIMESTAMP,
                     deleted_at TIMESTAMP
                 ) WITH compression = {
-                    'sstable_compression': 'LZ4Compressor'
+                    'class': 'LZ4Compressor'
                 }
                 """.formatted(keyspaceName);
     }
@@ -149,7 +149,7 @@ public class CassandraSchemaInitializer {
                         'compaction_window_unit': 'DAYS'
                     }
                     AND compression = {
-                        'sstable_compression': 'LZ4Compressor'
+                        'class': 'LZ4Compressor'
                     }
                 """.formatted(keyspaceName);
     }
@@ -190,7 +190,7 @@ public class CassandraSchemaInitializer {
                         'compaction_window_unit': 'DAYS'
                     }
                     AND compression = {
-                        'sstable_compression': 'LZ4Compressor'
+                        'class': 'LZ4Compressor'
                     }
                 """.formatted(keyspaceName);
     }
