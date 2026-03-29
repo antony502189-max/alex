@@ -3,6 +3,7 @@ import { ChatsListScreenContent } from "../components/chats/ChatsListScreenConte
 import { AppScreen } from "../components/ui/AppScreen";
 import { useChatsListController } from "../components/chats/useChatsListController";
 import type { ClientFeatureFlags } from "../config/featureFlags";
+import { formatPresenceStatus } from "../services/presence";
 import { appColors } from "../theme/tokens";
 import type { ChatSummary } from "../types";
 

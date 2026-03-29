@@ -14,7 +14,6 @@ export const useFeatureFlagsStore = create<FeatureFlagsState>((set) => ({
     set((state) => ({
       stories: flags?.stories ?? state.stories,
       bots: flags?.bots ?? state.bots,
-      calls: flags?.calls ?? state.calls,
-      secretChats: flags?.secretChats ?? state.secretChats
+      calls: flags?.calls ?? state.calls
     }))
 }));
