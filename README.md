@@ -1,257 +1,153 @@
-# Alex MVP
+# Alex
 
-## Current Status
+> Alex позиционируется как первый суверенный белорусский мессенджер нового поколения.
+>
+> Это не просто чат-клиент, а полноценная коммуникационная платформа со своим backend, мобильным приложением, real-time слоем, медиахранилищем, эксплуатационным контуром и заделом под масштабирование, бизнес-сценарии и национальную инфраструктуру.
 
-- The repository is already beyond the original MVP scope: it includes groups, channels, folders, invite links, forum topics, scheduled messages, polls, reactions, stickers, stories, calls, built-in bots, mini apps, sessions, push notifications, media storage, and secret chats.
-- The legacy README sections below describe an older subset of the product. Use the codebase as the source of truth until the remaining documentation is refreshed.
-- A direct lawful-export endpoint is no longer the supported interception surface. Internal exports now move through a case-based compliance workflow.
-- Authentication now supports `request-code`, `verify-code`, and `refresh` endpoints in addition to the legacy `/api/auth/login` fallback.
+## Что такое Alex
 
-## Feature Flags
+Alex создаётся как мобильный белорусский мессенджер, который можно разворачивать и развивать внутри собственного инфраструктурного контура без зависимости от чужого messaging backend. Проект уже давно вышел за рамки первоначального MVP: в репозитории есть не только личные переписки, но и группы, каналы, темы, папки, глобальный поиск, звонки, stories, боты, mini apps, секретные чаты, push-уведомления, управление сессиями, экспорт аккаунта, feature flags, наблюдаемость и production-ready deployment contour.
 
-Backend feature flags are available through Spring properties and environment variables:
+Под суверенностью в Alex понимается контроль над критическим ядром продукта:
 
-- `alex.features.stories` / `ALEX_FEATURE_STORIES_ENABLED`
-- `alex.features.bots` / `ALEX_FEATURE_BOTS_ENABLED`
-- `alex.features.calls` / `ALEX_FEATURE_CALLS_ENABLED`
-- `alex.features.secret-chats` / `ALEX_FEATURE_SECRET_CHATS_ENABLED`
-- `alex.features.admin-compliance` / `ALEX_FEATURE_ADMIN_COMPLIANCE_ENABLED`
-- `alex.features.lawful-direct-export` / `ALEX_FEATURE_LAWFUL_DIRECT_EXPORT_ENABLED`
-- `alex.features.group-calls` / `ALEX_FEATURE_GROUP_CALLS_ENABLED`
-- `alex.features.story-interactions` / `ALEX_FEATURE_STORY_INTERACTIONS_ENABLED`
-- `alex.features.bot-api-full` / `ALEX_FEATURE_BOT_API_FULL_ENABLED`
-- `alex.features.business` / `ALEX_FEATURE_BUSINESS_ENABLED`
-- `alex.features.payments` / `ALEX_FEATURE_PAYMENTS_ENABLED`
-- `alex.features.premium` / `ALEX_FEATURE_PREMIUM_ENABLED`
-- `alex.features.translations` / `ALEX_FEATURE_TRANSLATIONS_ENABLED`
+- собственный backend на `Spring Boot`
+- собственная модель хранения и маршрутизации сообщений
+- собственный real-time слой на `WebSocket/STOMP`
+- собственный data stack на `PostgreSQL`, `Cassandra`, `Kafka` и `MinIO`
+- собственный deploy-контур с `Caddy`, `Prometheus`, `Grafana`, `Alertmanager`, backup/restore и CI/CD
 
-Existing core flags default to `true`. Newly added roadmap flags default to `false`.
+Именно поэтому Alex можно описывать не как "ещё один мессенджер", а как основу для белорусской коммуникационной платформы полного цикла.
 
-## Internal Compliance API
+## Почему Alex выделяется
 
-Internal endpoints remain protected by `X-System-Token`, and compliance actions additionally require `X-Operator-Id` for attribution.
+- `Суверенный серверный контур.` Ядро продукта контролируется проектом: API, real-time доставка, базы данных, event bus, media storage, edge routing и эксплуатация разворачиваются в собственной инфраструктуре.
+- `Не узкий MVP, а широкая продуктовая платформа.` В кодовой базе уже есть чаты, каналы, звонки, stories, боты, mini apps, секретные чаты, бизнес-функции, платежные и premium-модули, а также монетизационный слой для каналов.
+- `Mobile-first подход.` У проекта есть реальный клиент на `React Native / Expo` с экранной моделью, офлайн-кэшем, outbox-паттерном, синхронизацией и поддержкой push-уведомлений.
+- `Инженерная зрелость.` Alex описывает не только продуктовые фичи, но и путь в production: CI, Docker Compose для local/deploy, image pipeline, remote deploy, monitoring, health checks и backup/restore.
+- `Безопасность и управляемость.` В платформе уже реализованы `JWT`, refresh token flow, 2FA, passkeys, QR login, управление сессиями, case-based compliance workflow и device-side криптография для secret chats.
+- `Поэтапный rollout.` Расширенные модули управляются через feature flags, что позволяет безопасно включать новый функционал без форка кодовой базы.
 
-Supported endpoints:
+## Основные возможности
 
-- `POST /api/internal/compliance/cases`
-- `GET /api/internal/compliance/cases/{caseId}`
-- `POST /api/internal/compliance/cases/{caseId}/approve`
-- `POST /api/internal/compliance/cases/{caseId}/exports`
-- `POST /api/internal/lawful/exports/direct`
+- `Авторизация и идентификация.` Запрос и подтверждение login-кода, refresh token flow, 2FA, passkeys, QR login, смена номера, security events и управление активными сессиями.
+- `Базовые коммуникации.` Direct chats, группы, каналы, Saved Messages, архив, папки, публичные username, join-by-link, join-by-username, join requests и модерация участников.
+- `Сообщения.` Текстовые сообщения, вложения, редактирование и удаление, пересылка, реакции, опросы, live location, scheduled messages, repeating messages, send-when-online и поиск по истории.
+- `Контент и discovery.` Глобальный поиск, поиск публичных чатов, темы в форумах, shared media, pinned messages, draft-сообщения и импорт контактов.
+- `Звонки.` RTC-конфиг, история звонков, активные вызовы, call join links, групповые звонки, комментарии, реакции, hand raise, screen sharing, moderation и recording surface.
+- `Stories.` Лента, архив, highlights, albums, viewers, реакции, replies, mentions, reshares и live-режим.
+- `Боты и mini apps.` Каталог ботов, команды, inline results, message actions, bot web apps, developer bot cabinet, rotation токенов, webhooks и подготовка к bot payments.
+- `Secret chats.` Отдельный приватный контур с device-side криптографией, локальным хранением ключей, таймерами удаления, защищёнными вложениями и screenshot events.
+- `Аккаунт и приватность.` Экспорт аккаунта, отложенное удаление, управление фото профиля, privacy settings, block/report flows и языковые настройки.
+- `Business и platform-модули.` Быстрые ответы, теги чатов, назначение операторов, payments, premium, monetization, translations и compliance/export workflow уже присутствуют в кодовой базе и готовы к поэтапному включению через флаги.
 
-MVP кроссплатформенного мессенджера с backend на Spring Boot 3 / Java 17 и frontend на React Native / Expo.
+## В чём уникальность Alex для рынка РБ
 
-## Scope MVP
+На белорусском рынке редко встречается сочетание сразу четырёх качеств в одном проекте:
 
-- моковая авторизация по номеру телефона с выдачей JWT
-- список direct-чатов пользователя
-- отправка текстового сообщения 1-на-1
-- server-side encryption без E2E
-- хранение ключей чатов в PostgreSQL
-- хранение сообщений в Cassandra
-- маршрутизация событий сообщений через Kafka
-- доставка сообщения получателю через WebSocket STOMP
+- `локальная идентичность продукта`
+- `собственный серверный и инфраструктурный контур`
+- `массовый consumer-сценарий, а не только закрытый корпоративный периметр`
+- `реальная инженерная готовность к эксплуатации, а не только презентационный прототип`
 
-## Стек
+В отличие от решений, которые либо ориентированы на узкий государственный или корпоративный контур, либо завязаны на внешние платформы, Alex строится как собственная коммуникационная экосистема. Здесь есть не только переписка, но и продуктовая глубина: чаты, звонки, stories, боты, mini apps, офлайн-режим, администрирование, наблюдаемость, бэкапы и масштабируемая архитектура данных.
 
-- Frontend: React Native, Expo, TypeScript, Zustand, STOMP WebSocket
-- Backend: Java 17+, Spring Boot 3, Spring Security, Spring WebSocket, Spring Kafka
-- PostgreSQL: пользователи, чаты, ключи шифрования
-- Cassandra: сообщения
-- Kafka + Zookeeper: message bus
+Именно это делает Alex сильным кандидатом на роль первого по-настоящему суверенного белорусского мессенджера нового поколения.
 
-## Структура
+## Архитектура платформы
+
+```mermaid
+flowchart LR
+  A["Mobile Client<br/>React Native / Expo"] -->|"REST + WebSocket / STOMP"| B["Alex Backend<br/>Spring Boot"]
+  H["Caddy Edge"] --> B
+  B --> C["PostgreSQL<br/>users, chats, metadata"]
+  B --> D["Cassandra<br/>message history"]
+  B --> E["Kafka<br/>event backbone"]
+  B --> F["MinIO / S3<br/>media storage"]
+  B --> G["Prometheus / Grafana / Alertmanager<br/>monitoring"]
+```
+
+Архитектурно Alex опирается на разделение ролей:
+
+- `React Native / Expo` отвечает за мобильный UX, локальное состояние, offline cache, outbox и device capabilities.
+- `Spring Boot` закрывает API, безопасность, бизнес-логику, real-time доставку, feature flags и product orchestration.
+- `PostgreSQL` хранит строго согласованные сущности: пользователи, чаты, ключи, профили, метаданные.
+- `Cassandra` забирает на себя историю сообщений и высоконагруженный append-heavy контур.
+- `Kafka` выступает как событийная шина для delivery, fanout, синхронизации, расширения платформы и фоновых процессов.
+- `MinIO` даёт собственное S3-совместимое медиахранилище.
+
+## Технологический стек
+
+| Слой | Технологии | Роль |
+| --- | --- | --- |
+| Mobile | `React Native`, `Expo`, `TypeScript`, `Zustand`, `React Navigation` | Кроссплатформенный клиент, мобильный UX и локальное состояние |
+| Real-time | `WebSocket`, `STOMP`, `react-native-webrtc` | Доставка событий, чаты и звонки |
+| Offline layer | `expo-sqlite`, `expo-secure-store` | Кэш чатов, outbox, sync cursor, локальные ключи |
+| Security | `JWT`, refresh tokens, `2FA`, passkeys, QR login, `tweetnacl` | Идентификация, защита аккаунта и secret chats |
+| Backend | `Java 17`, `Spring Boot 3.5`, `Spring Security`, `Spring WebSocket`, `Spring Data JPA`, `Spring Kafka`, `Flyway` | API, бизнес-логика, real-time, миграции и event-driven flow |
+| Data | `PostgreSQL`, `Cassandra` | Транзакционные данные и история сообщений |
+| Media | `MinIO` | S3-совместимое хранение файлов и медиаконтента |
+| Infra | `Docker Compose`, `Caddy`, `Prometheus`, `Grafana`, `Alertmanager` | Локальный запуск, production edge, мониторинг и алертинг |
+| CI/CD | `GitHub Actions`, `GHCR` | CI, image build/publish, remote deploy и backup workflows |
+| Testing | `JUnit`, `Spring Boot Test`, `Testcontainers`, `Jest`, `@testing-library/react-native` | Unit, integration и UI-level regression checks |
+
+## Что особенно важно с инженерной точки зрения
+
+- `Feature flags.` В backend уже есть флаги для `stories`, `bots`, `calls`, `secret chats`, `admin compliance`, `group calls`, `story interactions`, а также задел под `business`, `payments`, `premium`, `monetization` и `translations`.
+- `Offline resilience.` Мобильный клиент использует локальную `SQLite` базу, хранит кэш чатов и сообщений, поддерживает outbox и синхронизацию событий через `/api/sync/events`.
+- `Нормальная эксплуатация.` В репозитории уже есть health checks, `Prometheus` metrics, `Grafana` dashboard, `Alertmanager`, deploy scripts и volume-level backup/restore.
+- `Проработанный auth stack.` Это не один login endpoint: есть OTP flow, refresh tokens, passkeys, QR login, смена номера и управление устройствами.
+- `Готовность к расширению.` Боты, mini apps, бизнес-профили, платежи, premium и монетизация встроены как модули платформы, а не как внешняя надстройка.
+
+## Структура репозитория
 
 ```text
 .
-├── docker-compose.yml
-├── infra
-│   ├── postgres/init.sql
-│   └── cassandra/init.cql
-├── backend
-│   ├── pom.xml
-│   └── src/main
-│       ├── java/com/alex/messenger
-│       └── resources
-└── frontend
-    ├── package.json
-    ├── App.tsx
-    └── src
+|-- backend/     # Spring Boot backend, API, бизнес-логика, real-time, data model
+|-- frontend/    # React Native / Expo mobile client
+|-- infra/       # Caddy, Prometheus, Grafana, Alertmanager, scripts, init files
+|-- docker-compose.yml
+|-- docker-compose.deploy.yml
+|-- ARCHITECTURE.md
+|-- DEPLOYMENT.md
+|-- LOCAL_SETUP.md
+`-- smoke-test.ps1
 ```
 
-## Требования
+## Быстрый старт
 
-- Docker Desktop / Docker Compose
-- JDK 17+
-- Maven 3.9+
-- Node.js 20+
-- npm 10+
+Актуальная документация по запуску и эксплуатации:
 
-Для локальной backend-разработки в репозитории зафиксирован SDKMAN runtime:
+- [LOCAL_SETUP.md](LOCAL_SETUP.md) — локальный Windows bootstrap и smoke flow
+- [ARCHITECTURE.md](ARCHITECTURE.md) — архитектурные решения и масштабирование
+- [DEPLOYMENT.md](DEPLOYMENT.md) — deploy-контур, мониторинг и backup/restore
 
-```bash
+Минимальный локальный запуск:
+
+```powershell
+docker compose up -d postgres cassandra cassandra-init minio minio-init zookeeper kafka
+
 cd backend
-sdk env install
-sdk env
-java -version
-```
+.\mvnw.cmd spring-boot:run
 
-`.sdkmanrc` в `backend/` закрепляет `Java 17`.
-
-## Запуск
-
-### 1. Инфраструктура
-
-```powershell
-cd E:\Alex
-docker compose up -d
-```
-
-### 2. Backend
-
-```powershell
-cd E:\Alex\backend
-./mvnw spring-boot:run
-```
-
-Backend по умолчанию поднимается на `http://localhost:8080`.
-
-Для backend-only MVP профиля:
-
-```bash
-cd backend
-SPRING_PROFILES_ACTIVE=mvp ./mvnw spring-boot:run
-```
-
-Альтернативно backend можно запустить вместе с инфраструктурой через Docker Compose:
-
-```powershell
-docker compose up --build backend
-```
-
-### 3. Frontend
-
-```powershell
-cd E:\Alex\frontend
+cd ..\frontend
 npm install
 npm start
 ```
 
-Если нужно явно задать адреса backend и WebSocket:
+Для проверки локального контура:
 
 ```powershell
-$env:EXPO_PUBLIC_API_BASE_URL="http://localhost:8080/api"
-$env:EXPO_PUBLIC_WS_URL="ws://localhost:8080/ws"
-npm start
-```
-
-Для Android emulator по умолчанию уже используется `10.0.2.2`.
-
-## Основные API
-
-### Login
-
-`POST /api/auth/login`
-
-```json
-{
-  "phoneNumber": "+375291111111",
-  "displayName": "Alex A"
-}
-```
-
-### Chats
-
-`GET /api/chats`
-
-Header:
-
-```text
-Authorization: Bearer <jwt>
-```
-
-### Send Message
-
-`POST /api/messages`
-
-```json
-{
-  "recipientUserId": "c9fe6d42-0d03-4d41-9ac5-31d48adcb7e9",
-  "text": "Привет"
-}
-```
-
-Или в существующий чат:
-
-```json
-{
-  "chatId": "4c2d1a6d-d39e-4c47-8fcb-b1d2e1ef8bd8",
-  "text": "Привет еще раз"
-}
-```
-
-### History
-
-`GET /api/messages/chat/{chatId}?limit=50`
-
-## Message Flow
-
-1. Клиент вызывает `POST /api/messages`.
-2. Backend находит или создает direct-chat.
-3. Backend получает chat key из PostgreSQL.
-4. Сообщение шифруется на сервере через AES/GCM.
-5. Ciphertext сохраняется в Cassandra.
-6. Событие сообщения публикуется в Kafka topic `chat-messages`.
-7. Kafka listener читает событие.
-8. Backend расшифровывает payload на сервере.
-9. Получатель получает сообщение по WebSocket STOMP через `/user/queue/messages`.
-
-## Безопасность
-
-- E2E шифрование отсутствует намеренно.
-- Используется только server-side encryption.
-- Ключи чатов хранятся в PostgreSQL таблице `encryption_keys`.
-- JWT используется для REST и STOMP подключения.
-- Для lawful interception предусмотрен интерфейс `LawfulInterceptionService`.
-
-## Проверка
-
-Для локального smoke test:
-
-```powershell
-cd E:\Alex
 powershell -ExecutionPolicy Bypass -File .\smoke-test.ps1
 ```
 
-Для backend smoke / compile path:
+## Тестирование и CI/CD
 
-```powershell
-cd E:\Alex\backend
-./mvnw test
-```
+- `Frontend:` `npm run typecheck` и `npm test`
+- `Backend:` `mvn test`
+- `Integration:` `mvn -P integration-tests verify`
+- `CI:` в GitHub Actions валидируются compose-контуры, гоняются backend/frontend тесты и отдельно проверяется backend image smoke
+- `CD:` предусмотрены workflows для публикации backend image в `GHCR`, remote deploy и remote backup
 
-`./mvnw test` теперь гоняет unit-тесты без Docker-зависимого smoke.
+## Статус проекта
 
-Для Docker/Testcontainers integration smoke:
-
-```bash
-cd backend
-./mvnw -P integration-tests verify
-```
-
-## Ограничения MVP
-
-- нет SMS OTP и refresh token flow
-- только direct 1-на-1 чаты
-- нет вложений, статусов доставки и read receipts
-- для WebSocket используется in-memory simple broker
-- lawful interception пока только интерфейс-заглушка
-
-## Следующий этап для production
-
-- вынести WebSocket broker relay
-- добавить outbox/idempotency для publish в Kafka
-- добавить key rotation и KMS/HSM
-- ввести pagination и time-window queries для Cassandra
-- разделить auth, chat, message, notification сервисы
-- добавить observability: metrics, tracing, audit logs
+Alex уже не выглядит как "просто MVP". Репозиторий содержит полноценный фундамент мессенджера национального уровня: consumer core, real-time инфраструктуру, мобильный клиент, data stack, observability, deploy contour и платформенные расширения для дальнейшего роста. Это сильная база для продукта, который может развиваться и как массовый белорусский мессенджер, и как коммуникационная платформа для бизнеса, медиа, сообществ и сервисов.
