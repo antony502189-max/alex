@@ -67,6 +67,11 @@ jobs:
 
           git config user.name "antony502189-max"
           git config user.email "239196948+antony502189-max@users.noreply.github.com"
+          git config advice.detachedHead false
+
+          # Work on a named local branch. This makes retry/recovery operations
+          # predictable even when Actions checks out the workflow SHA detached.
+          git checkout -B backfill-work "$GITHUB_SHA"
 
           if ! date -d "$START_DATE" +%F >/dev/null 2>&1; then
             echo "Invalid start_date: $START_DATE"
@@ -118,29 +123,56 @@ jobs:
             printf '# Alex pre-March random backfill log\n\n' >> .backfill/pre-march-random-log.md
           fi
 
+          count_generated_for_author_date() {
+            local marker="$1"
+
+            # %ad with --date=short reads the AUTHOR date. Avoid --since/--until:
+            # those filters use commit dates and can miss backdated commits after
+            # a rebase or other history maintenance.
+            git log --all --format='%ad%x09%s' --date=short | \
+              awk -F '\t' -v d="$marker" '
+                $1 == d && index($2, "chore: alex random backfill " d " ") == 1 { count++ }
+                END { print count + 0 }
+              '
+          }
+
           push_progress() {
             local label="$1"
             local attempt
 
             echo "Pushing completed batch: ${label}"
-            for attempt in 1 2 3; do
-              git fetch origin main
 
-              if ! git merge-base --is-ancestor origin/main HEAD; then
-                echo "Remote main advanced; rebasing before retry."
-                git rebase origin/main
-              fi
-
+            for attempt in 1 2 3 4; do
+              # Fast path: normally main has not moved, so avoid a network fetch
+              # before every checkpoint.
               if git push origin HEAD:main; then
                 echo "Batch ${label} pushed successfully."
                 return 0
               fi
 
-              echo "Push attempt ${attempt}/3 failed for ${label}; retrying in 5s."
-              sleep 5
+              echo "Push attempt ${attempt}/4 failed for ${label}."
+
+              # A transient fetch failure must not terminate the whole run with
+              # git's exit code 128. Retry the batch instead.
+              if ! git fetch origin main; then
+                echo "Fetch failed; retrying batch in 8s."
+                sleep 8
+                continue
+              fi
+
+              if ! git merge-base --is-ancestor origin/main HEAD; then
+                echo "Remote main advanced; rebasing generated commits."
+                if ! git rebase origin/main; then
+                  echo "Rebase failed; aborting rebase cleanly."
+                  git rebase --abort || true
+                  return 1
+                fi
+              fi
+
+              sleep 8
             done
 
-            echo "Unable to push batch ${label} after 3 attempts."
+            echo "Unable to push batch ${label} after 4 attempts."
             return 1
           }
 
@@ -174,11 +206,7 @@ jobs:
               target_digest=$(printf '%s' "${PLAN_SEED}:target:${marker}" | sha256sum | cut -c1-8)
               target=$((1 + 0x${target_digest} % MAX_TARGET))
 
-              generated=$(git log --all \
-                --since="${marker}T00:00:00+03:00" \
-                --until="${next_marker}T00:00:00+03:00" \
-                --pretty='%s' | \
-                grep -Ec "^chore: alex random backfill ${marker} " || true)
+              generated=$(count_generated_for_author_date "$marker")
 
               observed=$graph_count
               if (( generated > observed )); then
@@ -211,7 +239,9 @@ jobs:
                   total_created=$((total_created + 1))
                   batch_created=$((batch_created + 1))
 
-                  if (( batch_created >= 350 )); then
+                  # Smaller checkpoints reduce the amount of local-only history
+                  # that can be lost if GitHub has a transient transport failure.
+                  if (( batch_created >= 150 )); then
                     push_progress "${batch_month}-${marker}-checkpoint"
                     batch_created=0
                   fi
