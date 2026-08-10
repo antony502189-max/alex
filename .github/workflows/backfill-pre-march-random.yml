@@ -1,0 +1,239 @@
+name: Random pre-March contribution backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: First date to consider (YYYY-MM-DD)
+        required: true
+        default: "2025-08-10"
+        type: string
+      end_date:
+        description: Last date to consider (YYYY-MM-DD)
+        required: true
+        default: "2026-02-28"
+        type: string
+      active_percent:
+        description: Approximate percentage of dates that receive synthetic activity
+        required: true
+        default: "62"
+        type: choice
+        options:
+          - "45"
+          - "55"
+          - "62"
+          - "70"
+          - "80"
+      max_target:
+        description: Maximum contribution target for an active date
+        required: true
+        default: "97"
+        type: choice
+        options:
+          - "54"
+          - "75"
+          - "97"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: alex-pre-march-random-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      START_DATE: ${{ inputs.start_date }}
+      END_DATE: ${{ inputs.end_date }}
+      ACTIVE_PERCENT: ${{ inputs.active_percent }}
+      MAX_TARGET: ${{ inputs.max_target }}
+      PLAN_SEED: "alex-pre-march-v1"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Generate deterministic random-looking activity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "antony502189-max"
+          git config user.email "239196948+antony502189-max@users.noreply.github.com"
+
+          if ! date -d "$START_DATE" +%F >/dev/null 2>&1; then
+            echo "Invalid start_date: $START_DATE"
+            exit 2
+          fi
+          if ! date -d "$END_DATE" +%F >/dev/null 2>&1; then
+            echo "Invalid end_date: $END_DATE"
+            exit 2
+          fi
+          if [[ "$END_DATE" < "$START_DATE" ]]; then
+            echo "end_date must not precede start_date"
+            exit 2
+          fi
+          if (( ACTIVE_PERCENT < 1 || ACTIVE_PERCENT > 100 )); then
+            echo "active_percent must be between 1 and 100"
+            exit 2
+          fi
+          if (( MAX_TARGET < 1 || MAX_TARGET > 97 )); then
+            echo "max_target must be between 1 and 97"
+            exit 2
+          fi
+
+          graph_from="${START_DATE}T00:00:00Z"
+          graph_to="$(date -d "${END_DATE} +1 day" +%F)T00:00:00Z"
+
+          gh api graphql \
+            -f query='query($from: DateTime!, $to: DateTime!) {
+              user(login: "antony502189-max") {
+                contributionsCollection(from: $from, to: $to) {
+                  contributionCalendar {
+                    weeks {
+                      contributionDays {
+                        date
+                        contributionCount
+                      }
+                    }
+                  }
+                }
+              }
+            }' \
+            -f from="$graph_from" \
+            -f to="$graph_to" \
+            > /tmp/alex-pre-march-contributions.json
+
+          mkdir -p .backfill
+          touch .backfill/pre-march-random-log.md
+
+          if ! grep -q '^# Alex pre-March random backfill log$' .backfill/pre-march-random-log.md; then
+            printf '# Alex pre-March random backfill log\n\n' >> .backfill/pre-march-random-log.md
+          fi
+
+          push_progress() {
+            local label="$1"
+            local attempt
+
+            echo "Pushing completed batch: ${label}"
+            for attempt in 1 2 3; do
+              git fetch origin main
+
+              if ! git merge-base --is-ancestor origin/main HEAD; then
+                echo "Remote main advanced; rebasing before retry."
+                git rebase origin/main
+              fi
+
+              if git push origin HEAD:main; then
+                echo "Batch ${label} pushed successfully."
+                return 0
+              fi
+
+              echo "Push attempt ${attempt}/3 failed for ${label}; retrying in 5s."
+              sleep 5
+            done
+
+            echo "Unable to push batch ${label} after 3 attempts."
+            return 1
+          }
+
+          current="$START_DATE"
+          total_created=0
+          active_dates=0
+          skipped_dates=0
+          batch_created=0
+          batch_month="${START_DATE:0:7}"
+
+          while [[ "$current" < "$END_DATE" || "$current" == "$END_DATE" ]]; do
+            marker="$current"
+            next_marker=$(date -d "${marker} +1 day" +%F)
+
+            graph_count=$(jq -r --arg date "$marker" '
+              [.data.user.contributionsCollection.contributionCalendar.weeks[]
+               .contributionDays[]
+               | select(.date == $date)
+               | .contributionCount][0] // 0
+            ' /tmp/alex-pre-march-contributions.json)
+
+            selector_digest=$(printf '%s' "${PLAN_SEED}:active:${marker}" | sha256sum | cut -c1-8)
+            selector=$((0x${selector_digest} % 100))
+
+            if (( selector >= ACTIVE_PERCENT )); then
+              echo "${marker}: inactive by deterministic random plan (roll=${selector})."
+              skipped_dates=$((skipped_dates + 1))
+            else
+              active_dates=$((active_dates + 1))
+
+              target_digest=$(printf '%s' "${PLAN_SEED}:target:${marker}" | sha256sum | cut -c1-8)
+              target=$((1 + 0x${target_digest} % MAX_TARGET))
+
+              generated=$(git log --all \
+                --since="${marker}T00:00:00+03:00" \
+                --until="${next_marker}T00:00:00+03:00" \
+                --pretty='%s' | \
+                grep -Ec "^chore: alex random backfill ${marker} " || true)
+
+              observed=$graph_count
+              if (( generated > observed )); then
+                observed=$generated
+              fi
+
+              if (( observed >= target )); then
+                echo "${marker}: observed=${observed}, target=${target}; no top-up required."
+              else
+                remaining=$((target - observed))
+                echo "${marker}: graph=${graph_count}, generated=${generated}, target=${target}, add=${remaining}."
+
+                for offset in $(seq 1 "$remaining"); do
+                  total_after=$((observed + offset))
+
+                  time_digest=$(printf '%s' "${PLAN_SEED}:time:${marker}:${total_after}" | sha256sum | cut -c1-8)
+                  minute_of_day=$((450 + 0x${time_digest} % 901))
+                  hour=$((minute_of_day / 60))
+                  minute=$((minute_of_day % 60))
+                  timestamp=$(printf '%sT%02d:%02d:00+03:00' "$marker" "$hour" "$minute")
+
+                  printf -- '- %s activity %02d/%02d\n' "$marker" "$total_after" "$target" \
+                    >> .backfill/pre-march-random-log.md
+                  git add .backfill/pre-march-random-log.md
+
+                  GIT_AUTHOR_DATE="$timestamp" \
+                  GIT_COMMITTER_DATE="$timestamp" \
+                    git commit -m "chore: alex random backfill ${marker} ${total_after}/${target}"
+
+                  total_created=$((total_created + 1))
+                  batch_created=$((batch_created + 1))
+
+                  if (( batch_created >= 350 )); then
+                    push_progress "${batch_month}-${marker}-checkpoint"
+                    batch_created=0
+                  fi
+                done
+              fi
+            fi
+
+            next_month="${next_marker:0:7}"
+            if [[ "$next_month" != "$batch_month" || "$marker" == "$END_DATE" ]]; then
+              if (( batch_created > 0 )); then
+                push_progress "$batch_month"
+              else
+                echo "Batch ${batch_month}: nothing new to push."
+              fi
+              batch_month="$next_month"
+              batch_created=0
+            fi
+
+            current="$next_marker"
+          done
+
+          echo "Active dates in plan: ${active_dates}"
+          echo "Inactive dates in plan: ${skipped_dates}"
+          echo "Created ${total_created} dated commits in total."
+          echo "Random pre-March backfill completed successfully."
