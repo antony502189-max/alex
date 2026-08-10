@@ -1,0 +1,29 @@
+name: Trigger pre-March backfill
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/trigger-pre-march-backfill.yml
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch fixed backfill workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run backfill-pre-march-random.yml \
+            --ref main \
+            -f start_date=2025-08-10 \
+            -f end_date=2026-02-28 \
+            -f active_percent=62 \
+            -f max_target=97
+          echo "Backfill workflow dispatched."
